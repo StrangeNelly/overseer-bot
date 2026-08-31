@@ -23,7 +23,7 @@ loadEnv({ path: fileURLToPath(new URL('../../../.env', import.meta.url)) });
 const config = loadConfig();
 const { db, client } = createDb(config.databaseUrl);
 const bot = createBot(config, db);
-const api = createApi(db);
+const api = createApi(db, bot.api, config);
 
 const server = serve({ fetch: api.fetch, port: config.port }, (info) => {
   console.log(`api listening on :${info.port}`);

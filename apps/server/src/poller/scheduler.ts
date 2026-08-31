@@ -168,7 +168,12 @@ async function applySnapshot(
       .where(and(eq(calls.tokenId, token.id), eq(calls.status, 'active')));
     for (const call of collapsed) {
       if (callLiquidityDeath(call.liquidityAtCall, snap.liquidityUsd)) {
-        await db.update(calls).set({ status: 'died' }).where(eq(calls.id, call.id));
+        // The token is still alive, so only the call carries this death: stamp
+        // it here or the board has no date/reason to show or sort by.
+        await db
+          .update(calls)
+          .set({ status: 'died', diedAt: new Date(), deathReason: 'call_liquidity_collapse' })
+          .where(eq(calls.id, call.id));
       }
     }
   }
@@ -199,6 +204,8 @@ async function applyCallRevivals(db: Db, token: TokenRow, snap: MarketSnapshot):
   for (const call of requested) {
     if (call.status !== 'died') continue;
     if (callLiquidityDeath(call.liquidityAtCall, snap.liquidityUsd)) continue;
+    // diedAt/deathReason stay as the call's last-death record (same convention
+    // as tokens.died_at/death_reason); the next death overwrites them.
     await db.update(calls).set({ status: 'active' }).where(eq(calls.id, call.id));
     publish({ type: 'call_revived', tokenId: token.id, callId: call.id });
   }
@@ -220,9 +227,11 @@ async function markTokenDead(db: Db, token: TokenRow, reason: string): Promise<v
     .where(and(eq(tokens.id, token.id), ne(tokens.phase, 'dead')))
     .returning({ id: tokens.id });
   if (!transitioned[0]) return;
+  // Copy the token's death onto its calls so call-level info is always the
+  // authoritative answer to "when/why did this card die".
   await db
     .update(calls)
-    .set({ status: 'died' })
+    .set({ status: 'died', diedAt: now, deathReason: reason })
     .where(and(eq(calls.tokenId, token.id), eq(calls.status, 'active')));
   publish({ type: 'token_died', tokenId: token.id, reason });
   console.log(`token ${token.address} died: ${reason}`);
@@ -376,9 +385,15 @@ async function pollDead(db: Db, token: TokenRow, opts: PollOpts): Promise<void> 
 
   // A call posted after the token died is still 'active' — markTokenDead ran
   // before it existed. Sweep first; a revival below flips it back with the rest.
+  // It inherits the token's death record (a dead token always has one; the
+  // fallback only covers pre-column rows) so the died section can date it.
   await db
     .update(calls)
-    .set({ status: 'died' })
+    .set({
+      status: 'died',
+      diedAt: token.diedAt ?? new Date(),
+      deathReason: token.deathReason,
+    })
     .where(and(eq(calls.tokenId, token.id), eq(calls.status, 'active')));
 
   if (snap && isRevived(wasCurve ? 'curve' : 'graduated', snap, pool?.graduated ?? null)) {
@@ -403,6 +418,7 @@ async function pollDead(db: Db, token: TokenRow, opts: PollOpts): Promise<void> 
       .where(and(eq(tokens.id, token.id), eq(tokens.phase, 'dead')))
       .returning({ id: tokens.id });
     if (transitioned[0]) {
+      // Call-level diedAt/deathReason are kept as last-death history too.
       await db
         .update(calls)
         .set({ status: 'active' })

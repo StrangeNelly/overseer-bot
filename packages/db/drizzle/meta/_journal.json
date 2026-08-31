@@ -15,6 +15,13 @@
       "when": 1788201272137,
       "tag": "0001_typical_yellowjacket",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788208824485,
+      "tag": "0002_violet_solo",
+      "breakpoints": true
     }
   ]
 }

@@ -88,6 +88,13 @@ export const calls = pgTable(
     mentionsCount: integer('mentions_count').notNull().default(1),
     lastMentionAt: timestamp('last_mention_at', { withTimezone: true }).notNull(),
     status: text('status', { enum: ['active', 'died', 'binned'] }).notNull().default('active'),
+    // Per-call death record. A call can die on its own liquidity collapse while
+    // the token still trades, so the token's died_at/death_reason cannot
+    // represent this — and a revived token's retained history would misdate a
+    // later per-call death. Stamped at every flip to 'died'; kept on revival as
+    // the last-death record, exactly like tokens.died_at/death_reason.
+    diedAt: timestamp('died_at', { withTimezone: true }),
+    deathReason: text('death_reason'),
     binnedBy: bigint('binned_by', { mode: 'number' }),
     binnedAt: timestamp('binned_at', { withTimezone: true }),
     // Set when a died/binned token is re-mentioned; M2 poller consumes it.

@@ -11,7 +11,10 @@ export type GroupieEvent =
   | { type: 'price_update'; tokenId: number; mcapUsd: number | null }
   | { type: 'token_died'; tokenId: number; reason: string }
   | { type: 'token_revived'; tokenId: number }
-  | { type: 'call_revived'; tokenId: number; callId: number };
+  | { type: 'call_revived'; tokenId: number; callId: number }
+  // Binning is group-wide, so every other member's open board must drop the
+  // card without waiting for an unrelated poll event.
+  | { type: 'call_binned'; tokenId: number; callId: number };
 
 const emitter = new EventEmitter();
 emitter.setMaxListeners(100);
