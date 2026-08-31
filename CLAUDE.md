@@ -26,3 +26,4 @@
 
 - 2026-09-01: Project started. API/architecture research workflow completed; findings in `docs/research-*.md`, synthesis in `docs/research-summary.md`.
 - 2026-09-01: v1 decisions locked in `docs/decisions.md` — TS monorepo, grammY bot (long polling), Hono + Vite/React Mini App, Supabase Postgres + Drizzle, Node process on Railway, GeckoTerminal-primary market data, clean (non-referral) trading links, X monitor deferred to v1.5, owner-supplied death thresholds. Next: `docs/plan.md` build plan, then scaffold.
+- 2026-09-01: Round-2 decisions (Mini App confirmed; links = Axiom/GMGN/DexScreener only; any member can bin; repost semantics defined) and `docs/plan.md` written (M0 scaffold → M1 bot ingest → M2 data engine → M3 Mini App board → M4 deploy/beta → M5 v1.5). Ready to scaffold on owner go-ahead.

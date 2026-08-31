@@ -18,3 +18,10 @@ Running record of decisions made with the owner. Newest at the bottom.
 8. **Hosting/stack:** TypeScript confirmed. Database = owner's **existing Supabase** Postgres (already paid) via Drizzle. One always-on Node process (grammY bot long-polling + pollers + Hono API + Vite/React SPA + SSE) on **Railway Hobby ~$5/mo**. Vercel not used for v1 (serverless can't run the bot/pollers; SPA is served by the Node process).
 
 - COV link label in Phanes: unidentified; dropped as non-blocking.
+
+## 2026-09-01 — round 2 (owner confirmations + repost design)
+
+1. **App surface confirmed:** Mini App first. Browser OIDC login is a later fast-follow.
+2. **Link row trimmed to three:** Axiom, GMGN, DexScreener. (Maestro/Banana Gun/Bloom/OKX dropped from v1 — can return as per-group settings later.)
+3. **Binning:** any member can bin; the action is group-wide.
+4. **Repost handling:** every mention of an already-called CA is recorded (`mentions` table: who/when/message). A token's board *activity time* = latest mention, so reposts resurface it in the short time-window views with a "re-called ×N" badge; the card shows multiple-since-first-call. First caller and call clock never change. Repost of a binned token un-bins it; repost of a died token triggers an immediate re-poll and, if alive, revives it flagged "revived". The bot never replies in chat to reposts (Rick/Phanes own that).
