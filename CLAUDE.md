@@ -24,4 +24,4 @@
 
 ## Status log
 
-- 2026-09-01: Project started. API/architecture research workflow run; results to be saved under `docs/`. Stack not yet chosen — do not assume one until docs/decisions say so.
+- 2026-09-01: Project started. API/architecture research workflow completed; findings in `docs/research-*.md`, synthesis in `docs/research-summary.md`. Proposed (not yet confirmed) stack: TS monorepo, grammY bot (long polling), Hono/Fastify + Vite/React, Postgres + Drizzle on Railway, GeckoTerminal-primary market data, Alchemy WS chain events. Awaiting owner decisions (to be logged in `docs/decisions.md`).
