@@ -8,6 +8,8 @@
   ],
   "scripts": {
     "dev": "npm run dev -w @groupie/server",
+    "build": "npm run build -w @groupie/web",
+    "start": "npm run db:migrate && npm run start -w @groupie/server",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "db:generate": "npm run generate -w @groupie/db",

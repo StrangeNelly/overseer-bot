@@ -22,6 +22,12 @@ export interface Config {
   /** HMAC key for session cookies. */
   sessionSecret: string;
   /**
+   * Direct-link base of the registered Telegram Mini App, e.g.
+   * https://t.me/overseergroupbot/board — when set, /groupie replies with
+   * `<this>?startapp=<slug>` so the board opens INSIDE Telegram.
+   */
+  miniAppUrl: string | null;
+  /**
    * DEV ONLY: browse the board as this Telegram user id without initData (no
    * Telegram webview, no membership check). Non-null ONLY when ENABLE_DEV_AUTH
    * is exactly 'true' and NODE_ENV is not 'production', so this one field is
@@ -50,6 +56,7 @@ export function loadConfig(): Config {
     webAppUrl: process.env.WEB_APP_URL ?? 'http://localhost:3000',
     port: Number(process.env.PORT ?? 3000),
     sessionSecret: required('SESSION_SECRET'),
+    miniAppUrl: process.env.MINI_APP_URL?.trim() || null,
     devAuthUserId: devAuthArmed ? optionalInt('DEV_AUTH_USER_ID') : null,
   };
 }

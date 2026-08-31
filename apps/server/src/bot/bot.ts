@@ -152,7 +152,11 @@ export function createBot(config: Config, db: Db): Bot {
   bot.command('groupie', async (ctx, next) => {
     if (isGroupChat(ctx) && ctx.from) {
       const group = await ensureGroup(db, ctx.chat.id, ctx.chat.title, { activate: true });
-      const boardUrl = `${config.webAppUrl}/g/${group.slug}`;
+      // The t.me deep link opens the board inside Telegram; the plain URL is
+      // the fallback until the Mini App is registered in BotFather.
+      const boardUrl = config.miniAppUrl
+        ? `${config.miniAppUrl}?startapp=${group.slug}`
+        : `${config.webAppUrl}/g/${group.slug}`;
       await ctx.reply(`Groupie board: ${boardUrl}`, {
         link_preview_options: { is_disabled: true },
       });
