@@ -11,6 +11,9 @@
 - Time windows: 6/12/24 hours, 3 days, week, month.
 - Each token card: main coin details + deep links to trading apps (Axiom and similar).
 - "Died after call" section; group chooses to keep in memory or remove.
+- "Retraced" board: coins that pumped hard after the call (banger, e.g. 3x+) and have pulled back well off their peak but are NOT dying (liquidity intact, volume flowing). Same machinery as died-detection, different thresholds. Present as neutral data (retrace %, LP, volume) — never "buy opportunity" labels.
+- The bot stays near-silent in Telegram: no recurring digest/summary posts (Rick/Phanes already do summaries; the chat is noisy enough). At most: reply to /groupie with the board link + a pinned message. The app is the calm, visual surface; the chat is the input.
+- Track peak-since-call ourselves by polling from the moment a CA is posted — call-relative data (call MC, ATH-since-call, retrace %) is Groupie's moat and avoids paying for historical OHLCV APIs.
 - v1 targets Robinhood Chain (#HOOD, EVM addresses) only. Multi-chain later.
 - Built for one group first; designed so any group can add it later (multi-group SaaS potential).
 - Visual polish comes after structure ("Claude design will eventually need to have a look at it").
