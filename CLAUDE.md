@@ -24,4 +24,5 @@
 
 ## Status log
 
-- 2026-09-01: Project started. API/architecture research workflow completed; findings in `docs/research-*.md`, synthesis in `docs/research-summary.md`. Proposed (not yet confirmed) stack: TS monorepo, grammY bot (long polling), Hono/Fastify + Vite/React, Postgres + Drizzle on Railway, GeckoTerminal-primary market data, Alchemy WS chain events. Awaiting owner decisions (to be logged in `docs/decisions.md`).
+- 2026-09-01: Project started. API/architecture research workflow completed; findings in `docs/research-*.md`, synthesis in `docs/research-summary.md`.
+- 2026-09-01: v1 decisions locked in `docs/decisions.md` — TS monorepo, grammY bot (long polling), Hono + Vite/React Mini App, Supabase Postgres + Drizzle, Node process on Railway, GeckoTerminal-primary market data, clean (non-referral) trading links, X monitor deferred to v1.5, owner-supplied death thresholds. Next: `docs/plan.md` build plan, then scaffold.
