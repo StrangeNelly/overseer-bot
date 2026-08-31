@@ -45,7 +45,7 @@ grammY long-polling bot; `my_chat_member` auto-registration; message pipeline: e
 
 ### M2 — Market data engine (the hard part)
 - GeckoTerminal client with a 30 req/min budgeter; DexScreener client (30-address batches, best-pair selection **always** liquidity-filtered).
-- New-call resolution: GT `tokens/multi` first (use `fdv_usd`), hood.fun API adapter as legacy fallback; store mcap_at_call immediately; backfill exact call-time value from GT minute-OHLCV when processing lags.
+- New-call resolution: GT `tokens/multi` first (use `fdv_usd`), DexScreener dust-guarded fallback; store mcap_at_call immediately; backfill exact call-time value from GT minute-OHLCV when processing lags. (hood.fun adapter deferred — that launchpad has been dormant since early Aug; the resolution chain accepts new sources when the meta rotates.)
 - Snapshot poller with frequency tiers: < 24h-old or re-mentioned tokens every ~45s; active older tokens every 5 min; dead tokens daily (revival check).
 - Peak-since-call tracking, death detection per decided thresholds, retrace computation.
 - (Stretch, can slip to v1.1) Alchemy WS `logs` subscription on launchpad factories for instant launch/graduation detection — contract addresses + topic0s are in `research-followup-3.md`. Never `newHeads` (100ms blocks would blow the free CU cap).

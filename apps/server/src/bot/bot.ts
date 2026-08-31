@@ -3,6 +3,8 @@ import { Bot, type Context } from 'grammy';
 import type { Message } from 'grammy/types';
 import { eq } from 'drizzle-orm';
 import { calls, groupMembers, groups, launchMonitors, type Db } from '@groupie/db';
+import { publish } from '../events.js';
+import { pollTokenNow } from '../poller/scheduler.js';
 import type { Config } from '../config.js';
 import { ingestMessage } from './ingest.js';
 
@@ -128,6 +130,14 @@ export function createBot(config: Config, db: Db): Bot {
   bot.on('my_chat_member', async (ctx) => {
     if (!isGroupChat(ctx)) return;
     const status = ctx.myChatMember.new_chat_member.status;
+    const oldStatus = ctx.myChatMember.old_chat_member.status;
+    // member -> administrator promotion is not a join; skip the duplicate work.
+    if (
+      (status === 'member' || status === 'administrator') &&
+      (oldStatus === 'member' || oldStatus === 'administrator')
+    ) {
+      return;
+    }
     if (status === 'member' || status === 'administrator') {
       const group = await ensureGroup(db, ctx.chat.id, ctx.chat.title, { activate: true });
       console.log(`joined group ${ctx.chat.id} (${ctx.chat.title}) -> slug ${group.slug}`);
@@ -185,6 +195,17 @@ export function createBot(config: Config, db: Db): Bot {
         `chat ${ctx.chat.id}: ${result.newCalls.length} new call(s) ${result.newCalls.join(', ')}` +
           (result.reposts.length ? `; repost(s) ${result.reposts.join(', ')}` : ''),
       );
+    }
+
+    // New calls need mcap-at-call captured NOW (launch coins move in seconds);
+    // reposts of died or binned calls asked for a revive re-poll. Fire and forget.
+    for (const entry of result.entries) {
+      if (entry.isNew) publish({ type: 'new_call', tokenId: entry.tokenId, address: entry.address });
+      if (entry.isNew || entry.wasDied || entry.wasBinned) {
+        pollTokenNow(db, entry.tokenId).catch((err) =>
+          console.error(`immediate poll failed for ${entry.address}:`, err),
+        );
+      }
     }
   });
 

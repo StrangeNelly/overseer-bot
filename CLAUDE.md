@@ -18,6 +18,10 @@
 - Built for one group first; designed so any group can add it later (multi-group SaaS potential).
 - Visual polish comes after structure ("Claude design will eventually need to have a look at it").
 
+## Working style (owner preference, 2026-09-01)
+
+- Implementation is done by **Opus 5 subagents** (Workflow/Agent with `model: 'opus'`), driven by precise specs (file paths, interfaces, product rules from these docs). The main session designs, integrates, and adversarially reviews. Small glue edits/fixes stay inline.
+
 ## Where things live
 
 - `docs/` — research reports, decisions, and planning documents. Read these before making architecture choices; they are the project's memory.

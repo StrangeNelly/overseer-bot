@@ -13,7 +13,18 @@ export interface IngestInput {
   texts: Array<string | undefined>;
 }
 
+export interface IngestEntry {
+  address: string;
+  tokenId: number;
+  isNew: boolean;
+  /** Repost hit a died call — the caller should trigger an immediate re-poll. */
+  wasDied: boolean;
+  /** Repost un-binned the call — re-poll too, the token may have died meanwhile. */
+  wasBinned: boolean;
+}
+
 export interface IngestResult {
+  entries: IngestEntry[];
   newCalls: string[];
   reposts: string[];
   failures: string[];
@@ -31,15 +42,17 @@ export interface IngestResult {
  */
 export async function ingestMessage(db: Db, input: IngestInput): Promise<IngestResult> {
   const addresses = extractEvmAddresses(...input.texts);
-  const result: IngestResult = { newCalls: [], reposts: [], failures: [] };
+  const result: IngestResult = { entries: [], newCalls: [], reposts: [], failures: [] };
 
   for (const address of addresses) {
     try {
-      const isNew = await db.transaction(async (tx) => {
+      const entry = await db.transaction(async (tx) => {
         const token = await upsertToken(tx, address);
-        return recordCallOrMention(tx, token.id, input);
+        const outcome = await recordCallOrMention(tx, token.id, input);
+        return { address, tokenId: token.id, ...outcome };
       });
-      (isNew ? result.newCalls : result.reposts).push(address);
+      result.entries.push(entry);
+      (entry.isNew ? result.newCalls : result.reposts).push(address);
     } catch (err) {
       // One bad address must not drop the remaining CAs in the same message.
       console.error(`ingest failed for ${address} in group ${input.groupId}:`, err);
@@ -65,8 +78,12 @@ async function upsertToken(tx: DbLike, address: string) {
   return existing[0];
 }
 
-/** Returns true if this created a new call, false for a repost/replay. */
-async function recordCallOrMention(tx: DbLike, tokenId: number, input: IngestInput): Promise<boolean> {
+/** Records the sighting; reports whether it was a new call and its prior status. */
+async function recordCallOrMention(
+  tx: DbLike,
+  tokenId: number,
+  input: IngestInput,
+): Promise<{ isNew: boolean; wasDied: boolean; wasBinned: boolean }> {
   const insertedCall = await tx
     .insert(calls)
     .values({
@@ -93,12 +110,12 @@ async function recordCallOrMention(tx: DbLike, tokenId: number, input: IngestInp
         at: input.at,
       })
       .onConflictDoNothing({ target: [mentions.callId, mentions.messageId] });
-    return true;
+    return { isNew: true, wasDied: false, wasBinned: false };
   }
 
   // Repost (or a redelivered update for an existing call).
   const existing = await tx
-    .select({ id: calls.id })
+    .select({ id: calls.id, status: calls.status })
     .from(calls)
     .where(and(eq(calls.groupId, input.groupId), eq(calls.tokenId, tokenId)));
   const call = existing[0];
@@ -118,7 +135,7 @@ async function recordCallOrMention(tx: DbLike, tokenId: number, input: IngestInp
 
   // Conflict means this exact sighting was already processed (redelivery):
   // skip all count/status mutations so replay is a no-op.
-  if (!insertedMention[0]) return false;
+  if (!insertedMention[0]) return { isNew: false, wasDied: false, wasBinned: false };
 
   // Status transitions evaluate in SQL against the current row, so concurrent
   // writers (M2 poller, M3 web bin actions) are never clobbered by a stale read.
@@ -138,5 +155,5 @@ async function recordCallOrMention(tx: DbLike, tokenId: number, input: IngestInp
     })
     .where(eq(calls.id, call.id));
 
-  return false;
+  return { isNew: false, wasDied: call.status === 'died', wasBinned: call.status === 'binned' };
 }

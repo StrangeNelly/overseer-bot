@@ -14,6 +14,7 @@ import { createDb } from '@groupie/db';
 import { createApi } from './api/app.js';
 import { createBot } from './bot/bot.js';
 import { loadConfig } from './config.js';
+import { startPoller } from './poller/scheduler.js';
 
 // Load the repo-root .env regardless of cwd; a missing file is a no-op
 // (deployments inject env vars directly).
@@ -27,6 +28,8 @@ const api = createApi(db);
 const server = serve({ fetch: api.fetch, port: config.port }, (info) => {
   console.log(`api listening on :${info.port}`);
 });
+
+const stopPoller = startPoller(db);
 
 function closeServer(): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()));
@@ -49,6 +52,7 @@ bot
 
 async function shutdown() {
   console.log('shutting down...');
+  stopPoller();
   await bot.stop();
   await closeServer();
   await client.end().catch(() => {});

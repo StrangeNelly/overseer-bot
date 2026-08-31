@@ -48,6 +48,9 @@ export const tokens = pgTable(
     graduatedAt: timestamp('graduated_at', { withTimezone: true }),
     diedAt: timestamp('died_at', { withTimezone: true }),
     deathReason: text('death_reason'),
+    // Set when a dead token comes back; died_at/death_reason are kept as the
+    // last-death record, so the board can show "revived" plus that history.
+    revivedAt: timestamp('revived_at', { withTimezone: true }),
     // Latest polled market state, cached on the token (M2 poller fills these).
     priceUsd: doublePrecision('price_usd'),
     mcapUsd: doublePrecision('mcap_usd'),
@@ -55,6 +58,10 @@ export const tokens = pgTable(
     vol24Usd: doublePrecision('vol24_usd'),
     firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull().defaultNow(),
     lastPolledAt: timestamp('last_polled_at', { withTimezone: true }),
+    // As-of marker for the cached market fields above: set ONLY when they are
+    // written. last_polled_at advances on data-less polls, so it says nothing
+    // about staleness.
+    lastSnapshotAt: timestamp('last_snapshot_at', { withTimezone: true }),
   },
   (t) => [uniqueIndex('tokens_chain_address_uq').on(t.chainId, t.address)],
 );
