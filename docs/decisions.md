@@ -19,6 +19,10 @@ Running record of decisions made with the owner. Newest at the bottom.
 
 - COV link label in Phanes: unidentified; dropped as non-blocking.
 
+## 2026-09-01 — rollout decision
+
+- **Soft launch only:** Groupie stays in the owner's private test group ("overseer test group", just owner + bot) until the product is fully fleshed out AND the design pass is done. The real trading group gets the pinned link only after that. Deploy to Railway + BotFather registration proceed now so the Mini App is usable on the owner's phone.
+
 ## 2026-09-01 — round 2 (owner confirmations + repost design)
 
 1. **App surface confirmed:** Mini App first. Browser OIDC login is a later fast-follow.
