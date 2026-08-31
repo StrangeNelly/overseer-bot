@@ -16,7 +16,7 @@
     "db:migrate": "npm run migrate -w @groupie/db"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12"
   },
   "devDependencies": {
     "@types/node": "^24.13.3"
