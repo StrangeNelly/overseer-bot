@@ -4,7 +4,7 @@
 
 ## Shape
 
-One pnpm monorepo, TypeScript throughout:
+One npm-workspaces monorepo (Node 24 is on the dev machine; no extra tooling), TypeScript throughout:
 
 ```
 groupie/
@@ -38,7 +38,7 @@ One deployable Node process (Railway, ~$5/mo). Database on the owner's existing 
 ## Milestones
 
 ### M0 — Scaffold (small)
-pnpm workspace, TS config, Drizzle connected to Supabase, `.env.example` (bot token, Supabase URL, Alchemy key), typecheck/lint scripts, first migration.
+npm workspace, TS config, Drizzle connected to Supabase, `.env.example` (bot token, Supabase URL, Alchemy key), typecheck/lint scripts, first migration.
 
 ### M1 — Bot ingest (the spine)
 grammY long-polling bot; `my_chat_member` auto-registration; message pipeline: extract CAs (regex + entities + known URL patterns from Axiom/GMGN/DexScreener links) → create call or record mention; `/groupie` command replies once with the board link. Manual test in a scratch group.

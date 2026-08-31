@@ -10,6 +10,15 @@ A web dashboard for crypto Telegram groups. It connects to your group, tracks th
 - **Died-after-call section.** Rugged/dead calls surface separately; the group decides whether to keep or purge them.
 - **v1 chain:** Robinhood Chain (#HOOD). Multi-chain and multi-group SaaS later.
 
+## Running it
+
+```
+cp .env.example .env    # fill in BOT_TOKEN and DATABASE_URL
+npm install
+npm run db:migrate      # apply schema to the database
+npm run dev             # starts the bot + API
+```
+
 ## Status
 
-Planning phase. Research and decisions live in [docs/](docs/).
+M1 (bot ingest) in progress. Research and decisions live in [docs/](docs/).
