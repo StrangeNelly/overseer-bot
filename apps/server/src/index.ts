@@ -1,5 +1,14 @@
+import { setDefaultResultOrder } from 'node:dns';
+import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { config as loadEnv } from 'dotenv';
+
+// Some machines (incl. this dev box) advertise IPv6 without a working route;
+// Telegram's AAAA record then blackholes Node's fetch. Prefer IPv4 — and
+// disable fetch's happy-eyeballs family selection, which ignores the DNS
+// result order and still attempts the dead IPv6 path.
+setDefaultResultOrder('ipv4first');
+net.setDefaultAutoSelectFamily(false);
 import { serve } from '@hono/node-server';
 import { createDb } from '@groupie/db';
 import { createApi } from './api/app.js';
