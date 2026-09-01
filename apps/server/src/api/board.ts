@@ -50,7 +50,7 @@ function deathOf(call: CallRow, token: TokenRow): { at: Date | null; reason: str
   return { at: token.diedAt, reason: token.deathReason };
 }
 
-/** Exported for tests; the board route is the only production caller. */
+/** Shared by the board and ranging routes (and the tests) — one card shape. */
 export function toCard(call: CallRow, token: TokenRow, sparkline: SparkPoint[]): BoardCard {
   // A zero/negative at-call mcap is a bad reading, not a 0x baseline.
   const base = call.mcapAtCall !== null && call.mcapAtCall > 0 ? call.mcapAtCall : null;
@@ -110,8 +110,10 @@ type SparkRow = {
  * token's true latest reading — bucket-firsts alone would drop the freshest
  * point, which is the one a live board is for. Both branches ride
  * snapshots_token_at_idx; downsample() below stays as a cap.
+ *
+ * Exported for the ranging board, which needs the same sparkline on its cards.
  */
-async function loadSparklines(db: Db, tokenIds: number[]): Promise<Map<number, SparkPoint[]>> {
+export async function loadSparklines(db: Db, tokenIds: number[]): Promise<Map<number, SparkPoint[]>> {
   const byToken = new Map<number, SparkPoint[]>();
   if (tokenIds.length === 0) return byToken;
   const since = new Date(Date.now() - SPARKLINE_HOURS * 3_600_000);

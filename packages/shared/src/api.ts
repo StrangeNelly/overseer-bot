@@ -86,3 +86,40 @@ export interface BoardResponse {
 export interface MeResponse {
   userId: number;
 }
+
+/** Ranging board: accumulation-phase detection over the group's own calls. */
+export const RANGE_DURATION_HOURS = [6, 12, 24, 48] as const;
+export type RangeDurationHours = (typeof RANGE_DURATION_HOURS)[number];
+
+export const RANGE_PRESETS = [
+  { label: '50K–100K', loUsd: 50_000, hiUsd: 100_000 },
+  { label: '100K–250K', loUsd: 100_000, hiUsd: 250_000 },
+  { label: '250K–500K', loUsd: 250_000, hiUsd: 500_000 },
+  { label: '500K–1M', loUsd: 500_000, hiUsd: 1_000_000 },
+] as const;
+
+export interface RangeInfo {
+  /** ISO instant the continuous in-band streak started. */
+  inRangeSince: string;
+  inRangeHours: number;
+  /** Observed mcap extremes while ranging. */
+  observedLowUsd: number;
+  observedHighUsd: number;
+  /** 5-minute buckets backing the verdict (data-coverage indicator). */
+  bucketCount: number;
+}
+
+export interface RangeCard extends BoardCard {
+  range: RangeInfo;
+}
+
+/** GET /api/g/:slug/range?lo=<usd>&hi=<usd>&hours=<RangeDurationHours> */
+export interface RangeBoardResponse {
+  group: { slug: string; title: string | null };
+  loUsd: number;
+  hiUsd: number;
+  minHours: number;
+  generatedAt: string;
+  /** Sorted by inRangeHours desc. */
+  cards: RangeCard[];
+}

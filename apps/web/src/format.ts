@@ -69,6 +69,16 @@ export function fmtAge(iso: string | null | undefined, now: number = Date.now())
   return `${Math.floor(hours / 24)}d`;
 }
 
+/** A duration already measured in hours: `14h`, `2d 3h`, `2d`, `—`. */
+export function fmtHours(hours: number | null | undefined): string {
+  if (!isNum(hours) || hours < 0) return DASH;
+  const whole = Math.round(hours);
+  if (whole < 48) return `${whole}h`;
+  const days = Math.floor(whole / 24);
+  const rest = whole % 24;
+  return rest === 0 ? `${days}d` : `${days}d ${rest}h`;
+}
+
 /** Milliseconds since `iso`, or null when it is missing/unparseable. */
 export function ageMs(iso: string | null | undefined, now: number = Date.now()): number | null {
   const t = parseTime(iso);

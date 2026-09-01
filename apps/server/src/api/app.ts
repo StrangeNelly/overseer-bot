@@ -9,6 +9,7 @@ import type { Config } from '../config.js';
 import { createAuthRoutes, devAuthEnabled } from './auth.js';
 import { createBoardRoutes } from './board.js';
 import { requireMember, type ApiEnv } from './membership.js';
+import { createRangeRoutes } from './range.js';
 import { createSseRoutes } from './sse.js';
 
 /** serveStatic resolves `root` against the CWD, which is apps/server. */
@@ -68,6 +69,7 @@ export function createApi(db: Db, botApi: Api, config: Config): Hono<ApiEnv> {
   // first in the composed chain.
   app.use('/api/g/:slug/*', requireMember(db, botApi, config));
   app.route('/', createBoardRoutes(db));
+  app.route('/', createRangeRoutes(db));
   app.route('/', createSseRoutes(db));
 
   // Built SPA. /api/* must never fall through to a static file or the shell —

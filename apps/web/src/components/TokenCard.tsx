@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import type { BoardCard } from '@groupie/shared';
+import type { BoardCard, RangeInfo } from '@groupie/shared';
 import {
   ageMs,
   avatarHue,
   fmtAge,
+  fmtHours,
   fmtMultiple,
   fmtRetrace,
   fmtUsd,
@@ -23,6 +24,13 @@ interface TokenCardProps {
   now: number;
   onBin?: (card: BoardCard) => void;
   binning?: boolean;
+  /**
+   * Ranging tab only: the token's in-band streak plus the band it was matched
+   * against (RangeInfo carries the observed extremes, not the query). Both are
+   * needed for the line, so it renders only when both arrive.
+   */
+  range?: RangeInfo;
+  band?: { loUsd: number; hiUsd: number };
 }
 
 function TokenAvatar({ card }: { card: BoardCard }) {
@@ -65,7 +73,7 @@ function fullTime(iso: string | null): string | undefined {
   }
 }
 
-export function TokenCard({ card, section, now, onBin, binning }: TokenCardProps) {
+export function TokenCard({ card, section, now, onBin, binning, range, band }: TokenCardProps) {
   const title = card.symbol ? `$${card.symbol}` : shortAddress(card.address);
   const tone = multipleTone(card.multiple);
   const dataAge = ageMs(card.dataAsOf, now);
@@ -115,6 +123,14 @@ export function TokenCard({ card, section, now, onBin, binning }: TokenCardProps
         </div>
         <Sparkline points={card.sparkline} />
       </div>
+
+      {range && band ? (
+        <div className="range-line" title={`In range since ${fullTime(range.inRangeSince) ?? '—'} (${range.bucketCount} 5-minute buckets)`}>
+          {`in ${fmtUsd(band.loUsd)}–${fmtUsd(band.hiUsd)} for ${fmtHours(range.inRangeHours)}`}
+          <span className="range-sep">·</span>
+          {`band ${fmtUsd(range.observedLowUsd)}–${fmtUsd(range.observedHighUsd)}`}
+        </div>
+      ) : null}
 
       <div className="card-meta">
         <span className="meta-caller">{card.callerName}</span>

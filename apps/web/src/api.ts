@@ -1,4 +1,10 @@
-import type { BoardResponse, BoardWindow, MeResponse } from '@groupie/shared';
+import type {
+  BoardResponse,
+  BoardWindow,
+  MeResponse,
+  RangeBoardResponse,
+  RangeDurationHours,
+} from '@groupie/shared';
 
 /** Any non-2xx response, or a request that never reached the server (status 0). */
 export class ApiError extends Error {
@@ -87,6 +93,23 @@ export function fetchBoard(
   return request<BoardResponse>(`${groupPath(slug)}/board?window=${encodeURIComponent(boardWindow)}`, {
     signal,
   });
+}
+
+/** Ranging board: tokens whose mcap has held `loUsd`..`hiUsd` for `hours`+. */
+export function fetchRange(
+  slug: string,
+  loUsd: number,
+  hiUsd: number,
+  hours: RangeDurationHours,
+  signal?: AbortSignal,
+): Promise<RangeBoardResponse> {
+  // The server wants whole USD; rounding here keeps a stray decimal out of a 400.
+  const params = new URLSearchParams({
+    lo: String(Math.round(loUsd)),
+    hi: String(Math.round(hiUsd)),
+    hours: String(hours),
+  });
+  return request<RangeBoardResponse>(`${groupPath(slug)}/range?${params.toString()}`, { signal });
 }
 
 export function binCall(slug: string, callId: number): Promise<void> {

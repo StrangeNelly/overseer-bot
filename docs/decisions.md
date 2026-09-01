@@ -19,6 +19,12 @@ Running record of decisions made with the owner. Newest at the bottom.
 
 - COV link label in Phanes: unidentified; dropped as non-blocking.
 
+## 2026-09-01 — Ranging board (owner idea, round 3)
+
+- New board section "Ranging": tokens whose mcap has sat inside a user-chosen band (presets 50K–100K, 100K–250K, 250K–500K, 500K–1M, plus custom lo/hi) without nuking — the accumulation phase before 10-20x moves. Owner picks the band and a minimum duration (6/12/24/48h).
+- Semantics: continuous time-in-range walking back from now over 5-minute average buckets (single-poll wicks must not reset the clock); the latest bucket must be in-band; a token only qualifies when its data span covers the requested duration (no claiming 6h in-range from 2h of history). Cards show time-in-range, observed band (min–max while ranging), current mcap/LP/volume; sorted longest-in-range first. Active calls only (died/binned excluded).
+- Ships in the soft-launch flesh-out phase, before the X monitor.
+
 ## 2026-09-01 — rollout decision
 
 - **Soft launch only:** Groupie stays in the owner's private test group ("overseer test group", just owner + bot) until the product is fully fleshed out AND the design pass is done. The real trading group gets the pinned link only after that. Deploy to Railway + BotFather registration proceed now so the Mini App is usable on the owner's phone.
