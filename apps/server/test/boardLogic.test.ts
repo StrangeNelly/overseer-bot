@@ -12,6 +12,7 @@ interface CardSpec {
   mcapAtCall?: number | null;
   mcapUsd?: number | null;
   peak?: number | null;
+  liquidityUsd?: number | null;
   lastMentionAt?: string;
   diedAt?: string | null;
   revivingAt?: string | null;
@@ -35,7 +36,7 @@ function card(spec: CardSpec): BoardCard {
     phase: 'graduated',
     callStatus: spec.callStatus ?? 'active',
     mcapUsd,
-    liquidityUsd: 50_000,
+    liquidityUsd: spec.liquidityUsd === undefined ? 50_000 : spec.liquidityUsd,
     vol24Usd: 10_000,
     mcapAtCall,
     multiple: base !== null && mcapUsd !== null ? mcapUsd / base : null,
@@ -176,6 +177,79 @@ describe('classifySections', () => {
       reviving: [],
       died: [],
     });
+  });
+});
+
+/**
+ * The retraced liveness clauses (docs/decisions.md round 10): "pulled back but
+ * NOT dying" has to mean something. Past 85% off peak is a collapse — rug
+ * probation's job — and a dust pool is not a market anyone can sell into.
+ */
+describe('classifySections — retraced honesty', () => {
+  it('does not bill the HDFI collapse as a retrace', () => {
+    // The live case: 3.4x peak, then -99% to $8,249 on $8.5k of liquidity. The
+    // board showed "Retraced 0.03x"; it is a rug, and the sweep hides it.
+    const sections = classifySections([
+      card({ callId: 50, mcapAtCall: 256_000, peak: 872_124, mcapUsd: 8_249, liquidityUsd: 8_500 }),
+    ]);
+    expect(sections.retraced).toEqual([]);
+    // Not exiled either — it stays visible until probation takes it.
+    expect(ids(sections.fresh)).toEqual([50]);
+  });
+
+  it('a 60%-off-peak card with real liquidity IS retraced', () => {
+    const sections = classifySections([
+      card({ callId: 51, peak: 1_000_000, mcapUsd: 400_000, liquidityUsd: 50_000 }),
+    ]);
+    expect(ids(sections.retraced)).toEqual([51]);
+  });
+
+  it('an 84%-off card on a dust pool is not a retrace', () => {
+    const sections = classifySections([
+      card({ callId: 52, peak: 1_000_000, mcapUsd: 160_000, liquidityUsd: 500 }),
+    ]);
+    expect(sections.retraced).toEqual([]);
+    expect(ids(sections.fresh)).toEqual([52]);
+    // The same card on a real pool is exactly what the section is for.
+    const live = classifySections([
+      card({ callId: 53, peak: 1_000_000, mcapUsd: 160_000, liquidityUsd: 50_000 }),
+    ]);
+    expect(ids(live.retraced)).toEqual([53]);
+  });
+
+  it('unknown liquidity is never proof of a live market', () => {
+    const sections = classifySections([
+      card({ callId: 54, peak: 1_000_000, mcapUsd: 400_000, liquidityUsd: null }),
+    ]);
+    expect(sections.retraced).toEqual([]);
+    expect(ids(sections.fresh)).toEqual([54]);
+  });
+
+  it('85% off peak is still a retrace; 86% is a collapse', () => {
+    const sections = classifySections([
+      card({ callId: 55, peak: 1_000_000, mcapUsd: 150_000 }),
+      card({ callId: 56, peak: 1_000_000, mcapUsd: 140_000 }),
+    ]);
+    expect(ids(sections.retraced)).toEqual([55]);
+    expect(ids(sections.fresh).sort()).toEqual([55, 56]);
+  });
+
+  it('exactly the dust line is enough liquidity', () => {
+    const sections = classifySections([
+      card({ callId: 57, peak: 1_000_000, mcapUsd: 400_000, liquidityUsd: 1_000 }),
+      card({ callId: 58, peak: 1_000_000, mcapUsd: 400_000, liquidityUsd: 999 }),
+    ]);
+    expect(ids(sections.retraced)).toEqual([57]);
+  });
+
+  it('a card that stops being retraced can go back to being a runner', () => {
+    // 30x peak, now ~87% off it but still 4x on the call: past the retrace
+    // ceiling, so nothing holds it out of runners any more.
+    const sections = classifySections([
+      card({ callId: 59, mcapAtCall: 100_000, peak: 3_000_000, mcapUsd: 400_000 }),
+    ]);
+    expect(sections.retraced).toEqual([]);
+    expect(ids(sections.runners)).toEqual([59]);
   });
 });
 

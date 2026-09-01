@@ -1,17 +1,32 @@
 import { THRESHOLDS, type BoardCard, type BoardResponse } from '@groupie/shared';
 
 /**
- * Retraced = it WAS a runner (peak >= 3x call) and has since given back at
- * least 40% of that peak. Death is a separate section, so only active calls
- * reach here — a retraced card is explicitly "pulled back but not dying".
+ * Retraced = it WAS a runner (peak >= 3x call), has since given back 40-85% of
+ * that peak, and is still a live market. Death is a separate section, so only
+ * active calls reach here — a retraced card is explicitly "pulled back but NOT
+ * dying", which round 10 made the code say as well as the docs:
+ *
+ * - past 85% off peak is collapse territory, and rug probation's job. HDFI was
+ *   -99% at $8,249 and the board billed it "Retraced 0.03x";
+ * - a pool under the dust line is not something anyone could trade out of,
+ *   whatever the chart says.
+ *
+ * Volume is deliberately NOT a liveness signal here: rug day IS the volume
+ * (HDFI printed $1.4M while dying).
+ *
+ * A card that fails these clauses is not exiled — it stays in fresh, and in
+ * runners if it still qualifies there.
  */
 function isRetraced(card: BoardCard): boolean {
+  if (card.peakMultiple === null || card.peakMultiple < THRESHOLDS.runnerMultiple) return false;
+  if (card.liquidityUsd === null || card.liquidityUsd < THRESHOLDS.dustLiquidityUsd) return false;
+  // board.ts derives this from the same mcap/peak pair, clamped to 0-100, and
+  // it is what the section sorts by — so the rule and the sort never disagree.
+  const off = card.retraceFromPeakPct;
   return (
-    card.peakMultiple !== null &&
-    card.peakMultiple >= THRESHOLDS.runnerMultiple &&
-    card.mcapUsd !== null &&
-    card.peakMcapSinceCall !== null &&
-    card.mcapUsd <= (1 - THRESHOLDS.retraceFromPeakRatio) * card.peakMcapSinceCall
+    off !== null &&
+    off >= THRESHOLDS.retraceFromPeakRatio * 100 &&
+    off <= THRESHOLDS.retraceMaxFromPeakRatio * 100
   );
 }
 

@@ -19,6 +19,12 @@ Running record of decisions made with the owner. Newest at the bottom.
 
 - COV link label in Phanes: unidentified; dropped as non-blocking.
 
+## 2026-09-02 — Full Telegram browser login (round 12)
+
+- Owner: members hitting the plain web URL (shared links, new devices) must be able to sign in — the telegram-only wall becomes a real login. Implement Telegram's 2026 OIDC flow (oauth.telegram.org, Authorization Code + PKCE, JWT id_token verified against Telegram's JWKS; Client ID/Secret + allowed URLs configured in BotFather's Login Widget section — see docs/research-auth-architecture.md).
+- Feature is env-gated (TG_OAUTH_CLIENT_ID/SECRET): absent = the old wall text; present = the login button. The Mini App initData path and the handoff bridge are untouched — this is the third door, same session cookie, same getChatMember gate behind it.
+- The `jose` library is sanctioned for the JWT verification (security-critical parsing is not a place for hand-rolling; strict alg allowlist, iss/aud/exp verified).
+
 ## 2026-09-02 — Liquidity deaths need persistence (round 11)
 
 - Live case OMNI: pool 6 minutes old, called 19:02:11, declared dead (liquidity_floor) 19:02:14 off a single liquidity=$0 first reading while the chart traded happily to $132K — newborn-pool indexing lag, not a rug.

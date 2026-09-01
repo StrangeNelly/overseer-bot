@@ -254,6 +254,8 @@ async function applyCallRevivals(db: Db, token: TokenRow, snap: MarketSnapshot):
  * Instant death from one reading. Retracing to the curve floor is deliberately
  * NOT here any more (docs/decisions.md round 6) — the rug sweep hides those,
  * with a comeback path — so this no longer needs the token's all-time peak.
+ * Round 10's collapse rule is peak-relative and lives there for the same
+ * reason: it is a claim about a sustained hour, not about one reading.
  */
 async function checkDeath(db: Db, token: TokenRow, snap: MarketSnapshot | null): Promise<void> {
   const reason = classifyTokenDeath({ phase: token.phase, ageHours: ageHours(token) }, snap);

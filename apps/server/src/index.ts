@@ -26,10 +26,15 @@ const { db, client } = createDb(config.databaseUrl);
 const bot = createBot(config, db);
 const api = createApi(db, bot.api, config);
 
-// WEB_ONLY=1: serve API + SPA against the live DB without starting the bot or
-// the poller — for local dev while the deployed instance owns Telegram polling
-// (two pollers 409-fight) and the snapshot writes.
-const webOnly = process.env.WEB_ONLY === '1';
+// The bot + poller run ONLY in production (or under an explicit RUN_BOT=1).
+// A second bot instance anywhere 409-crash-fights the deployed one — a local
+// `npm run dev` did exactly that to real users on 2026-09-02 — and a second
+// poller double-writes snapshots. Local default is therefore web-only:
+// API + SPA against the live DB, nothing that touches Telegram.
+// (WEB_ONLY=1 still forces web-only anywhere, including production.)
+const webOnly =
+  process.env.WEB_ONLY === '1' ||
+  (process.env.NODE_ENV !== 'production' && process.env.RUN_BOT !== '1');
 
 const server = serve({ fetch: api.fetch, port: config.port }, (info) => {
   console.log(`api listening on :${info.port}${webOnly ? ' (WEB_ONLY: no bot, no poller)' : ''}`);

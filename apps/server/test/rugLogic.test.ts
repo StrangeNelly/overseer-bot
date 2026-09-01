@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { THRESHOLDS } from '@groupie/shared';
 import {
+  hideVerdict,
   isProbationExpired,
   MAX_BUCKET_AGE_MS,
   REVIVE_MAX_BUCKET_AGE_MS,
@@ -121,6 +122,96 @@ describe('shouldHide — the 1h rug floor (docs/decisions.md round 6)', () => {
     if (!broken) throw new Error('fixture');
     broken.maxMcapUsd = NaN;
     expect(shouldHide(buckets, NOW)).toBe(false);
+  });
+
+  it('reports WHICH rule hid the token', () => {
+    expect(hideVerdict(maxima(HOUR_OF_BUCKETS, FLAT), NOW)).toBe('floor');
+    expect(hideVerdict(maxima(HOUR_OF_BUCKETS, 100_000), NOW)).toBeNull();
+  });
+});
+
+/**
+ * The collapse rule (docs/decisions.md round 10). The live case it was written
+ * for: HDFI sold off to $8,249 — $249 ABOVE the absolute floor, so round 6's
+ * rule never fired — having peaked at $872,124 since the call. -99%, and the
+ * board called it "Retraced 0.03x".
+ */
+describe('shouldHide — the collapse rule (docs/decisions.md round 10)', () => {
+  const HDFI_PEAK = 872_124;
+  /** The sell-off shelf: just above the $8k floor, nowhere near 10% of the peak. */
+  const hdfiShelf = (i: number): number => 8_200 + (i % 5) * 100;
+
+  it('hides the HDFI shape: -99% from peak, parked just above the floor', () => {
+    const buckets = maxima(HOUR_OF_BUCKETS, hdfiShelf);
+    // The absolute floor alone would have left it on the board forever.
+    expect(shouldHide(buckets, NOW)).toBe(false);
+    expect(shouldHide(buckets, NOW, HDFI_PEAK)).toBe(true);
+    expect(hideVerdict(buckets, NOW, HDFI_PEAK)).toBe('collapse');
+  });
+
+  it('never hides a big bleeder — a loss is not a rug', () => {
+    // LIGMA-shaped: 0.37x of a $2.68M peak, still a $996k market.
+    expect(shouldHide(maxima(HOUR_OF_BUCKETS, 996_000), NOW, 2_680_000)).toBe(false);
+  });
+
+  it('holds the $30k ceiling even at 95% off the peak', () => {
+    // A $1M coin down to $50k is collapse-shaped by ratio, but $50k is still a
+    // market the board has to show. The ceiling is what draws that line.
+    expect(shouldHide(maxima(HOUR_OF_BUCKETS, 50_000), NOW, 1_000_000)).toBe(false);
+    expect(shouldHide(maxima(HOUR_OF_BUCKETS, THRESHOLDS.collapseCeilingUsd), NOW, 1_000_000)).toBe(
+      false,
+    );
+    expect(
+      shouldHide(maxima(HOUR_OF_BUCKETS, THRESHOLDS.collapseCeilingUsd - 1), NOW, 1_000_000),
+    ).toBe(true);
+  });
+
+  it('is inert without a peak: 10% of nothing hides nothing', () => {
+    expect(shouldHide(maxima(HOUR_OF_BUCKETS, hdfiShelf), NOW, null)).toBe(false);
+    expect(shouldHide(maxima(HOUR_OF_BUCKETS, hdfiShelf), NOW, 0)).toBe(false);
+    expect(shouldHide(maxima(HOUR_OF_BUCKETS, hdfiShelf), NOW, NaN)).toBe(false);
+  });
+
+  it('one bucket back above a tenth of the peak proves life', () => {
+    // A $200k peak, so the bounce ($20,001) breaks the RATIO alone — it sits
+    // well under the $30k ceiling, and every other bucket is a clean collapse.
+    const buckets = maxima(HOUR_OF_BUCKETS, 15_000);
+    expect(shouldHide(buckets, NOW, 200_000)).toBe(true);
+    const bounce = buckets[8];
+    if (!bounce) throw new Error('fixture');
+    bounce.maxMcapUsd = 20_001;
+    expect(shouldHide(buckets, NOW, 200_000)).toBe(false);
+  });
+
+  it('qualifies at exactly a tenth of the peak (the rule is "at or below")', () => {
+    // $200k peak: the line is $20k, comfortably under the $30k ceiling.
+    const line = 200_000 * THRESHOLDS.collapseFromPeakRatio;
+    expect(shouldHide(maxima(HOUR_OF_BUCKETS, line), NOW, 200_000)).toBe(true);
+    expect(shouldHide(maxima(HOUR_OF_BUCKETS, line + 1), NOW, 200_000)).toBe(false);
+  });
+
+  it('clears the same span, coverage and freshness hurdles as the floor rule', () => {
+    // 20 minutes of collapse is not an hour of it...
+    expect(shouldHide(maxima(5, hdfiShelf), NOW, HDFI_PEAK)).toBe(false);
+    // ...two lonely buckets either side of an outage are not an hour of it...
+    expect(shouldHide(maxima(5, hdfiShelf, NOW, 15 * MINUTE), NOW, HDFI_PEAK)).toBe(false);
+    // ...and neither is an hour that stopped being observed 31 minutes ago.
+    const stale = maxima(HOUR_OF_BUCKETS, hdfiShelf, NOW - MAX_BUCKET_AGE_MS - MINUTE);
+    expect(shouldHide(stale, NOW, HDFI_PEAK)).toBe(false);
+  });
+
+  it('a non-finite bucket max is no more collapse evidence than floor evidence', () => {
+    const buckets = maxima(HOUR_OF_BUCKETS, hdfiShelf);
+    const broken = buckets[2];
+    if (!broken) throw new Error('fixture');
+    broken.maxMcapUsd = NaN;
+    expect(shouldHide(buckets, NOW, HDFI_PEAK)).toBe(false);
+  });
+
+  it('a peak never disqualifies a token the floor rule already condemned', () => {
+    // Round 10 only widened the way IN: a $3k coin still hides on the floor
+    // rule, however modest the peak it is measured against.
+    expect(hideVerdict(maxima(HOUR_OF_BUCKETS, FLAT), NOW, 5_000)).toBe('floor');
   });
 });
 

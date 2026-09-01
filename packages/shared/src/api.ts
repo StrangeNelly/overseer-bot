@@ -86,7 +86,12 @@ export interface BoardResponse {
     fresh: BoardCard[];
     /** Active, multiple >= 3x, not retraced; sorted by multiple desc. */
     runners: BoardCard[];
-    /** Active, peakMultiple >= 3x AND current <= 60% of peak; sorted by retrace desc. */
+    /**
+     * Active, peakMultiple >= 3x, 40-85% off peak, and liquidity above the dust
+     * line; sorted by retrace desc. The upper bound and the liquidity clause are
+     * round 10's "pulled back but NOT dying": past 85% down is a collapse, which
+     * rug probation owns, never a "dip".
+     */
     retraced: BoardCard[];
     /**
      * callStatus 'died', activity in window; sorted by diedAt desc. Every death

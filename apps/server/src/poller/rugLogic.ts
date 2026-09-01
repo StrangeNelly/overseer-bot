@@ -7,6 +7,10 @@ import { POLL_TIERS, THRESHOLDS } from '@groupie/shared';
  * back over $30k and holding it for 3h REVIVES it into view; 24h of probation
  * without that is the permanent rug.
  *
+ * Round 10 adds a SECOND way in (the collapse rule) and changes nothing else:
+ * an hour at <= 10% of peak-since-call while under $30k hides the token into
+ * exactly the same probation, with exactly the same comeback path.
+ *
  * Hiding is cheap to undo, so an hour is enough evidence for it. Reviving and
  * expiring are not, so both keep round 5's conservative posture: span, coverage
  * and freshness hurdles before any verdict.
@@ -60,44 +64,96 @@ export interface ReviveBucket {
   minMcapUsd: number;
 }
 
+/** Which rule put a token on probation — the hide log says which, nothing else branches on it. */
+export type HideReason = 'floor' | 'collapse';
+
 /**
- * Has this token been under the rug floor continuously for the full hide
- * window? A true verdict hides it into probation — it does not kill it.
- *
- * `buckets` are 5-minute MAXIMA ascending by time, possibly with gaps. Maxima,
- * not averages: one bucket that PEAKED above the floor proves the token was
- * alive in that window, and an average would let a single flat hour bury it.
- *
- * Four independent hurdles, all required, plus freshness:
+ * The window hurdles both hide rules share: enough evidence, recent enough, and
+ * actually about the last hour.
  *
  * 1. there is anything to judge at all;
  * 2. the newest bucket is recent (see MAX_BUCKET_AGE_MS);
  * 3. we have watched the token for the whole window — a coin called 20 minutes
  *    ago can never have been under the floor for an hour;
  * 4. the window is backed by real data, not two lonely buckets either side of a
- *    polling outage: >= 50% of the buckets a 5-minute cadence would produce;
- * 5. every bucket max is below the floor.
+ *    polling outage: >= 50% of the buckets a 5-minute cadence would produce.
  */
-export function shouldHide(buckets: RugBucket[], nowMs: number): boolean {
+function hasHideEvidence(buckets: RugBucket[], nowMs: number): boolean {
   const oldest = buckets[0];
   const newest = buckets[buckets.length - 1];
   if (!oldest || !newest) return false;
 
   if (nowMs - newest.bucketStartMs > MAX_BUCKET_AGE_MS) return false;
   if (nowMs - oldest.bucketStartMs < THRESHOLDS.rugHideHours * HOUR_MS) return false;
-  if (buckets.length < THRESHOLDS.rugHideHours * BUCKETS_PER_HOUR * MIN_COVERAGE_RATIO) {
-    return false;
-  }
+  return buckets.length >= THRESHOLDS.rugHideHours * BUCKETS_PER_HOUR * MIN_COVERAGE_RATIO;
+}
 
+/**
+ * Every bucket max satisfies `test`. An unmeasurable max is never rug evidence
+ * (death.ts's rule), and it must not be silently skipped.
+ */
+function everyBucketMax(buckets: RugBucket[], test: (maxMcapUsd: number) => boolean): boolean {
   for (const bucket of buckets) {
-    // Strictly below: the owner's rule is "under $8k", so a bucket sitting AT
-    // the floor is not under it. An unmeasurable max is never rug evidence
-    // either (death.ts's rule), and it must not be silently skipped.
-    if (!Number.isFinite(bucket.maxMcapUsd) || bucket.maxMcapUsd >= THRESHOLDS.rugFloorMcapUsd) {
-      return false;
-    }
+    if (!Number.isFinite(bucket.maxMcapUsd) || !test(bucket.maxMcapUsd)) return false;
   }
   return true;
+}
+
+/**
+ * Which rug rule this token's last hour satisfies, if either — null means it
+ * stays on the board. A verdict hides it into probation; it does not kill it.
+ *
+ * `buckets` are 5-minute MAXIMA ascending by time, possibly with gaps. Maxima,
+ * not averages: one bucket that PEAKED above a threshold proves the token was
+ * alive in that window, and an average would let a single flat hour bury it.
+ *
+ * Two independent ways in, over the same window and the same hurdles:
+ *
+ * - 'floor' (round 6): every bucket max strictly under $8k — the curve floor.
+ * - 'collapse' (round 10): every bucket max at or below 10% of peak-since-call
+ *   AND under the $30k ceiling. This exists because a sell-off rug parks just
+ *   ABOVE the absolute floor rather than under it — HDFI sat at $8,249 against
+ *   an $8,000 floor, -99% from an $872k peak, and showed as "Retraced 0.03x".
+ *   The ceiling is what keeps a big bleeder visible: a coin down 90% at $996k
+ *   is a loss the board must still show, not a rug to hide.
+ *
+ * `peakMcapUsd` is the highest mcap seen since the call (null when we never
+ * recorded one, which makes the collapse rule inert rather than generous).
+ */
+export function hideVerdict(
+  buckets: RugBucket[],
+  nowMs: number,
+  peakMcapUsd: number | null = null,
+): HideReason | null {
+  if (!hasHideEvidence(buckets, nowMs)) return null;
+
+  // Strictly below: the owner's rule is "under $8k", so a bucket sitting AT the
+  // floor is not under it.
+  if (everyBucketMax(buckets, (mcap) => mcap < THRESHOLDS.rugFloorMcapUsd)) return 'floor';
+
+  // A missing, unreadable or non-positive peak is no evidence of a collapse —
+  // 10% of nothing would hide every token we know least about.
+  if (peakMcapUsd === null || !Number.isFinite(peakMcapUsd) || peakMcapUsd <= 0) return null;
+  const collapseLine = peakMcapUsd * THRESHOLDS.collapseFromPeakRatio;
+  // At or below the line ("down 90%" includes exactly 90%), and strictly under
+  // the ceiling, which is an absolute mcap bound like the floor above it.
+  const collapsed = everyBucketMax(
+    buckets,
+    (mcap) => mcap <= collapseLine && mcap < THRESHOLDS.collapseCeilingUsd,
+  );
+  return collapsed ? 'collapse' : null;
+}
+
+/**
+ * Has this token earned rug probation — by either rule? See hideVerdict, which
+ * this is the boolean face of.
+ */
+export function shouldHide(
+  buckets: RugBucket[],
+  nowMs: number,
+  peakMcapUsd: number | null = null,
+): boolean {
+  return hideVerdict(buckets, nowMs, peakMcapUsd) !== null;
 }
 
 /**

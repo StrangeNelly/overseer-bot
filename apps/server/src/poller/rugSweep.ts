@@ -1,13 +1,14 @@
-import { and, eq, gte, inArray, isNotNull, isNull, lt, ne, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, isNull, lt, max, ne, sql } from 'drizzle-orm';
 import { calls, snapshots, tokens, type Db } from '@groupie/db';
 import { THRESHOLDS } from '@groupie/shared';
 import { publish } from '../events.js';
 import { markTokenDead } from './markDead.js';
 import {
+  hideVerdict,
   isProbationExpired,
   RUG_BUCKET_MS,
-  shouldHide,
   shouldRevive,
+  type HideReason,
   type ReviveBucket,
   type RugBucket,
 } from './rugLogic.js';
@@ -16,9 +17,14 @@ import {
  * The rug probation sweep (docs/decisions.md round 6, superseding round 5's
  * single 6h auto-removal). One pass runs three transitions in a fixed order:
  *
- *   hide    — under $8k for an hour: off every board section, onto probation;
+ *   hide    — under $8k for an hour, OR an hour at <= 10% of peak-since-call
+ *             while under $30k (round 10's collapse rule): off every board
+ *             section, onto probation;
  *   revive  — back over $30k and holding: into view with the Reviving badge;
  *   expire  — 24h of probation with no comeback: the permanent rug.
+ *
+ * Round 10 widened only the way IN: probation, its cadence, the revival bar and
+ * the expiry are round 6's, untouched.
  *
  * Revival is judged BEFORE expiry on purpose: a token that qualifies for both
  * on the same boundary tick gets the comeback, not the grave.
@@ -62,7 +68,12 @@ interface Bucket {
 
 /**
  * Cheap prefilter, so only plausible rugs pay for a series query: the cached
- * mcap already says the token is under the floor right now.
+ * mcap already says the token is under the widest bar either hide rule uses.
+ *
+ * That bar is round 10's $30k collapse ceiling rather than round 6's $8k floor,
+ * because a collapsed token parks ABOVE the floor by definition. The extra
+ * candidates it admits ($8k-$30k) are cheap — the peak lookup and hideVerdict
+ * throw out everything that is merely small rather than collapsed.
  *
  * Phase is deliberately NOT a filter beyond 'dead' — a curve token drifting at
  * $3k is exactly the target, and graduated/unresolved tokens rug too. A dead
@@ -79,9 +90,35 @@ async function loadHideCandidates(db: Db): Promise<TokenRow[]> {
         isNull(tokens.rugHiddenAt),
         ne(tokens.phase, 'dead'),
         isNotNull(tokens.mcapUsd),
-        lt(tokens.mcapUsd, THRESHOLDS.rugFloorMcapUsd),
+        lt(tokens.mcapUsd, THRESHOLDS.collapseCeilingUsd),
       ),
     );
+}
+
+/**
+ * Highest peak-since-call per candidate token, in one grouped query — the
+ * denominator of round 10's collapse rule.
+ *
+ * The MAX across a token's calls, not per call: probation is a token-level
+ * state (the card leaves every section), so the collapse has to be judged
+ * against the biggest run any caller actually saw. A token with no usable peak
+ * is simply absent from the map, which leaves the collapse rule inert for it.
+ */
+async function loadPeaks(db: Db, tokenIds: number[]): Promise<Map<number, number>> {
+  const peaks = new Map<number, number>();
+  if (tokenIds.length === 0) return peaks;
+
+  const rows = await db
+    .select({ tokenId: calls.tokenId, peak: max(calls.peakMcapSinceCall) })
+    .from(calls)
+    .where(inArray(calls.tokenId, tokenIds))
+    .groupBy(calls.tokenId);
+  for (const row of rows) {
+    const peak = Number(row.peak);
+    if (!Number.isFinite(peak) || peak <= 0) continue;
+    peaks.set(row.tokenId, peak);
+  }
+  return peaks;
 }
 
 /** Everything currently on probation — the input to both later passes. */
@@ -146,21 +183,28 @@ function usd(value: number | null | undefined): string {
   return `$${Math.round(value ?? 0).toLocaleString()}`;
 }
 
+/** Why the sweep hid a token, in the words the log line needs. */
+function hideNote(reason: HideReason, peakMcapUsd: number | null): string {
+  if (reason === 'collapse') {
+    const pct = Math.round(THRESHOLDS.collapseFromPeakRatio * 100);
+    return `collapsed to <=${pct}% of its ${usd(peakMcapUsd)} peak (under ${usd(THRESHOLDS.collapseCeilingUsd)})`;
+  }
+  return `under ${usd(THRESHOLDS.rugFloorMcapUsd)}`;
+}
+
 /**
- * Hide everything that has sat under the floor for the hide window. Nothing
- * dies here and no call is binned: the card simply leaves the board while we
- * watch it for a comeback.
+ * Hide everything that has sat under the floor — or, since round 10, collapsed
+ * to a tenth of its peak under the ceiling — for the hide window. Nothing dies
+ * here and no call is binned: the card simply leaves the board while we watch
+ * it for a comeback.
  */
 async function runHidePass(db: Db, nowMs: number): Promise<number> {
   const candidates = await loadHideCandidates(db);
   if (candidates.length === 0) return 0;
 
-  const buckets = await loadBuckets(
-    db,
-    candidates.map((t) => t.id),
-    nowMs - HIDE_LOOKBACK_MS,
-    'max',
-  );
+  const tokenIds = candidates.map((t) => t.id);
+  const buckets = await loadBuckets(db, tokenIds, nowMs - HIDE_LOOKBACK_MS, 'max');
+  const peaks = await loadPeaks(db, tokenIds);
 
   let hidden = 0;
   for (const token of candidates) {
@@ -168,7 +212,9 @@ async function runHidePass(db: Db, nowMs: number): Promise<number> {
       bucketStartMs: b.bucketStartMs,
       maxMcapUsd: b.mcapUsd,
     }));
-    if (!shouldHide(maxima, nowMs)) continue;
+    const peak = peaks.get(token.id) ?? null;
+    const reason = hideVerdict(maxima, nowMs, peak);
+    if (!reason) continue;
 
     // Guarded on the column this pass is claiming, so a repost that cancelled
     // probation a moment ago is never silently re-hidden by a stale candidate
@@ -186,7 +232,7 @@ async function runHidePass(db: Db, nowMs: number): Promise<number> {
     // board instead of lingering until some unrelated poll event.
     publish({ type: 'rug_hidden', tokenId: token.id });
     console.log(
-      `rug probation: hid ${label(token)} — mcap ${usd(token.mcapUsd)} under ${usd(THRESHOLDS.rugFloorMcapUsd)} for ${THRESHOLDS.rugHideHours}h+`,
+      `rug probation: hid ${label(token)} — mcap ${usd(token.mcapUsd)} ${hideNote(reason, peak)} for ${THRESHOLDS.rugHideHours}h+`,
     );
   }
   return hidden;

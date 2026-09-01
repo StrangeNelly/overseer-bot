@@ -51,10 +51,29 @@ export const THRESHOLDS = {
   reviveLiquidityUsd: 1_000,
   /** Dead curve token back above this mcap = revived. */
   reviveCurveMcapUsd: 16_000,
+  /**
+   * Round 10 (collapse rule): mcap at or below this fraction of peak-since-call
+   * is a collapse, not a dip. Sell-off rugs park just ABOVE the absolute floor
+   * above (HDFI died at $8,249 with the floor at $8,000), so the second way into
+   * rug probation is relative to what the token actually was.
+   */
+  collapseFromPeakRatio: 0.1,
+  /**
+   * Round 10: ...but only below this absolute mcap. A big bleeder is a loss, not
+   * a rug — LIGMA at $996k and 0.37x is still a market, and the board must keep
+   * showing it.
+   */
+  collapseCeilingUsd: 30_000,
   /** Runner = current/peak mcap at least this multiple of mcap-at-call. */
   runnerMultiple: 3,
   /** Retraced = peak >= runnerMultiple x call AND now this far below peak. */
   retraceFromPeakRatio: 0.4,
+  /**
+   * Round 10 (retraced liveness): ...and NOT further below peak than this.
+   * Beyond it the coin is in collapse territory, which is rug probation's job —
+   * "Retraced 0.03x" was the lie this clause closes.
+   */
+  retraceMaxFromPeakRatio: 0.85,
 } as const;
 
 /** Poller tiers (seconds between polls per token). */
