@@ -72,7 +72,7 @@ function isUniqueViolation(err: unknown): boolean {
 /**
  * Find or create the group row. `activate` controls whether an existing
  * 'removed' row is resurrected — only lifecycle events (my_chat_member,
- * /groupie) may do that; plain messages must not revive a removed group.
+ * /overseer) may do that; plain messages must not revive a removed group.
  */
 async function ensureGroup(
   db: Db,
@@ -150,7 +150,7 @@ async function migrateGroup(db: Db, oldChatId: number, newChatId: number) {
   console.log(`group chat migrated ${oldChatId} -> ${newChatId}`);
 }
 
-/* -------------------------------------------------- /groupie subcommands */
+/* -------------------------------------------------- /overseer subcommands */
 
 /** Telegram caps a message at 4096 chars; a long watchlist is truncated. */
 const WATCHLIST_MAX_LINES = 50;
@@ -167,7 +167,7 @@ function alertsSummary(s: AlertSettings): string {
     `Alerts: nuke >${s.nukeDropPct}% in ${s.nukeWindowMin}m · ` +
     `buy-opp ≥${s.buyRetracePct}% retrace from a ${s.buyPeakWindowHours}h high ` +
     `at least ${s.buyMinDeclineHours}h old · cooldown ${s.cooldownMin}m per coin. ` +
-    `Tune: /groupie set nuke <pct> <minutes> · /groupie set buyopp <pct> <maxHours>`
+    `Tune: /overseer set nuke <pct> <minutes> · /overseer set buyopp <pct> <maxHours>`
   );
 }
 
@@ -185,7 +185,7 @@ async function handleWatch(
 ): Promise<void> {
   const address = commandAddress(args);
   if (!address) {
-    await ctx.reply('Usage: /groupie watch <contract address>');
+    await ctx.reply('Usage: /overseer watch <contract address>');
     return;
   }
   const token = await upsertToken(db, address);
@@ -208,7 +208,7 @@ async function handleWatch(
     `Watching ${tokenLabel(token.symbol, address)} — ` +
       `nuke >${s.nukeDropPct}%/${s.nukeWindowMin}m, ` +
       `buy-opp ≥${s.buyRetracePct}% retrace over ${s.buyMinDeclineHours}-${s.buyPeakWindowHours}h. ` +
-      `/groupie alerts to tune.`,
+      `/overseer alerts to tune.`,
   );
 
   // A coin nobody called has never been polled: resolve it now so the alert
@@ -226,7 +226,7 @@ async function handleUnwatch(
 ): Promise<void> {
   const address = commandAddress(args);
   if (!address) {
-    await ctx.reply('Usage: /groupie unwatch <contract address>');
+    await ctx.reply('Usage: /overseer unwatch <contract address>');
     return;
   }
   const token = (
@@ -262,7 +262,7 @@ async function handleWatchlist(db: Db, ctx: Context, group: GroupRow): Promise<v
     .where(and(eq(watches.groupId, group.id), eq(watches.active, true)))
     .orderBy(watches.addedAt);
   if (rows.length === 0) {
-    await ctx.reply('Watchlist is empty. /groupie watch <ca> to follow a coin.');
+    await ctx.reply('Watchlist is empty. /overseer watch <ca> to follow a coin.');
     return;
   }
   const lines = rows
@@ -275,7 +275,7 @@ async function handleWatchlist(db: Db, ctx: Context, group: GroupRow): Promise<v
 }
 
 const SET_USAGE =
-  'Usage: /groupie set nuke <pct 5-95> <minutes 5-60> · /groupie set buyopp <pct 5-95> <maxHours 1-48>';
+  'Usage: /overseer set nuke <pct 5-95> <minutes 5-60> · /overseer set buyopp <pct 5-95> <maxHours 1-48>';
 
 async function handleSet(db: Db, ctx: Context, group: GroupRow, args: string[]): Promise<void> {
   const what = args[0]?.toLowerCase();
@@ -314,7 +314,7 @@ async function handleSet(db: Db, ctx: Context, group: GroupRow, args: string[]):
 }
 
 /**
- * Everything after `/groupie`. Returns true when the command consumed a
+ * Everything after `/overseer`. Returns true when the command consumed a
  * contract address as an ARGUMENT — that address is a watchlist instruction,
  * not a call, so the message must not fall through to call ingestion.
  */
@@ -384,7 +384,9 @@ export function createBot(config: Config, db: Db): Bot {
   // Member-initiated interaction: the board link, or a watchlist subcommand.
   // Falls through to the message handler so a CA pasted in the same message is
   // still ingested — unless a subcommand already consumed that address.
-  bot.command('groupie', async (ctx, next) => {
+  // /overseer is the command (post-rebrand); /groupie stays as a quiet alias
+  // so pinned messages and muscle memory keep working.
+  bot.command(['overseer', 'groupie'], async (ctx, next) => {
     let consumedAddress = false;
     if (isGroupChat(ctx) && ctx.from) {
       const group = await ensureGroup(db, ctx.chat.id, ctx.chat.title, { activate: true });

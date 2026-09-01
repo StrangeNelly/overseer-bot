@@ -48,6 +48,13 @@ function closeServer(): Promise<void> {
 // token, 409 second instance) must kill the process, not leave a healthy-
 // looking API with a dead bot.
 if (!webOnly) {
+  // Registers the command for Telegram's "/" autocomplete. Best-effort: a
+  // failure here must not stop the bot (the command works regardless).
+  bot.api
+    .setMyCommands([
+      { command: 'overseer', description: 'board · watch <ca> · watchlist · alerts · set' },
+    ])
+    .catch((err) => console.warn('setMyCommands failed:', err));
   bot
     .start({
       allowed_updates: ['message', 'my_chat_member'],
