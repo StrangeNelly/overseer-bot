@@ -685,17 +685,32 @@ async function sweepRugs(db: Db): Promise<void> {
  * alongside the polls, which is exactly what the budgeter is for.
  *
  * Both guards matter: the interval stamp is taken BEFORE the run so a scan that
- * throws waits out the full interval instead of retrying every 15-second tick,
- * and the in-flight flag makes a scan that outlives its own interval impossible
- * to double-start.
+ * throws does not retry every 15-second tick, and the in-flight flag makes a
+ * scan that outlives its own interval impossible to double-start.
+ *
+ * The boot hold-off exists because a restart is the worst possible moment to
+ * scan: every tracked token is overdue at once, the catch-up polls flood the
+ * GT budget, and the scan's own pages draw 429s (observed live on the
+ * 2026-09-02 deploy — the boot scan aborted). Five minutes lets the burst
+ * drain. A failed scan then retries in minutes, not hours: the old rows it
+ * leaves behind are already stale, and waiting a full interval to replace
+ * them serves nobody.
  */
+const SLEEPER_BOOT_HOLDOFF_MS = 5 * 60_000;
+const SLEEPER_RETRY_MS = 10 * 60_000;
+const processStartMs = Date.now();
+
 function scanSleepers(db: Db): void {
   if (sleeperScanRunning) return;
+  if (Date.now() - processStartMs < SLEEPER_BOOT_HOLDOFF_MS) return;
   if (Date.now() - lastSleeperScanMs < SLEEPER_SCAN_INTERVAL_MS) return;
   lastSleeperScanMs = Date.now();
   sleeperScanRunning = true;
   void runSleeperScan(db)
-    .catch((err) => console.error('sleeper scan failed:', err))
+    .catch((err) => {
+      console.error('sleeper scan failed:', err);
+      lastSleeperScanMs = Date.now() - SLEEPER_SCAN_INTERVAL_MS + SLEEPER_RETRY_MS;
+    })
     .finally(() => {
       sleeperScanRunning = false;
     });
