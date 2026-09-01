@@ -19,6 +19,12 @@ Running record of decisions made with the owner. Newest at the bottom.
 
 - COV link label in Phanes: unidentified; dropped as non-blocking.
 
+## 2026-09-02 — Sleepers v2: real time-in-band + LP-ratio floor (round 14)
+
+- **Time-in-band (owner ask):** sleepers gain a duration dimension computed from GeckoTerminal's free hourly/daily OHLCV at scan time — continuous candle-close residency in the band, INCLUDING history from before we first saw the coin. Duration filter chips: 3h (default) / 6h / 24h / 3d / 7d / 2w / 1m. Selecting 2w or 1m unlocks a fifth band, $1M–$3M (owner: acceptable at those durations only). Store ~12 entries/band so duration filters have depth; serve 3 as today. Rows show "in band Xh/Xd".
+- **LP-ratio floor (owner, FORESKIN case):** unlocked-LP coins rugged mid-cycle leave crumbs ($5.4K LP on $1.85M mcap = 0.29%). New scan filter: liquidity >= 2% of mcap (liqToMcapMinRatio: 0.02) alongside the absolute $10K. Also self-corrects mid-cycle pulls at the next scan.
+- Accepted constraint: the stream refreshes every 3h; a pull inside the window can linger one cycle (the "refreshed Xm ago" line is the honesty marker).
+
 ## 2026-09-02 — Locked-LP reality: mcap-based revival (round 13)
 
 - Owner insight: PONS fair launches lock LP permanently, so every graduated corpse keeps ~$5-6K residual liquidity forever (ETH-priced). Consequences accepted/fixed:
