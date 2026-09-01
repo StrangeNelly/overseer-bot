@@ -19,6 +19,14 @@ Running record of decisions made with the owner. Newest at the bottom.
 
 - COV link label in Phanes: unidentified; dropped as non-blocking.
 
+## 2026-09-02 — Watch button, declined toggle, design pass 2 (round 15)
+
+- **Watch button on the board (approved):** tap-to-watch on cards; watching = the existing Telegram alerts (nuke / buy-opp) for that coin. **Cap: each member may hold max 3 active watches per group** (enforced server-side by addedBy; friendly error when full; unwatching frees a slot). Bot commands stay as the power-user path and share the same cap.
+- **$100-at-call toggle: DECLINED.** Owner: the app is collaborative, not competitive — revisit only if the product is ever monetized/sold.
+- **API gaps batch (approved):** hidden-probation count in Died, true todayCallCount for Pulse, mcap-at-death stored, desktop Ranging summary data. PLUS (from the OMNI confusion): dead-token revival checks every 3h for the first 48h after death, then daily.
+- **Functional link gaps ship as build work, not design:** the desktop spotlight/hero cards (Retraced, Reviving, Runners hero) must carry the same links row as list rows (AXIOM/GMGN/DEXS/COPY CA/X); and every coin with a stored website gets a website link app-wide (websiteUrlFrom already exists — surface it as a pill next to X).
+- **Design pass 2 (owner will run Claude Design again):** gripes for the brief — (1) no wayfinding: the active view needs a clear headline ("RANGING", "SLEEPERS"...) especially on desktop; (2) "looks like a terminal, which is fine, but I want more visualisation" — push the data-graphics dimension (the board should show, not just list); (3) link affordances audit across every card variant. Brief to be updated before the owner's session.
+
 ## 2026-09-02 — Ranging short holds (round 14b)
 
 - Owner: Ranging gains **30m** and **1h** durations, for the smaller bands only ("the first 3 default bands"). Implemented as a band-ceiling rule — durations under 3h require the band's hi <= $500K — so equivalent custom bands behave consistently; the 500K-1M preset (and anything larger) never offers them. Sub-hour values display as minutes. Bundled into the Sleepers v2 build (same files).
