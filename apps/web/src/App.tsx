@@ -880,7 +880,19 @@ export default function App() {
               {handoffPending ? 'opening…' : 'full ↗'}
             </button>
           ) : null}
-          <WindowSwitcher value={boardWindow} onChange={onWindowChange} />
+          {/* Ranging and Sleepers keep their own clocks (duration chips / the
+              3h scan) — the board windows don't apply there, so the chips go
+              visibly inert instead of lying about being pressable. */}
+          <div
+            className={rangingActive || sleepersActive ? 'wins-inert' : undefined}
+            title={
+              rangingActive || sleepersActive
+                ? 'Board time windows don’t apply to this tab'
+                : undefined
+            }
+          >
+            <WindowSwitcher value={boardWindow} onChange={onWindowChange} />
+          </div>
         </div>
       </header>
 

@@ -2067,3 +2067,9 @@ a {
     display: none;
   }
 }
+
+/* Board window chips on tabs that ignore them (Ranging, Sleepers). */
+.wins-inert {
+  opacity: 0.3;
+  pointer-events: none;
+}
