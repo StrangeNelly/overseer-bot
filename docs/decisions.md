@@ -19,6 +19,14 @@ Running record of decisions made with the owner. Newest at the bottom.
 
 - COV link label in Phanes: unidentified; dropped as non-blocking.
 
+## 2026-09-02 — Locked-LP reality: mcap-based revival (round 13)
+
+- Owner insight: PONS fair launches lock LP permanently, so every graduated corpse keeps ~$5-6K residual liquidity forever (ETH-priced). Consequences accepted/fixed:
+  - The $250 liquidity_floor only catches true LP pulls (unlocked pools) — fine, keep it for those; fair-launch rugs die via the mcap probation machinery (already true since rounds 6/10).
+  - **BUG (latent, would fire on the next daily dead-poll): graduated-death revival used liquidity >= $1K, which residual locked LP always satisfies → dead fair-launch coins would zombie-flap (revive -> probation -> die -> revive, ~25h cycle). Fix: dead-token revival is mcap-based for EVERY death type — one bar, mcap >= $30K (probation's revival threshold; replaces both the $1K liquidity bar and the separate $16K curve bar). The pool.graduated===true curve-completion revival stays.**
+  - Per-call 95% LP-collapse rule is blunted by locked LP (~85-90% max observable drop) — left as-is; mcap rules carry the weight.
+- Builds bundled with round 11 (liquidity-death persistence) — same files.
+
 ## 2026-09-02 — Full Telegram browser login (round 12)
 
 - Owner: members hitting the plain web URL (shared links, new devices) must be able to sign in — the telegram-only wall becomes a real login. Implement Telegram's 2026 OIDC flow (oauth.telegram.org, Authorization Code + PKCE, JWT id_token verified against Telegram's JWKS; Client ID/Secret + allowed URLs configured in BotFather's Login Widget section — see docs/research-auth-architecture.md).
