@@ -4,20 +4,48 @@ import { num, type MarketSnapshot } from './types.js';
 const BASE = 'https://api.geckoterminal.com/api/v2';
 
 /**
- * GeckoTerminal free tier: 30 calls/min, keyless. Budget to 20/min AND pace
- * every grant at least 2s apart: their limiter demonstrably punishes bursts,
- * not just the per-minute total — on 2026-09-02, scans drew 429s mid-listing
- * at a 25/min window even with per-page gaps, because concurrent poll traffic
- * stacked grants into the same instant. Even spacing caps the instantaneous
- * rate at 30/min while the window keeps the average at 20.
+ * GeckoTerminal free tier: nominally 30 calls/min, keyless — but the limit we
+ * actually get is VARIABLE. Live on 2026-09-02, evenly-paced traffic at 20/min
+ * still drew a 429 every handful of calls, with only a few grants surviving
+ * after each cooldown: the per-IP quota is shared with whoever else calls GT
+ * from the same egress IP (Railway pools them), so no fixed constant can be
+ * right on both a quiet IP and a crowded one.
+ *
+ * So the budgeter ADAPTS: every grant is paced at least `minGapMs` apart; a
+ * 429 doubles that gap (up to 15s) on top of the 30s cooldown, and a sustained
+ * run of successes halves it back down to the 2s base. The 20/min window stays
+ * as the hard ceiling for the quiet-IP case.
  */
 const WINDOW_MS = 60_000;
 const MAX_PER_WINDOW = 20;
-const MIN_GAP_MS = 2_000;
+const BASE_GAP_MS = 2_000;
+const MAX_GAP_MS = 15_000;
+/** Successes in a row before the gap relaxes one step. */
+const RECOVERY_STREAK = 20;
 const COOLDOWN_MS = 30_000;
 const stamps: number[] = [];
 let cooldownUntil = 0;
 let lastGrantMs = 0;
+let minGapMs = BASE_GAP_MS;
+let successStreak = 0;
+
+function backOff(): void {
+  successStreak = 0;
+  const next = Math.min(minGapMs * 2, MAX_GAP_MS);
+  if (next !== minGapMs) {
+    minGapMs = next;
+    console.warn(`gt budgeter: 429 — pacing backed off to ${minGapMs / 1000}s between calls`);
+  }
+}
+
+function noteSuccess(): void {
+  successStreak += 1;
+  if (successStreak >= RECOVERY_STREAK && minGapMs > BASE_GAP_MS) {
+    successStreak = 0;
+    minGapMs = Math.max(BASE_GAP_MS, minGapMs / 2);
+    console.log(`gt budgeter: quota recovered — pacing relaxed to ${minGapMs / 1000}s`);
+  }
+}
 
 async function acquireSlot(): Promise<void> {
   for (;;) {
@@ -29,8 +57,8 @@ async function acquireSlot(): Promise<void> {
     // Single-threaded: no await between this check and the grant below, so
     // two concurrent waiters cannot both pass the same gap.
     const sinceLast = now - lastGrantMs;
-    if (sinceLast < MIN_GAP_MS) {
-      await new Promise((r) => setTimeout(r, MIN_GAP_MS - sinceLast));
+    if (sinceLast < minGapMs) {
+      await new Promise((r) => setTimeout(r, minGapMs - sinceLast));
       continue;
     }
     while (stamps.length > 0 && now - stamps[0]! > WINDOW_MS) stamps.shift();
@@ -50,14 +78,19 @@ async function gtFetch(path: string): Promise<unknown | null> {
     headers: { accept: 'application/json' },
     signal: AbortSignal.timeout(15_000),
   });
-  if (res.status === 404) return null;
+  if (res.status === 404) {
+    noteSuccess();
+    return null;
+  }
   if (res.status === 429) {
     // Back off at the budgeter, not in flight: sleeping here would hold the
     // caller's tick open and every later caller would pay the wait again.
     cooldownUntil = Date.now() + COOLDOWN_MS;
+    backOff();
     throw new Error('geckoterminal 429');
   }
   if (!res.ok) throw new Error(`geckoterminal ${res.status} on ${path}`);
+  noteSuccess();
   return res.json();
 }
 
