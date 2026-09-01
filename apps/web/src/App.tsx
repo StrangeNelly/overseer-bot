@@ -233,14 +233,26 @@ async function bootstrap(): Promise<BootState> {
       return { kind: 'blocked', title: 'Sign-in failed', message: describe(err), retry: true };
     }
   } else {
+    // A handoff redemption (or an earlier visit) may already have left a valid
+    // session cookie — check for it BEFORE deciding the browser needs a login
+    // path, or a freshly handed-off member lands on the login wall.
+    let hasSession = false;
     try {
-      await authDev();
-    } catch (err) {
-      // No dev session endpoint in prod — browser login lands in a later milestone.
-      if (err instanceof ApiError && (err.status === 404 || err.status === 401 || err.status === 501)) {
-        return { kind: 'telegram-only' };
+      await fetchMe();
+      hasSession = true;
+    } catch {
+      // No session; fall through to the dev-login attempt.
+    }
+    if (!hasSession) {
+      try {
+        await authDev();
+      } catch (err) {
+        // No dev session endpoint in prod — browser login lands in a later milestone.
+        if (err instanceof ApiError && (err.status === 404 || err.status === 401 || err.status === 501)) {
+          return { kind: 'telegram-only' };
+        }
+        return { kind: 'blocked', title: 'Sign-in failed', message: describe(err), retry: true };
       }
-      return { kind: 'blocked', title: 'Sign-in failed', message: describe(err), retry: true };
     }
   }
 
