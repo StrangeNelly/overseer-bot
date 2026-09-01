@@ -929,6 +929,12 @@ a {
   .row:hover {
     background: var(--wash-magenta);
   }
+
+  /* Sleepers rows have a tap-reveal row for touch; on a mouse the hover strip
+     is the only copy of the links that may show. */
+  .row-slp .row-pills {
+    display: none;
+  }
 }
 
 .bin-btn {

@@ -13,6 +13,7 @@ import {
 } from '@groupie/shared';
 import { bandPosition } from '../derive';
 import { avatarHue, fmtAge, fmtHours, fmtTurnover, fmtUsd, shortAddress } from '../format';
+import { hoverCapable } from '../motion';
 import type { WatchProps } from '../watch';
 import { targetFromSleeper, watchFor } from '../watch';
 import { LinkPills } from './LinkPills';
@@ -321,7 +322,12 @@ function SleeperRow({
           className="row-hit"
           aria-expanded={expanded}
           aria-label={`Trading links for ${label}`}
-          onClick={() => onToggle(entry.address)}
+          // Hover already reveals the strip on a mouse; the tap row below is
+          // for pointers that cannot hover, and opening both doubled the links.
+          onClick={() => {
+            if (hoverCapable()) return;
+            onToggle(entry.address);
+          }}
         />
 
         <Disc entry={entry} />

@@ -29,6 +29,20 @@ const TENX = 10;
 
 const REDUCED_QUERY = '(prefers-reduced-motion: reduce)';
 
+/**
+ * A mouse-class pointer that can hover. Tap-reveal exists for the devices that
+ * cannot: on one that can, a click must not open a second copy of the strip
+ * the hover already shows.
+ */
+export function hoverCapable(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
+  try {
+    return window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+  } catch {
+    return false;
+  }
+}
+
 export function prefersReducedMotion(): boolean {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
   try {
