@@ -27,6 +27,7 @@ Running record of decisions made with the owner. Newest at the bottom.
   3. **Revival**: reaches **>= $30K and holds for 3h** (every reading at/above; a dip breaks the hold) → back into view under a new **"Reviving"** section, badge for 24h (tokens.reviving_at), then classifies normally. Un-hides and resumes activity-based polling.
   4. **Expiry**: 24h of probation without revival → the permanent rug: markTokenDead('rug_floor') + system-bin (round 5's mechanics).
   5. **Repost during probation cancels it** (renewed-attention rule): straight back into view; tanks again → new 1h clock.
+  5a. **Amendment (owner): re-mentions of a token currently under $9K mcap are INERT.** People re-post rugged CAs to show the chart / point at the corpse — that is not renewed attention. The mention is still recorded (history + count), but it does NOT bump activity/resurface the card, un-bin, cancel probation, or request revival. Cached mcap null (unresolved token) = normal repost behavior. First calls are unaffected. Threshold $9K sits deliberately above the $8K floor (hysteresis).
 - The instant armed-curve-floor death is RETIRED (the hide covers retrace-to-floor with a comeback path). liquidity_floor stays immediate (a drained pool cannot revive on mcap). never_graduated 48h stays.
 - Thresholds as constants for now: hide $8K/1h, probation 30min/24h, revival $30K/3h.
 
