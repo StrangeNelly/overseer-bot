@@ -8,6 +8,7 @@ import type { Db } from '@groupie/db';
 import type { Config } from '../config.js';
 import { createAuthRoutes, devAuthEnabled } from './auth.js';
 import { createBoardRoutes } from './board.js';
+import { createHandoffRoutes } from './handoff.js';
 import { requireMember, type ApiEnv } from './membership.js';
 import { createRangeRoutes } from './range.js';
 import { createSseRoutes } from './sse.js';
@@ -71,6 +72,11 @@ export function createApi(db: Db, botApi: Api, config: Config): Hono<ApiEnv> {
   app.route('/', createBoardRoutes(db));
   app.route('/', createRangeRoutes(db));
   app.route('/', createSseRoutes(db));
+  // Mini App -> browser handoff. The mint sits under /api/g/:slug/* so it picks
+  // up the csrf + requireMember middleware above; the redeem is a PUBLIC GET on
+  // /auth/handoff — outside /api (so the 404 branch below can't claim it) and
+  // registered here, ahead of the static/SPA handlers, so it is matched first.
+  app.route('/', createHandoffRoutes(db, config));
 
   // Built SPA. /api/* must never fall through to a static file or the shell —
   // an unmatched API path is a 404, not an HTML page.

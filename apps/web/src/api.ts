@@ -1,6 +1,7 @@
 import type {
   BoardResponse,
   BoardWindow,
+  HandoffResponse,
   MeResponse,
   RangeBoardResponse,
   RangeDurationHours,
@@ -116,6 +117,15 @@ export function binCall(slug: string, callId: number): Promise<void> {
   return request<void>(`${groupPath(slug)}/calls/${encodeURIComponent(String(callId))}/bin`, {
     method: 'POST',
   });
+}
+
+/**
+ * Mint a one-time link that opens this board in the system browser, already
+ * signed in. The url is a 60-second credential — hand it straight to the
+ * browser, never render or log it.
+ */
+export function createHandoff(slug: string): Promise<HandoffResponse> {
+  return request<HandoffResponse>(`${groupPath(slug)}/handoff`, { method: 'POST' });
 }
 
 /** Multiplexed live stream for one group. */

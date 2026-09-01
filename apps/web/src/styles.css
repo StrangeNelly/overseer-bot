@@ -108,6 +108,25 @@ a {
   text-overflow: ellipsis;
 }
 
+/* Plumbing-grade: enough to be tappable and legible. The design pass owns how
+   this bridge actually presents (docs/decisions.md round 7). */
+.handoff-btn {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.handoff-btn:disabled {
+  color: var(--dim);
+  opacity: 0.7;
+}
+
 .live {
   flex: 0 0 auto;
   display: inline-flex;

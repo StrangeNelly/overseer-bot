@@ -13,6 +13,7 @@ import {
   authDev,
   authTelegram,
   binCall,
+  createHandoff,
   eventsUrl,
   fetchBoard,
   fetchMe,
@@ -24,7 +25,7 @@ import type { RangeBand, RangeControls } from './components/Ranging';
 import type { SectionKey } from './components/SectionTabs';
 import { WINDOWS, WindowSwitcher } from './components/WindowSwitcher';
 import { shortAddress } from './format';
-import { tgInitData, tgReady, tgStartParam } from './telegram';
+import { tgInitData, tgOpenLink, tgReady, tgStartParam } from './telegram';
 
 const WINDOW_STORAGE_KEY = 'groupie.window';
 const RANGE_STORAGE_KEY = 'groupie.range';
@@ -157,6 +158,33 @@ function resolveSlug(): string | null {
   return null;
 }
 
+/**
+ * Read `?handoff=expired` (set by the server when a browser handoff link is
+ * dead) and strip it from the address bar, so a reload does not keep announcing
+ * it. Runs at import — exactly once, unlike a StrictMode-doubled render.
+ */
+function takeHandoffExpired(): boolean {
+  if (typeof window === 'undefined') return false;
+  let params: URLSearchParams;
+  try {
+    params = new URLSearchParams(window.location.search);
+  } catch {
+    return false;
+  }
+  if (params.get('handoff') !== 'expired') return false;
+  try {
+    params.delete('handoff');
+    const query = params.toString();
+    const { pathname, hash } = window.location;
+    window.history.replaceState(null, '', `${pathname}${query ? `?${query}` : ''}${hash}`);
+  } catch {
+    // A tidy address bar is a nicety; the explanation below is the point.
+  }
+  return true;
+}
+
+const HANDOFF_EXPIRED = takeHandoffExpired();
+
 async function bootstrap(): Promise<BootState> {
   const slug = resolveSlug();
   if (!slug) return { kind: 'no-slug' };
@@ -232,6 +260,7 @@ export default function App() {
   const [hidden, setHidden] = useState<ReadonlySet<number>>(NO_HIDDEN);
   const [binningId, setBinningId] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [handoffPending, setHandoffPending] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [rangeControls, setRangeControls] = useState<RangeControls>(loadRangeControls);
   const [range, setRange] = useState<RangeBoardResponse | null>(null);
@@ -336,6 +365,8 @@ export default function App() {
     }
   }, []);
 
+  /** Fixed for the life of the page: the launch payload only exists in the webview. */
+  const inTelegram = useMemo(() => tgInitData() !== null, []);
   const rangeBand = useMemo(() => resolveBand(rangeControls), [rangeControls]);
   const rangingActive = section === 'ranging';
   const rangeHours = rangeControls.hours;
@@ -451,6 +482,28 @@ export default function App() {
     [loadBoard],
   );
 
+  /**
+   * Hand this board to the system browser, already signed in: the server mints
+   * a one-time link off our Mini App session and Telegram opens it outside the
+   * webview (docs/decisions.md round 7).
+   */
+  const onFullBoard = useCallback(async () => {
+    const currentSlug = slugRef.current;
+    if (!currentSlug) return;
+    setHandoffPending(true);
+    setActionError(null);
+    try {
+      const { url } = await createHandoff(currentSlug);
+      // No Telegram bridge (or an old client that lacks openLink): a new tab is
+      // the next best thing.
+      if (!tgOpenLink(url)) window.open(url, '_blank', 'noopener,noreferrer');
+    } catch (err) {
+      setActionError(`Could not open the full board. ${describe(err)}`);
+    } finally {
+      setHandoffPending(false);
+    }
+  }, []);
+
   const retryBoot = useCallback(() => {
     bootPromise = null;
     setBoot({ kind: 'loading' });
@@ -475,7 +528,13 @@ export default function App() {
       <Screen
         title="Log in via Telegram"
         message="This board opens from inside Telegram for now. Tap the pinned board link in your group. Browser login is coming in a later release."
-      />
+      >
+        {HANDOFF_EXPIRED ? (
+          <p className="screen-message" role="status">
+            That link expired — tap Full board in Telegram again.
+          </p>
+        ) : null}
+      </Screen>
     );
   }
 
@@ -501,6 +560,17 @@ export default function App() {
             {title}
           </h1>
           <LiveDot state={live} />
+          {/* Telegram only: a browser tab is already the full board. */}
+          {inTelegram ? (
+            <button
+              type="button"
+              className="handoff-btn"
+              onClick={() => void onFullBoard()}
+              disabled={handoffPending}
+            >
+              {handoffPending ? 'Opening…' : 'Full board ↗'}
+            </button>
+          ) : null}
         </div>
         <WindowSwitcher value={boardWindow} onChange={onWindowChange} />
       </header>

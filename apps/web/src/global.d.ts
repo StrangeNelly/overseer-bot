@@ -26,6 +26,8 @@ interface TelegramWebApp {
   themeParams?: TelegramThemeParams;
   ready?: () => void;
   expand?: () => void;
+  /** Opens a url in the SYSTEM browser, outside the Mini App webview. */
+  openLink?: (url: string, options?: { try_instant_view?: boolean }) => void;
 }
 
 declare global {

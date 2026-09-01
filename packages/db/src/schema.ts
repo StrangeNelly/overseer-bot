@@ -207,6 +207,33 @@ export const alerts = pgTable(
   (t) => [index('alerts_cooldown_idx').on(t.groupId, t.tokenId, t.type, t.firedAt)],
 );
 
+/**
+ * One-time browser handoff (docs/decisions.md round 7). The Mini App is already
+ * authenticated via initData; it mints one of these so the system browser can
+ * redeem it for the ordinary session cookie and land on the same board.
+ *
+ * Only the sha256 of the token is stored — the raw secret exists in the link
+ * and nowhere else, so a leaked database row cannot be replayed as a login.
+ * Rows are short-lived (60s TTL) and cleaned up opportunistically on mint.
+ */
+export const handoffTokens = pgTable(
+  'handoff_tokens',
+  {
+    id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
+    /** sha256 hex of the raw token. Unique: it is the lookup key on redeem. */
+    tokenHash: text('token_hash').notNull().unique(),
+    userId: bigint('user_id', { mode: 'number' }).notNull(),
+    /** Board to land on, copied from the gated group at mint time. */
+    slug: text('slug').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    /** Set by the atomic claim; a non-null value is what makes redemption one-shot. */
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  // Serves both housekeeping sweeps and the per-user live-token cap.
+  (t) => [index('handoff_tokens_user_created_idx').on(t.userId, t.createdAt)],
+);
+
 export const launchMonitors = pgTable(
   'launch_monitors',
   {

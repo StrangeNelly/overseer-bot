@@ -34,6 +34,24 @@ export function tgReady(): void {
 }
 
 /**
+ * Hand a url to the SYSTEM browser. Returns false when the bridge is absent or
+ * refuses (plain tab, or a Telegram client too old to know openLink), which is
+ * the caller's cue to fall back to window.open.
+ */
+export function tgOpenLink(url: string): boolean {
+  const app = webApp();
+  // Called on the object, not through a detached reference: the bridge method
+  // is not guaranteed to survive losing its `this`.
+  if (typeof app?.openLink !== 'function') return false;
+  try {
+    app.openLink(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Adopt the client's background colour so the Mini App sheet does not show a
  * seam against Telegram's chrome. Everything else stays on our own palette.
  */

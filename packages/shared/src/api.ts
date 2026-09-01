@@ -100,6 +100,15 @@ export interface MeResponse {
   userId: number;
 }
 
+/**
+ * POST /api/g/:slug/handoff — a one-time, short-TTL link that opens the same
+ * board in the system browser already signed in (docs/decisions.md round 7).
+ * The url carries a secret: open it, never render or log it.
+ */
+export interface HandoffResponse {
+  url: string;
+}
+
 /** Ranging board: accumulation-phase detection over the group's own calls. */
 export const RANGE_DURATION_HOURS = [6, 12, 24, 48] as const;
 export type RangeDurationHours = (typeof RANGE_DURATION_HOURS)[number];
