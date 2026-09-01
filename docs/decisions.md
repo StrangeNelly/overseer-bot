@@ -28,6 +28,12 @@ Running record of decisions made with the owner. Newest at the bottom.
   - Died rows, Ranging cards, Sleepers rows, spotlight cards, list rows, half-sheet rows: all carry WATCH / WATCHING / WATCHING·YOU. Dead coins may be watched (alerts resume automatically on revival).
 - Neutral-framing law unchanged: the board prints numbers ("NARCO +41% in 1h — on watch"), never "buy-opp"/"nuke" labels.
 
+## 2026-09-02 — GeckoTerminal budget diet (round 16b, ops)
+
+- Observed live: GT 429s at every pacing we tried (25/min bursts, 20/min even, 8s gaps). Pattern = five calls succeed, the sixth fails, a cooldown buys a few more — a small token bucket per egress IP, shared with other Railway tenants. Shipped: an ADAPTIVE budgeter (429 doubles the inter-call gap to 15s max; 20 successes halve it back to 2s) + 5-min boot hold-off + 10-min scan retry. Scans now complete, slowly; alert-path polling of graduated coins is DexScreener and unaffected.
+- Root demand: every curve-phase (PONS) token costs ONE GT call per 45s (`pollCurve` → `gt.getPool`), up to 40/min with the group's call volume. Graduated coins already batch 30/call via DexScreener.
+- **Decided (next backend milestone, after round 16 lands):** (1) batch curve polls through GT's multi-pool endpoint (`/networks/robinhood/pools/multi/{a,b,...}`, ≤30 per call — probed live 2026-09-02) so ten curve coins cost one call; pollDead's curve path shares it. (2) Incremental sleeper residency: an address still in the same band as last scan extends `inBandHours` by the elapsed time instead of refetching candles — OHLCV only for new or band-changed entries. (3) Budgeter priority: poll traffic is granted before scan traffic when both wait. Expected effect: steady-state GT demand well under the observed bucket; the scan's 10 listing pages per 3h become the only burst.
+
 ## 2026-09-02 — Watch button, declined toggle, design pass 2 (round 15)
 
 - **Watch button on the board (approved):** tap-to-watch on cards; watching = the existing Telegram alerts (nuke / buy-opp) for that coin. **Cap: each member may hold max 3 active watches per group** (enforced server-side by addedBy; friendly error when full; unwatching frees a slot). Bot commands stay as the power-user path and share the same cap.
