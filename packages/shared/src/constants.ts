@@ -24,6 +24,10 @@ export const THRESHOLDS = {
    * observed above this mcap. Launches start ~$5k, i.e. below the floor.
    */
   curveFloorArmMcapUsd: 12_000,
+  /** Owner rule (decisions.md round 5): mcap below this is the rug floor. */
+  rugFloorMcapUsd: 8_000,
+  /** Owner rule (decisions.md round 5): this long unbroken under it = rug, auto-removed. */
+  rugFloorHours: 6,
   /** Graduated token whose best pair holds less than this = dead. */
   deadLiquidityUsd: 250,
   /** Call dies when liquidity falls below this fraction of liquidity-at-call. */

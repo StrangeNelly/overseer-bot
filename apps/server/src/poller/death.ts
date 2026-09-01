@@ -9,7 +9,11 @@ export interface TokenState {
   peakMcapUsd: number | null;
 }
 
-export type DeathReason = 'curve_floor' | 'liquidity_floor' | 'never_graduated';
+/**
+ * 'rug_floor' is the only reason not decided here: it is a claim about six
+ * hours of history, so rugSweep.ts owns it (a single snapshot can't see it).
+ */
+export type DeathReason = 'curve_floor' | 'liquidity_floor' | 'never_graduated' | 'rug_floor';
 
 /**
  * Token-level death (a market fact, group-independent).

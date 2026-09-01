@@ -31,8 +31,13 @@ const RANGE_STORAGE_KEY = 'groupie.range';
 const DEFAULT_WINDOW: BoardWindow = '24h';
 /** Typing a custom band fires on every keystroke; wait for the pause. */
 const RANGE_DEBOUNCE_MS = 400;
-/** Collapse bursts of live events into one refetch. */
-const REFETCH_DEBOUNCE_MS = 2000;
+/**
+ * Collapse bursts of live events into one refetch. Sized for peak volume
+ * (50-100 calls/day, docs/decisions.md round 5): every event in the group hits
+ * every open board, so a wider window is what keeps client and DB load sane at
+ * that card count.
+ */
+const REFETCH_DEBOUNCE_MS = 6000;
 /** Don't refetch twice when a tab switch fires both focus and visibilitychange. */
 const FOCUS_REFETCH_MIN_GAP_MS = 3000;
 const AGE_TICK_MS = 60_000;

@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, max, ne, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, max, sql } from 'drizzle-orm';
 import { calls, snapshots, tokens, watches, type Db } from '@groupie/db';
 import { IDLE_AFTER_HOURS, POLL_TIERS, SNAPSHOT_RETENTION, THRESHOLDS } from '@groupie/shared';
 import { publish } from '../events.js';
@@ -8,6 +8,8 @@ import { mcapAtTimestamp, resolveToken } from '../market/resolve.js';
 import type { MarketSnapshot } from '../market/types.js';
 import { runAlertPass } from './alerts.js';
 import { callLiquidityDeath, classifyTokenDeath, isRevived } from './death.js';
+import { markTokenDead } from './markDead.js';
+import { runRugSweep } from './rugSweep.js';
 
 const TICK_MS = 15_000;
 /** Caps per tick, sized to GeckoTerminal's 25-30/min budget. */
@@ -17,6 +19,8 @@ const MAX_DEAD_POLLS_PER_TICK = 4;
 const MAX_OHLCV_FILLS_PER_TICK = 5;
 
 const PRUNE_INTERVAL_MS = 3_600_000;
+/** The rug verdict covers 6h of history; asking every tick would just re-ask it. */
+const RUG_SWEEP_INTERVAL_MS = 600_000;
 
 type TokenRow = typeof tokens.$inferSelect;
 
@@ -29,6 +33,7 @@ const IMMEDIATE_POLL: PollOpts = { budgeted: false };
 
 let ohlcvFills = 0;
 let lastPruneMs = 0;
+let lastRugSweepMs = 0;
 
 interface Candidate {
   token: TokenRow;
@@ -226,32 +231,6 @@ async function applyCallRevivals(db: Db, token: TokenRow, snap: MarketSnapshot):
   }
 }
 
-async function markTokenDead(db: Db, token: TokenRow, reason: string): Promise<void> {
-  const now = new Date();
-  // Guarded so a stale candidate row can't re-kill a dead token: that would
-  // drift diedAt and publish token_died twice.
-  const transitioned = await db
-    .update(tokens)
-    .set({
-      phase: 'dead',
-      diedAt: now,
-      deathReason: reason,
-      revivedAt: null,
-      lastPolledAt: now,
-    })
-    .where(and(eq(tokens.id, token.id), ne(tokens.phase, 'dead')))
-    .returning({ id: tokens.id });
-  if (!transitioned[0]) return;
-  // Copy the token's death onto its calls so call-level info is always the
-  // authoritative answer to "when/why did this card die".
-  await db
-    .update(calls)
-    .set({ status: 'died', diedAt: now, deathReason: reason })
-    .where(and(eq(calls.tokenId, token.id), eq(calls.status, 'active')));
-  publish({ type: 'token_died', tokenId: token.id, reason });
-  console.log(`token ${token.address} died: ${reason}`);
-}
-
 async function checkDeath(db: Db, token: TokenRow, snap: MarketSnapshot | null): Promise<void> {
   // The curve floor is a retrace rule, so it needs the highest mcap this token
   // has ever shown; only that phase consults it.
@@ -381,7 +360,13 @@ async function pollGraduatedBatch(db: Db, batch: TokenRow[], opts: PollOpts): Pr
 }
 
 async function pollDead(db: Db, token: TokenRow, opts: PollOpts): Promise<void> {
-  const wasCurve = token.deathReason === 'curve_floor' || token.deathReason === 'never_graduated';
+  // 'rug_floor' can kill either phase, so it identifies neither on its own: a
+  // token with no graduation on record was still on its curve, and a curve
+  // pool is a GeckoTerminal read (its DexScreener "best pair" is dust at best).
+  const wasCurve =
+    token.deathReason === 'curve_floor' ||
+    token.deathReason === 'never_graduated' ||
+    (token.deathReason === 'rug_floor' && token.graduatedAt === null);
   let snap: MarketSnapshot | null = null;
   let pool: gt.GtPoolInfo | null = null;
   if (wasCurve && token.poolAddress) {
@@ -475,6 +460,20 @@ async function pruneSnapshots(db: Db): Promise<void> {
 }
 
 /**
+ * Rug auto-removal (docs/decisions.md round 5). At most every 10 minutes, and
+ * isolated like the prune: a failed sweep must never cost us a tick.
+ */
+async function sweepRugs(db: Db): Promise<void> {
+  if (Date.now() - lastRugSweepMs < RUG_SWEEP_INTERVAL_MS) return;
+  lastRugSweepMs = Date.now();
+  try {
+    await runRugSweep(db);
+  } catch (err) {
+    console.error('rug sweep failed:', err);
+  }
+}
+
+/**
  * One unit of tick work. A thrown poll must not abort the rest of the tick, and
  * stamping lastPolledAt keeps a poisoned token on its tier cadence instead of
  * letting it re-fail at the head of every tick and starve everything behind it.
@@ -546,6 +545,7 @@ export async function runTick(db: Db): Promise<void> {
     console.error('alert pass failed:', err);
   }
 
+  await sweepRugs(db);
   await pruneSnapshots(db);
 }
 

@@ -95,6 +95,8 @@ export const calls = pgTable(
     // the last-death record, exactly like tokens.died_at/death_reason.
     diedAt: timestamp('died_at', { withTimezone: true }),
     deathReason: text('death_reason'),
+    // Null on a binned call = the SYSTEM binned it (rug auto-removal,
+    // docs/decisions.md round 5); a member's bin always records their user id.
     binnedBy: bigint('binned_by', { mode: 'number' }),
     binnedAt: timestamp('binned_at', { withTimezone: true }),
     // Set when a died/binned token is re-mentioned; M2 poller consumes it.
