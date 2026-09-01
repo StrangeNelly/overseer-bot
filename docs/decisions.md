@@ -19,6 +19,14 @@ Running record of decisions made with the owner. Newest at the bottom.
 
 - COV link label in Phanes: unidentified; dropped as non-blocking.
 
+## 2026-09-02 — "Sleepers" chain-wide discovery stream (round 9)
+
+- Owner idea: automate the DexScreener filter-browse loop. Every **3h**, scan ALL of Robinhood Chain (GeckoTerminal pools by 24h volume, ~200 deep) and surface the top **3** coins per band (same four bands as Ranging) that are sitting at a mcap without being rugs. **This is the first uncurated surface** — its own tab, clearly framed as chain-wide research leads, never mixed with the group's calls.
+- Ranked by **turnover** (vol/mcap). Floors: liquidity >= $10K; pair age **1h–10d**; txns/24h >= **20**; and a **tapering volume requirement**: requiredVol = 170 * mcap^0.4114 (anchored: $10K vol at $20K mcap ~ 50%, $50K vol at $1M ~ 5% — owner's spec verbatim).
+- Excludes anything the group has already called (per group). **Twitter-required by default** with a "show all" toggle; persistence marker ("on the list 9h") instead of forced rotation — still qualifying = still interesting.
+- No tracking/polling of sleepers (snapshot stream only; a coin becomes tracked the moment someone posts it in chat). No alerts, no chat messages.
+- **App-wide addition (owner):** every coin card gets a small link to its X account where known (design pass didn't cover it) — an X pill in the card link row, sourced from stored socials.
+
 ## 2026-09-02 — Design chosen (round 8)
 
 - Owner ran the Claude Design pass and picked **Degen Neon** (Round 1 option 1B). Handoff lives in `design/extracted/design_handoff_overseer_board/` — README.md is the implementation SPEC (high fidelity: match tokens/anatomy exactly; motion implemented to spec, not taste), overseer-canvas.dc.html is the visual reference, PNGs are the Telegram brand assets.
