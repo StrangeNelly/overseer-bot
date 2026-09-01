@@ -28,6 +28,14 @@ Running record of decisions made with the owner. Newest at the bottom.
   - Died rows, Ranging cards, Sleepers rows, spotlight cards, list rows, half-sheet rows: all carry WATCH / WATCHING / WATCHING·YOU. Dead coins may be watched (alerts resume automatically on revival).
 - Neutral-framing law unchanged: the board prints numbers ("NARCO +41% in 1h — on watch"), never "buy-opp"/"nuke" labels.
 
+## 2026-09-02 — Sleepers: stocks filter, short holds, higher bands (round 17)
+
+- Diagnosis behind the ask: the latest scan held 12 coins with 24h+ in band, but 10 of them were Robinhood's **tokenized stocks/ETFs** (QQQ, TSM, PLTR, MRNA...) with no X account — the "X only" default was the only thing hiding them, and they will always dominate the long-hold bands because they are stocks. Residency itself reads GeckoTerminal candle history and reaches back before the bot existed (HOOD: 214h on day one).
+- **Stocks filter (owner):** a toggle chip next to "X only" — `no stocks`, default ON — excluding tokenized equities. Detection is a rule, not a heuristic: token name ends with the issuer suffix `• Robinhood Token`, OR the name matches a leveraged-equity pattern (`<n>x Long|Short`), OR the address is on a tiny curated list (HOOD's own token, named just "HOOD"). Stocks are still scanned and stored (`is_stock`) so the toggle can show them; the per-band keep cut applies to stocks and non-stocks separately so stocks never crowd real coins out of a band.
+- **Short holds (owner):** duration chips gain **30m** and **1h**. Hourly candles cannot see half an hour, so entries with under 3h of hourly residency get a 15-minute-candle read (≤3h back) — 30m = 2 consecutive in-band 15m closes ending at a candle ≤30 min old, 1h = 4. Bounded cost: only new/short entries fetch minute candles (incremental residency from round 16b covers the rest).
+- **Higher bands (owner):** `$1M–$3M` becomes a regular band at every duration (supersedes round 14's 2w/1m gate), and **`$3M–$5M`** and **`$5M–$8M`** are added. Seven bands total; the 10-day pool-age ceiling for sub-2w views (round 9) is unchanged.
+- Noted for later: the scan refreshes every 3h, so a "30m in band" reading can be up to 3h old when seen. If round 16b's budget savings hold, the next lever is an hourly scan.
+
 ## 2026-09-02 — GeckoTerminal budget diet (round 16b, ops)
 
 - Observed live: GT 429s at every pacing we tried (25/min bursts, 20/min even, 8s gaps). Pattern = five calls succeed, the sixth fails, a cooldown buys a few more — a small token bucket per egress IP, shared with other Railway tenants. Shipped: an ADAPTIVE budgeter (429 doubles the inter-call gap to 15s max; 20 successes halve it back to 2s) + 5-min boot hold-off + 10-min scan retry. Scans now complete, slowly; alert-path polling of graduated coins is DexScreener and unaffected.
