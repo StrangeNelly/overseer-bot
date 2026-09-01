@@ -19,6 +19,10 @@ Running record of decisions made with the owner. Newest at the bottom.
 
 - COV link label in Phanes: unidentified; dropped as non-blocking.
 
+## 2026-09-02 — Ranging short holds (round 14b)
+
+- Owner: Ranging gains **30m** and **1h** durations, for the smaller bands only ("the first 3 default bands"). Implemented as a band-ceiling rule — durations under 3h require the band's hi <= $500K — so equivalent custom bands behave consistently; the 500K-1M preset (and anything larger) never offers them. Sub-hour values display as minutes. Bundled into the Sleepers v2 build (same files).
+
 ## 2026-09-02 — Sleepers v2: real time-in-band + LP-ratio floor (round 14)
 
 - **Time-in-band (owner ask):** sleepers gain a duration dimension computed from GeckoTerminal's free hourly/daily OHLCV at scan time — continuous candle-close residency in the band, INCLUDING history from before we first saw the coin. Duration filter chips: 3h (default) / 6h / 24h / 3d / 7d / 2w / 1m. Selecting 2w or 1m unlocks a fifth band, $1M–$3M (owner: acceptable at those durations only). Store ~12 entries/band so duration filters have depth; serve 3 as today. Rows show "in band Xh/Xd".
