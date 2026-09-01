@@ -19,6 +19,13 @@ Running record of decisions made with the owner. Newest at the bottom.
 
 - COV link label in Phanes: unidentified; dropped as non-blocking.
 
+## 2026-09-02 — Design chosen (round 8)
+
+- Owner ran the Claude Design pass and picked **Degen Neon** (Round 1 option 1B). Handoff lives in `design/extracted/design_handoff_overseer_board/` — README.md is the implementation SPEC (high fidelity: match tokens/anatomy exactly; motion implemented to spec, not taste), overseer-canvas.dc.html is the visual reference, PNGs are the Telegram brand assets.
+- **Product renamed: Groupie -> "overseer"** (display name/wordmark; repo/infra names unchanged). Matches the bot @overseergroupbot.
+- Accepted behavior changes from the handoff: no Mini App auto-expand (own the half-sheet + Pulse); desktop >=~1100px multi-column no-tabs; links row behind tap/hover reveal (+ COPY CA); badge collapse to one + cyan watched dot; call-story sparkline; Ranging gains a **3h** duration option and suffix-parsing custom inputs with dollar echo; cached-board instant paint.
+- Implementation = next build milestone (single coherent restyle of apps/web + tiny shared-constant change).
+
 ## 2026-09-02 — Design pass shape (round 7)
 
 - Owner runs the pass with Claude Design on Fable 5; inputs are docs/design-brief.md (v2) + docs/design-prompt.md.
