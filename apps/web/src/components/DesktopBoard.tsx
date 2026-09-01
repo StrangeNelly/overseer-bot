@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { BoardCard, BoardResponse } from '@groupie/shared';
+import { fmtDurationHours } from '@groupie/shared';
 import { fmtUsd } from '../format';
 import { prefersReducedMotion, requestMotion } from '../motion';
 import type { Ceremony } from '../motion';
@@ -262,7 +263,7 @@ export function DesktopBoard({
                 <span className="summary-line">
                   {`${rangeSummary.count} coiling in `}
                   <strong>{`${fmtUsd(rangeSummary.loUsd)}–${fmtUsd(rangeSummary.hiUsd)}`}</strong>
-                  {` for ${rangeSummary.minHours}h+`}
+                  {` for ${fmtDurationHours(rangeSummary.minHours)}+`}
                 </span>
                 {rangeSummary.longest ? (
                   <span className="summary-line">

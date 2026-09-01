@@ -1,17 +1,21 @@
-import { RANGE_PRESETS, SLEEPERS, requiredVolumeUsd } from '@groupie/shared';
+import { SLEEPER_BANDS, SLEEPERS, requiredVolumeUsd } from '@groupie/shared';
 
 /**
  * Pure selection logic for the Sleepers chain-wide scan (docs/decisions.md
- * round 9). Everything here is a function of the pool listing and the clock —
- * no network, no database — so the rules that decide what the group sees are
- * testable on their own (apps/server/test/sleeperLogic.test.ts).
+ * rounds 9 and 14). Everything here is a function of the pool listing, the
+ * candles and the clock — no network, no database — so the rules that decide
+ * what the group sees are testable on their own
+ * (apps/server/test/sleeperLogic.test.ts).
  *
  * The pipeline, in order:
- *   dedupe to one pool per TOKEN -> floors -> band bucket -> turnover rank.
+ *   dedupe to one pool per TOKEN -> floors -> band bucket -> turnover rank
+ *   -> (round 14, in sleeperScan) time-in-band per kept entry.
  */
 
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
+const HOUR_SEC = 3_600;
+const DAY_SEC = 24 * HOUR_SEC;
 
 /** One candidate pool, straight off the GeckoTerminal listing. */
 export interface PoolCandidate {
@@ -20,6 +24,8 @@ export interface PoolCandidate {
   poolAddress: string;
   poolName: string | null;
   mcapUsd: number | null;
+  /** Base token price in USD; only the supply inference reads it. */
+  priceUsd: number | null;
   liquidityUsd: number | null;
   vol24Usd: number | null;
   txns24: number | null;
@@ -52,17 +58,17 @@ export interface SleeperPick extends QualifiedSleeper {
 /**
  * The band a market cap belongs to, or null when it sits outside all of them.
  *
- * The RANGE_PRESETS bands share endpoints ($100K is both a high and a low), so
+ * The SLEEPER_BANDS share endpoints ($1M is both a high and a low), so
  * bucketing has to pick a side or an entry could land twice: each band is
  * half-open `[lo, hi)`, and only the last one closes at its high so a coin at
- * exactly $1M is still a sleeper rather than falling off the top.
+ * exactly $3M is still a sleeper rather than falling off the top.
  */
 export function bandFor(mcapUsd: number): Band | null {
   if (!Number.isFinite(mcapUsd)) return null;
-  for (let i = 0; i < RANGE_PRESETS.length; i++) {
-    const preset = RANGE_PRESETS[i];
+  for (let i = 0; i < SLEEPER_BANDS.length; i++) {
+    const preset = SLEEPER_BANDS[i];
     if (!preset) continue;
-    const last = i === RANGE_PRESETS.length - 1;
+    const last = i === SLEEPER_BANDS.length - 1;
     const inBand = mcapUsd >= preset.loUsd && (last ? mcapUsd <= preset.hiUsd : mcapUsd < preset.hiUsd);
     if (inBand) return { loUsd: preset.loUsd, hiUsd: preset.hiUsd };
   }
@@ -110,15 +116,26 @@ export function qualify(candidate: PoolCandidate, nowMs: number): QualifiedSleep
   // 2026-09-02 on a launchpad pool); the floor comparison rejects those too,
   // which is the right answer — a reserve we cannot read is not $10K of depth.
   if (liquidityUsd < SLEEPERS.minLiquidityUsd) return null;
+
+  // ...and the same floor relative to size (round 14, the FORESKIN case): an
+  // unlocked pool that was pulled mid-cycle still shows $10K+ of crumbs against
+  // a market cap nobody has repriced yet. Below 2% there is no market here,
+  // whatever the absolute number says. Inclusive: exactly 2% is a pass.
+  if (liquidityUsd < mcapUsd * SLEEPERS.liqToMcapMinRatio) return null;
+
   if (txns24 < SLEEPERS.minTxns24) return null;
 
-  // Age window, inclusive at both ends: exactly 1h old qualifies, and so does
-  // exactly 10 days. A pool with a future timestamp is a bad reading, not a
-  // brand-new coin, and its negative age fails the minimum.
+  // Age window, inclusive at both ends: exactly 1h old qualifies. The scan's
+  // ceiling is inBandMaxDays, not maxPoolAgeDays — a coin with a month in band
+  // is by definition older than 10 days, so the long-duration chips (round 14)
+  // need older pools admitted here. Round 9's 10-day ceiling still holds for
+  // every short-duration view; the API enforces it at serve time. A pool with
+  // a future timestamp is a bad reading, not a brand-new coin, and its
+  // negative age fails the minimum.
   const ageMs = nowMs - poolCreatedAt.getTime();
   if (!Number.isFinite(ageMs)) return null;
   if (ageMs < SLEEPERS.minPoolAgeHours * HOUR_MS) return null;
-  if (ageMs > SLEEPERS.maxPoolAgeDays * DAY_MS) return null;
+  if (ageMs > SLEEPERS.inBandMaxDays * DAY_MS) return null;
 
   if (vol24Usd < requiredVolumeUsd(mcapUsd)) return null;
 
@@ -166,11 +183,147 @@ export function selectSleepers(
   }
 
   const out: SleeperPick[] = [];
-  for (const preset of RANGE_PRESETS) {
+  for (const preset of SLEEPER_BANDS) {
     const list = byBand.get(preset.loUsd);
     if (!list) continue;
     list.sort((a, b) => b.turnover - a.turnover);
     list.slice(0, keepPerBand).forEach((entry, index) => out.push({ ...entry, rank: index + 1 }));
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Time in band (docs/decisions.md round 14)
+// ---------------------------------------------------------------------------
+
+/** One candle, as GeckoTerminal reports it: `tsSec` is the candle's START. */
+export interface Candle {
+  tsSec: number;
+  close: number;
+}
+
+export interface ResidencyInput {
+  band: Band;
+  /** Market cap at scan time, from the listing row. */
+  entryMcapUsd: number;
+  /** Base token price at scan time, from the SAME listing row. */
+  entryPriceUsd: number | null;
+  /** Hourly candles, newest first. */
+  hourly: readonly Candle[];
+  /**
+   * Daily candles, newest first. Only consulted when every hourly candle was
+   * in band — otherwise the streak already ended inside the hourly window.
+   */
+  daily?: readonly Candle[];
+  nowMs: number;
+}
+
+export interface BandResidency {
+  /** Continuous hours in band ending now, capped at SLEEPERS.inBandMaxDays. */
+  hours: number;
+  /**
+   * True when the walk consumed the WHOLE hourly window without leaving the
+   * band — the caller's signal that fetching daily candles could extend it.
+   */
+  hourlyExhausted: boolean;
+}
+
+/**
+ * Circulating supply, inferred from one (mcap, price) pair.
+ *
+ * The whole measurement rests on this: a token's market cap is
+ * `price x supply`, and supply does not move on the timescales we look at, so
+ * mcap and price are PROPORTIONAL. That lets a pool's candle closes — which are
+ * prices — be read as market caps through a single ratio taken from the listing
+ * row we already trust for today's mcap.
+ *
+ * What the inference cannot see: a real supply change (a burn, a mint, an
+ * unlock) inside the window would tilt older candles' implied mcaps. On this
+ * chain's fair-launch tokens supply is fixed at launch, which is why the
+ * approximation is safe here and would not be on, say, a rebasing token.
+ *
+ * Returns null when the pair cannot produce a usable supply.
+ */
+export function inferSupply(entryMcapUsd: number, entryPriceUsd: number | null): number | null {
+  if (!Number.isFinite(entryMcapUsd) || entryMcapUsd <= 0) return null;
+  if (entryPriceUsd === null || !Number.isFinite(entryPriceUsd) || entryPriceUsd <= 0) return null;
+  const supply = entryMcapUsd / entryPriceUsd;
+  return Number.isFinite(supply) && supply > 0 ? supply : null;
+}
+
+/** Inclusive on both edges: a band's own boundary is part of the band. */
+function closeInBand(close: number, supply: number, band: Band): boolean {
+  const mcap = close * supply;
+  return Number.isFinite(mcap) && mcap >= band.loUsd && mcap <= band.hiUsd;
+}
+
+/** Newest first, defensively — never trust the upstream sort. */
+function newestFirst(candles: readonly Candle[]): Candle[] {
+  return [...candles]
+    .filter((c) => Number.isFinite(c.tsSec) && Number.isFinite(c.close))
+    .sort((a, b) => b.tsSec - a.tsSec);
+}
+
+/**
+ * How long the coin has sat in `band`, continuously, up to right now.
+ *
+ * Walks BACK from the newest candle: each close is converted to a market cap
+ * through the inferred supply, and the first one outside [lo, hi] ends the
+ * streak. Residency is then measured from the START of the oldest unbroken
+ * candle to now — a span, not a candle count, because GeckoTerminal omits
+ * periods with no trades and a quiet hour is residency too (nothing traded, so
+ * nothing left the band).
+ *
+ * Three ways to get 0, all deliberate:
+ *   - no candles at all;
+ *   - the newest candle is older than SLEEPERS.inBandMaxCandleAgeHours — a
+ *     residency claim is about NOW, and stale candles cannot support one;
+ *   - the newest candle is already out of band (the coin has left).
+ */
+export function computeResidency(input: ResidencyInput): BandResidency {
+  const none: BandResidency = { hours: 0, hourlyExhausted: false };
+  const hourly = newestFirst(input.hourly);
+  const newest = hourly[0];
+  if (!newest) return none;
+
+  const nowSec = Math.floor(input.nowMs / 1000);
+  const ageSec = nowSec - newest.tsSec;
+  // Future-stamped candles are a bad reading, not fresh data. One hour of slack
+  // absorbs the in-progress candle and clock skew.
+  if (ageSec < -HOUR_SEC) return none;
+  if (ageSec > SLEEPERS.inBandMaxCandleAgeHours * HOUR_SEC) return none;
+
+  // Falling back to the newest close keeps the measurement possible when the
+  // listing had no price: the ratio is then anchored on that candle, which
+  // makes the newest implied mcap exactly the listing's mcap — the same anchor,
+  // reached the other way round.
+  const supply = inferSupply(input.entryMcapUsd, input.entryPriceUsd ?? newest.close);
+  if (supply === null) return none;
+
+  let streakStartSec: number | null = null;
+  let hourlyExhausted = true;
+  for (const candle of hourly) {
+    if (!closeInBand(candle.close, supply, input.band)) {
+      hourlyExhausted = false;
+      break;
+    }
+    streakStartSec = candle.tsSec;
+  }
+  if (streakStartSec === null) return none;
+
+  // The hourly window (100 candles ≈ 4 days) ran out while still in band, so
+  // the streak is at least that long and the daily candles say how much longer.
+  // Only candles STARTING before the hourly streak are consulted; the ones
+  // overlapping it are the same hours, at a coarser resolution.
+  if (hourlyExhausted) {
+    for (const candle of newestFirst(input.daily ?? [])) {
+      if (candle.tsSec >= streakStartSec) continue;
+      if (!closeInBand(candle.close, supply, input.band)) break;
+      streakStartSec = candle.tsSec;
+    }
+  }
+
+  const capSec = SLEEPERS.inBandMaxDays * DAY_SEC;
+  const spanSec = Math.min(Math.max(0, nowSec - streakStartSec), capSec);
+  return { hours: spanSec / HOUR_SEC, hourlyExhausted };
 }

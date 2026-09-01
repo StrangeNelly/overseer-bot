@@ -1570,6 +1570,23 @@ a {
   box-shadow: 0 0 10px rgba(35, 217, 255, 0.4);
 }
 
+/* The duration filter, directly under the trust boundary: it scrolls sideways
+   on a narrow screen rather than wrapping the seven chips into two rows. */
+.slp-durations {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--sect-border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.slp-durations::-webkit-scrollbar {
+  display: none;
+}
+
+.slp-durations .chips-hours {
+  flex-wrap: nowrap;
+}
+
 .slp-bands {
   display: flex;
   flex-direction: column;
@@ -1632,6 +1649,14 @@ a {
 
 .badge-onlist {
   color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Time in band is the analytical claim on this row, so it takes the analytical
+   accent — the same cyan as the turnover figure it sits above. */
+.badge-inband {
+  color: var(--cyan);
+  border-color: rgba(35, 217, 255, 0.35);
   font-variant-numeric: tabular-nums;
 }
 

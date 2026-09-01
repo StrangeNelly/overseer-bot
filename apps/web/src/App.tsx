@@ -6,9 +6,10 @@ import type {
   BoardWindow,
   RangeBoardResponse,
   RangeDurationHours,
+  SleeperDurationHours,
   SleepersResponse,
 } from '@groupie/shared';
-import { RANGE_DURATION_HOURS, RANGE_PRESETS } from '@groupie/shared';
+import { RANGE_DURATION_HOURS, RANGE_PRESETS, SLEEPER_DURATIONS_HOURS } from '@groupie/shared';
 import {
   ApiError,
   authDev,
@@ -29,7 +30,7 @@ import { DesktopBoard } from './components/DesktopBoard';
 import type { RangeSummary } from './components/DesktopBoard';
 import { MiniBoard } from './components/MiniBoard';
 import { Pulse } from './components/Pulse';
-import { DEFAULT_CONTROLS, Ranging, resolveBand } from './components/Ranging';
+import { DEFAULT_CONTROLS, Ranging, resolveBand, sanitizeRangeControls } from './components/Ranging';
 import type { RangeBand, RangeControls } from './components/Ranging';
 import type { SectionKey } from './components/SectionTabs';
 import { Sleepers } from './components/Sleepers';
@@ -52,6 +53,9 @@ import {
 const WINDOW_STORAGE_KEY = 'groupie.window';
 const RANGE_STORAGE_KEY = 'groupie.range';
 const SLEEPERS_X_ONLY_STORAGE_KEY = 'groupie.sleepers.xOnly';
+const SLEEPERS_MIN_HOURS_STORAGE_KEY = 'groupie.sleepers.minHours';
+/** 3h — the shortest duration, and the server's own default (round 14). */
+const DEFAULT_SLEEPER_HOURS: SleeperDurationHours = 3;
 const DEFAULT_WINDOW: BoardWindow = '24h';
 /** Typing a custom band fires on every keystroke; wait for the pause. */
 const RANGE_DEBOUNCE_MS = 400;
@@ -144,12 +148,14 @@ function loadRangeControls(): RangeControls {
             : index === null
               ? null
               : DEFAULT_CONTROLS.presetIndex;
-        return {
+        // ...and then sanitized as a WHOLE: the short durations only exist on
+        // small bands, so band and duration have to be validated together.
+        return sanitizeRangeControls({
           presetIndex,
           customLo: typeof stored.customLo === 'string' ? stored.customLo : '',
           customHi: typeof stored.customHi === 'string' ? stored.customHi : '',
           hours: isRangeHours(stored.hours) ? stored.hours : DEFAULT_CONTROLS.hours,
-        };
+        });
       }
     }
   } catch {
@@ -178,6 +184,27 @@ function loadSleepersXOnly(): boolean {
 function saveSleepersXOnly(value: boolean): void {
   try {
     window.localStorage.setItem(SLEEPERS_X_ONLY_STORAGE_KEY, value ? '1' : '0');
+  } catch {
+    // Persisting the preference is best-effort.
+  }
+}
+
+/** Re-validated against the tuple: the stored value is user-editable. */
+function loadSleepersMinHours(): SleeperDurationHours {
+  try {
+    const value = Number(window.localStorage.getItem(SLEEPERS_MIN_HOURS_STORAGE_KEY));
+    if ((SLEEPER_DURATIONS_HOURS as readonly number[]).includes(value)) {
+      return value as SleeperDurationHours;
+    }
+  } catch {
+    // Private mode / disabled storage: fall back to the default.
+  }
+  return DEFAULT_SLEEPER_HOURS;
+}
+
+function saveSleepersMinHours(value: SleeperDurationHours): void {
+  try {
+    window.localStorage.setItem(SLEEPERS_MIN_HOURS_STORAGE_KEY, String(value));
   } catch {
     // Persisting the preference is best-effort.
   }
@@ -386,6 +413,8 @@ export default function App() {
   // Sleepers lives in memory only: it is a 3-hourly snapshot of the whole
   // chain, not this group's board, so there is nothing to cache across reloads.
   const [sleepersXOnly, setSleepersXOnly] = useState<boolean>(loadSleepersXOnly);
+  const [sleepersMinHours, setSleepersMinHours] =
+    useState<SleeperDurationHours>(loadSleepersMinHours);
   const [sleepers, setSleepers] = useState<SleepersResponse | null>(null);
   const [sleepersError, setSleepersError] = useState<string | null>(null);
   const [sleepersLoading, setSleepersLoading] = useState(false);
@@ -401,6 +430,8 @@ export default function App() {
   const sleepersSeqRef = useRef(0);
   const sleepersXOnlyRef = useRef(sleepersXOnly);
   sleepersXOnlyRef.current = sleepersXOnly;
+  const sleepersMinHoursRef = useRef(sleepersMinHours);
+  sleepersMinHoursRef.current = sleepersMinHours;
   /** True once the server has answered: the cache never outranks a real payload. */
   const paintedRef = useRef(false);
 
@@ -514,25 +545,32 @@ export default function App() {
     }
   }, []);
 
-  const loadSleepers = useCallback(async (xOnly: boolean, options: { silent?: boolean } = {}) => {
-    const currentSlug = slugRef.current;
-    if (!currentSlug) return;
-    // Latest-wins, exactly like the board and ranging: a slow answer for the
-    // filter the user just left must not overwrite the one on screen.
-    const seq = ++sleepersSeqRef.current;
-    if (!options.silent) setSleepersLoading(true);
-    try {
-      const data = await fetchSleepers(currentSlug, !xOnly);
-      if (seq !== sleepersSeqRef.current) return;
-      setSleepers(data);
-      setSleepersError(null);
-    } catch (err) {
-      if (seq !== sleepersSeqRef.current) return;
-      setSleepersError(describe(err));
-    } finally {
-      if (!options.silent && seq === sleepersSeqRef.current) setSleepersLoading(false);
-    }
-  }, []);
+  const loadSleepers = useCallback(
+    async (
+      xOnly: boolean,
+      minHours: SleeperDurationHours,
+      options: { silent?: boolean } = {},
+    ) => {
+      const currentSlug = slugRef.current;
+      if (!currentSlug) return;
+      // Latest-wins, exactly like the board and ranging: a slow answer for the
+      // filter the user just left must not overwrite the one on screen.
+      const seq = ++sleepersSeqRef.current;
+      if (!options.silent) setSleepersLoading(true);
+      try {
+        const data = await fetchSleepers(currentSlug, !xOnly, minHours);
+        if (seq !== sleepersSeqRef.current) return;
+        setSleepers(data);
+        setSleepersError(null);
+      } catch (err) {
+        if (seq !== sleepersSeqRef.current) return;
+        setSleepersError(describe(err));
+      } finally {
+        if (!options.silent && seq === sleepersSeqRef.current) setSleepersLoading(false);
+      }
+    },
+    [],
+  );
 
   /** Fixed for the life of the page: the launch payload only exists in the webview. */
   const inTelegram = useMemo(() => tgInitData() !== null, []);
@@ -555,11 +593,11 @@ export default function App() {
   }, [slug, rangingActive, rangeBand, rangeHours, customBand, loadRange]);
 
   // Sleepers is a 3-hourly server snapshot, so it never rides the live stream:
-  // it loads when its tab opens, when the X-only toggle flips, and on focus.
+  // it loads when its tab opens, when a filter changes, and on focus.
   useEffect(() => {
     if (!slug || !sleepersActive) return;
-    void loadSleepers(sleepersXOnly);
-  }, [slug, sleepersActive, sleepersXOnly, loadSleepers]);
+    void loadSleepers(sleepersXOnly, sleepersMinHours);
+  }, [slug, sleepersActive, sleepersXOnly, sleepersMinHours, loadSleepers]);
 
   const scheduleRefetch = useCallback(() => {
     if (debounceRef.current !== null) return;
@@ -603,7 +641,9 @@ export default function App() {
       void loadBoard({ silent: true });
       const query = rangeQueryRef.current;
       if (rangingActive && query) void loadRange(query, { silent: true });
-      if (sleepersActive) void loadSleepers(sleepersXOnlyRef.current, { silent: true });
+      if (sleepersActive) {
+        void loadSleepers(sleepersXOnlyRef.current, sleepersMinHoursRef.current, { silent: true });
+      }
     };
     window.addEventListener('focus', onFocus);
     document.addEventListener('visibilitychange', onFocus);
@@ -639,8 +679,13 @@ export default function App() {
     saveSleepersXOnly(next);
   }, []);
 
+  const onSleepersMinHours = useCallback((next: SleeperDurationHours) => {
+    setSleepersMinHours(next);
+    saveSleepersMinHours(next);
+  }, []);
+
   const onSleepersRetry = useCallback(() => {
-    void loadSleepers(sleepersXOnlyRef.current);
+    void loadSleepers(sleepersXOnlyRef.current, sleepersMinHoursRef.current);
   }, [loadSleepers]);
 
   const onBin = useCallback(
@@ -737,6 +782,8 @@ export default function App() {
       onRetry={onSleepersRetry}
       xOnly={sleepersXOnly}
       onXOnly={onSleepersXOnly}
+      minHours={sleepersMinHours}
+      onMinHours={onSleepersMinHours}
       now={now}
     />
   );

@@ -160,19 +160,53 @@ export const SLEEPERS = {
   maxPages: 10,
   /** Below this a "pool" is not a market anyone can trade out of. */
   minLiquidityUsd: 10_000,
+  /**
+   * ...and the same floor as a FRACTION of market cap (docs/decisions.md round
+   * 14, the FORESKIN case): an unlocked-LP coin that gets pulled mid-cycle keeps
+   * a crumb of liquidity against a mcap the market has not repriced yet — $5.4K
+   * against $1.85M is 0.29%, and the absolute $10K bar alone lets it through.
+   * Both floors apply; a coin has to clear each one.
+   */
+  liqToMcapMinRatio: 0.02,
   /** Younger than this is a launch, not a sleeper — it has no 24h to judge. */
   minPoolAgeHours: 1,
-  /** Older than this is not "quietly trading hard", it is just old. */
+  /**
+   * Age ceiling for the SHORT-duration views (under 2w), enforced by the API
+   * at serve time: on a quick horizon, older than this is not "quietly trading
+   * hard", it is just old. The scan itself admits pools up to inBandMaxDays —
+   * a coin with weeks in band is necessarily older than 10 days, and the 2w/1m
+   * chips (round 14) exist to surface exactly those.
+   */
   maxPoolAgeDays: 10,
   /** Fewer trades than this in 24h is one whale moving size, not activity. */
   minTxns24: 20,
   /**
    * Kept per band by the scan. Deliberately more than the API serves: the
-   * "X only" toggle filters at read time and would otherwise run the band dry.
+   * "X only" toggle, the per-group call exclusion and (round 14) the duration
+   * filter all cut entries at read time, and a band kept shallow would run dry
+   * the moment a member asked for anything but the default 3h.
    */
-  keepPerBand: 6,
+  keepPerBand: 12,
   /** Served per band by the API, after the per-group and twitter filters. */
   servePerBand: 3,
+  /**
+   * Time-in-band measurement (round 14). Hourly candles are asked for first —
+   * 100 of them reach ~4 days back — and only a window that is in-band all the
+   * way through is worth extending with daily candles.
+   */
+  inBandHourlyLimit: 100,
+  inBandDailyLimit: 35,
+  /**
+   * The newest hourly candle must be at most this old or the streak is not
+   * reported at all: residency is a claim about right now, and stale candles
+   * cannot support it.
+   */
+  inBandMaxCandleAgeHours: 2,
+  /**
+   * Reported residency is capped here. Beyond a month the exact number stops
+   * meaning anything, and it is the depth the daily window can actually back.
+   */
+  inBandMaxDays: 35,
   /** An entry that has been listed this long earns the persistence marker. */
   persistenceMarkerHours: 3,
   /** sleeper_seen rows older than this are pruned. */

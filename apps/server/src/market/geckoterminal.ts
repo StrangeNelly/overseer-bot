@@ -170,6 +170,62 @@ export async function getMinuteClose(poolAddress: string, at: Date): Promise<num
   return pickCandleClose(body?.data?.attributes?.ohlcv_list ?? [], atSec);
 }
 
+/** One OHLCV candle. `tsSec` is the candle's START, as GeckoTerminal reports it. */
+export interface GtCandle {
+  tsSec: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+/**
+ * `ohlcv_list` rows, coerced. Same shape as pickCandleClose reads:
+ * `[timestamp, open, high, low, close, volume]`, newest-first, with every money
+ * figure liable to arrive as a string.
+ *
+ * A row missing a timestamp or a close is DROPPED rather than defaulted — a
+ * candle we cannot price is not a candle, and the residency walk that consumes
+ * these would read a fabricated 0 as "left the band". Order is re-asserted
+ * (newest first) so a caller never has to trust the server's sort.
+ */
+export function parseOhlcvRows(rows: unknown[][]): GtCandle[] {
+  const out: GtCandle[] = [];
+  for (const row of rows) {
+    if (!Array.isArray(row)) continue;
+    const tsSec = num(row[0]);
+    const close = num(row[4]);
+    if (tsSec === null || close === null) continue;
+    out.push({
+      tsSec,
+      open: num(row[1]) ?? close,
+      high: num(row[2]) ?? close,
+      low: num(row[3]) ?? close,
+      close,
+    });
+  }
+  out.sort((a, b) => b.tsSec - a.tsSec);
+  return out;
+}
+
+/**
+ * The last `limit` hourly or daily candles for a pool, newest first.
+ *
+ * Used by the Sleepers scan to measure how long a coin has been sitting in its
+ * band (docs/decisions.md round 14). Goes through the same budgeter as every
+ * other call here, so a scan's worth of these simply queues behind the polls.
+ */
+export async function getOhlcv(
+  poolAddress: string,
+  timeframe: 'hour' | 'day',
+  limit: number,
+): Promise<GtCandle[]> {
+  const body = (await gtFetch(
+    `/networks/${ROBINHOOD_SLUG}/pools/${poolAddress}/ohlcv/${timeframe}?limit=${limit}`,
+  )) as { data?: { attributes?: { ohlcv_list?: unknown[][] } } } | null;
+  return parseOhlcvRows(body?.data?.attributes?.ohlcv_list ?? []);
+}
+
 /**
  * One row of the chain-wide pool listing. Deliberately flat and nullable: the
  * Sleepers scan is the only caller, and it does its own floor checks.
@@ -181,6 +237,11 @@ export interface GtPoolListing {
   /** The pool's own name, e.g. "SABLE / WETH 1%" — a symbol fallback. */
   poolName: string | null;
   mcapUsd: number | null;
+  /**
+   * Base token price in USD. Paired with mcapUsd it infers circulating supply,
+   * which is what turns this pool's candle closes into market caps.
+   */
+  priceUsd: number | null;
   liquidityUsd: number | null;
   vol24Usd: number | null;
   /** buys + sells over 24h; null when the block is missing entirely. */
@@ -230,6 +291,7 @@ export async function getTopPools(page: number): Promise<GtPoolListing[]> {
       // Same precedence as everywhere else in this client: fdv first, because
       // market_cap_usd is null for most of the chain.
       mcapUsd: num(a.fdv_usd) ?? num(a.market_cap_usd),
+      priceUsd: num(a.base_token_price_usd),
       liquidityUsd: num(a.reserve_in_usd),
       vol24Usd: num((a.volume_usd as Record<string, unknown> | undefined)?.h24),
       txns24: buys === null && sells === null ? null : (buys ?? 0) + (sells ?? 0),

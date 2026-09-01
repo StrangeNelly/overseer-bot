@@ -88,6 +88,9 @@ export function fmtAge(iso: string | null | undefined, now: number = Date.now())
 /** A duration already measured in hours: `14h`, `2d 3h`, `2d`, `—`. */
 export function fmtHours(hours: number | null | undefined): string {
   if (!isNum(hours) || hours < 0) return DASH;
+  // Under an hour, hours are the wrong unit: the 30-minute range filter would
+  // otherwise round a real 0.5h streak up to "1h" (or a 20-minute one to "0h").
+  if (hours < 1) return `${Math.round(hours * 60)}m`;
   const whole = Math.round(hours);
   if (whole < 48) return `${whole}h`;
   const days = Math.floor(whole / 24);

@@ -133,9 +133,42 @@ export interface HandoffResponse {
 /**
  * Ranging board: accumulation-phase detection over the group's own calls.
  * 3h added in the round 8 design pass — the shortest band a coil is readable in.
+ * 30m and 1h added later at the owner's ask, for small caps only (see
+ * RANGE_SHORT_DURATION_MAX_HI_USD).
  */
-export const RANGE_DURATION_HOURS = [3, 6, 12, 24, 48] as const;
+export const RANGE_DURATION_HOURS = [0.5, 1, 3, 6, 12, 24, 48] as const;
 export type RangeDurationHours = (typeof RANGE_DURATION_HOURS)[number];
+
+/**
+ * Durations shorter than this are the "short" ones: they only make sense where
+ * a coil is readable in minutes, which is the small end of the board.
+ */
+export const RANGE_SHORT_DURATION_HOURS = 3;
+
+/**
+ * ...and only for a band that tops out here. The owner asked for "the first 3
+ * default bands"; expressing it as a ceiling on the band's HIGH means a custom
+ * band behaves like the preset it resembles instead of falling through the rule.
+ */
+export const RANGE_SHORT_DURATION_MAX_HI_USD = 500_000;
+
+/**
+ * Whether a duration may be asked for against a band. The server enforces this
+ * (400) and the chips mirror it — one rule, two readers.
+ */
+export function rangeHoursAllowed(hours: number, hiUsd: number): boolean {
+  return hours >= RANGE_SHORT_DURATION_HOURS || hiUsd <= RANGE_SHORT_DURATION_MAX_HI_USD;
+}
+
+/**
+ * A duration's own label. Sub-hour durations read in MINUTES: "0.5h" is not a
+ * thing anyone says, and a chip is too small a place to make someone divide.
+ */
+export function fmtDurationHours(hours: number): string {
+  if (!Number.isFinite(hours) || hours < 0) return '—';
+  if (hours < 1) return `${Math.round(hours * 60)}m`;
+  return `${hours}h`;
+}
 
 export const RANGE_PRESETS = [
   { label: '50K–100K', loUsd: 50_000, hiUsd: 100_000 },
@@ -181,6 +214,63 @@ export interface RangeBoardResponse {
  * There is no history behind an entry (no sparkline) and no call baseline (no
  * multiple): turnover is the number this surface exists to show.
  */
+
+/**
+ * The duration filter (docs/decisions.md round 14): how long the coin has sat
+ * inside its band, continuously, up to the scan. 3h is the default and the
+ * shortest; 336h (2w) is where the $1M–$3M band unlocks.
+ */
+export const SLEEPER_DURATIONS_HOURS = [3, 6, 24, 72, 168, 336, 720] as const;
+export type SleeperDurationHours = (typeof SLEEPER_DURATIONS_HOURS)[number];
+
+/** Chip text. Written out rather than derived: "720h" is not how anyone reads a month. */
+export const SLEEPER_DURATION_LABELS: Record<SleeperDurationHours, string> = {
+  3: '3h',
+  6: '6h',
+  24: '24h',
+  72: '3d',
+  168: '7d',
+  336: '2w',
+  720: '1m',
+};
+
+/** The shortest duration that unlocks a `longOnly` band. */
+export const SLEEPER_LONG_ONLY_MIN_HOURS = 336;
+
+export interface SleeperBandSpec {
+  readonly label: string;
+  readonly loUsd: number;
+  readonly hiUsd: number;
+  /**
+   * Only served once the requested duration reaches
+   * SLEEPER_LONG_ONLY_MIN_HOURS. Round 14: a $1M–$3M coin is only a "sleeper"
+   * if it has genuinely sat still for weeks — at 3h it is just a big coin.
+   */
+  readonly longOnly: boolean;
+}
+
+/**
+ * The bands the SCAN buckets into: the four Ranging presets plus the round-14
+ * $1M–$3M band. RANGE_PRESETS itself is untouched — Ranging still has four —
+ * so the two surfaces can diverge without either one reaching into the other.
+ */
+export const SLEEPER_BANDS: readonly SleeperBandSpec[] = [
+  ...RANGE_PRESETS.map((preset) => ({
+    label: preset.label,
+    loUsd: preset.loUsd,
+    hiUsd: preset.hiUsd,
+    longOnly: false,
+  })),
+  { label: '1M–3M', loUsd: 1_000_000, hiUsd: 3_000_000, longOnly: true },
+];
+
+/** The bands a given duration is allowed to see, in ascending order. */
+export function sleeperBandsFor(minHours: number): readonly SleeperBandSpec[] {
+  return SLEEPER_BANDS.filter(
+    (band) => !band.longOnly || minHours >= SLEEPER_LONG_ONLY_MIN_HOURS,
+  );
+}
+
 export interface SleeperEntry {
   address: string;
   symbol: string | null;
@@ -203,6 +293,14 @@ export interface SleeperEntry {
    * still interesting (round 9 — this replaces forced rotation).
    */
   onListSinceHours: number;
+  /**
+   * Continuous residency inside this band, in hours, measured at scan time off
+   * GeckoTerminal's hourly/daily candles — so it INCLUDES history from before
+   * the coin first appeared here (round 14). Capped at SLEEPERS.inBandMaxDays.
+   * 0 means "not established": either the streak broke on the newest candle or
+   * the candles could not be read this scan.
+   */
+  inBandHours: number;
   links: TradingLinkRow;
 }
 
@@ -214,12 +312,16 @@ export interface SleeperBand {
 }
 
 /**
- * GET /api/g/:slug/sleepers?all=0|1
- * `all=1` drops the twitter-required default. Bands are always all four of
- * RANGE_PRESETS, in ascending order, so an empty band can say so.
+ * GET /api/g/:slug/sleepers?all=0|1&minHours=<SLEEPER_DURATIONS_HOURS member>
+ *
+ * `all=1` drops the twitter-required default. Bands are every band that
+ * duration is allowed to see (sleeperBandsFor), in ascending order and always
+ * present, so an empty band can say so rather than silently vanishing.
  */
 export interface SleepersResponse {
   /** ISO instant of the scan behind this payload; null before the first one. */
   refreshedAt: string | null;
+  /** The duration filter this payload answers — echoed back like Ranging's. */
+  minHours: SleeperDurationHours;
   bands: SleeperBand[];
 }

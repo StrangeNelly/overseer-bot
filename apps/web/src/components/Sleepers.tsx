@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { SleeperBand, SleeperEntry, SleepersResponse } from '@groupie/shared';
-import { SLEEPERS } from '@groupie/shared';
+import type {
+  SleeperBand,
+  SleeperDurationHours,
+  SleeperEntry,
+  SleepersResponse,
+} from '@groupie/shared';
+import { SLEEPER_DURATION_LABELS, SLEEPER_DURATIONS_HOURS, SLEEPERS } from '@groupie/shared';
 import { copyText } from '../clipboard';
 import { avatarHue, fmtAge, fmtHours, fmtTurnover, fmtUsd, shortAddress } from '../format';
 
 /**
- * Sleepers (docs/decisions.md round 9) — the first UNCURATED surface in the
- * app. Everything here is a chain-wide research lead, not something the group
- * called, and the tab is written to say so before it says anything else.
+ * Sleepers (docs/decisions.md rounds 9 and 14) — the first UNCURATED surface in
+ * the app. Everything here is a chain-wide research lead, not something the
+ * group called, and the tab is written to say so before it says anything else.
  *
  * No sparkline (there is no history behind an entry) and no multiple (there is
  * no call to be a multiple of): turnover is the hero number, in cyan — the
@@ -23,6 +28,9 @@ interface SleepersProps {
   /** Twitter-required is the default view; the chip toggles it off. */
   xOnly: boolean;
   onXOnly: (next: boolean) => void;
+  /** Minimum continuous time in band — the round-14 duration filter. */
+  minHours: SleeperDurationHours;
+  onMinHours: (next: SleeperDurationHours) => void;
   /** Shared clock, ticked once a minute by App. */
   now: number;
 }
@@ -35,10 +43,20 @@ function title(entry: SleeperEntry): string {
   return entry.symbol ? `$${entry.symbol}` : shortAddress(entry.address);
 }
 
-export function Sleepers({ data, loading, error, onRetry, xOnly, onXOnly, now }: SleepersProps) {
+export function Sleepers({
+  data,
+  loading,
+  error,
+  onRetry,
+  xOnly,
+  onXOnly,
+  minHours,
+  onMinHours,
+  now,
+}: SleepersProps) {
   // One open link row at a time, exactly like the board's rows.
   const [openAddress, setOpenAddress] = useState<string | null>(null);
-  useEffect(() => setOpenAddress(null), [xOnly]);
+  useEffect(() => setOpenAddress(null), [xOnly, minHours]);
 
   const toggle = useCallback(
     (address: string) => setOpenAddress((prev) => (prev === address ? null : address)),
@@ -77,6 +95,28 @@ export function Sleepers({ data, loading, error, onRetry, xOnly, onXOnly, now }:
         </button>
       </div>
 
+      {/*
+        The duration filter (round 14). Cyan when active, exactly like Ranging's
+        "HELD FOR ≥" chips — same question, asked of the whole chain instead of
+        the group's own calls.
+      */}
+      <div className="slp-durations">
+        <div className="chips chips-hours" role="group" aria-label="Minimum time in band">
+          <span className="chips-label">IN BAND ≥</span>
+          {SLEEPER_DURATIONS_HOURS.map((hours) => (
+            <button
+              key={hours}
+              type="button"
+              className={`chip chip-hours${minHours === hours ? ' is-active' : ''}`}
+              aria-pressed={minHours === hours}
+              onClick={() => onMinHours(hours)}
+            >
+              {SLEEPER_DURATION_LABELS[hours]}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {error && !data ? (
         <div className="screen">
           <h2 className="screen-title">Could not load sleepers</h2>
@@ -100,6 +140,7 @@ export function Sleepers({ data, loading, error, onRetry, xOnly, onXOnly, now }:
             loading={loading}
             total={total}
             xOnly={xOnly}
+            minHours={minHours}
             now={now}
             openAddress={openAddress}
             onToggle={toggle}
@@ -115,6 +156,7 @@ function SleeperBody({
   loading,
   total,
   xOnly,
+  minHours,
   now,
   openAddress,
   onToggle,
@@ -123,6 +165,7 @@ function SleeperBody({
   loading: boolean;
   total: number | null;
   xOnly: boolean;
+  minHours: SleeperDurationHours;
   now: number;
   openAddress: string | null;
   onToggle: (address: string) => void;
@@ -142,11 +185,14 @@ function SleeperBody({
     );
   }
   if (total === 0) {
+    // Two independent reasons to be empty, and the duration is the one the
+    // reader just changed — name it first so the fix is obvious.
+    const held = `held its band for ${SLEEPER_DURATION_LABELS[minHours]}+`;
     return (
       <p className="empty">
         {xOnly
-          ? 'Nothing with an X account cleared the floors this scan. Try showing all.'
-          : 'Nothing on the chain cleared the floors this scan.'}
+          ? `Nothing with an X account ${held} this scan. Try a shorter duration, or showing all.`
+          : `Nothing on the chain ${held} this scan. Try a shorter duration.`}
       </p>
     );
   }
@@ -175,8 +221,9 @@ function SleeperBody({
       ))}
       <p className="footnote">
         ranked by turnover (24h volume ÷ market cap) · liquidity ≥ {fmtUsd(SLEEPERS.minLiquidityUsd)}{' '}
-        · pool age {SLEEPERS.minPoolAgeHours}h–{SLEEPERS.maxPoolAgeDays}d · nothing here is tracked or
-        watched
+        and ≥ {Math.round(SLEEPERS.liqToMcapMinRatio * 100)}% of market cap · pool age{' '}
+        {SLEEPERS.minPoolAgeHours}h–{SLEEPERS.maxPoolAgeDays}d · time in band from hourly/daily
+        candles · nothing here is tracked or watched
       </p>
     </div>
   );
@@ -230,6 +277,10 @@ function SleeperRow({
   const [copied, setCopied] = useState(false);
   const label = title(entry);
   const persistent = entry.onListSinceHours >= SLEEPERS.persistenceMarkerHours;
+  // Measured off candles, so it reaches back before we ever saw the coin — and
+  // it is capped, which the "+" says out loud rather than pretending precision.
+  const capped = entry.inBandHours >= SLEEPERS.inBandMaxDays * 24;
+  const inBand = entry.inBandHours > 0 ? `${fmtHours(entry.inBandHours)}${capped ? '+' : ''}` : null;
 
   const onCopy = useCallback(() => {
     void copyText(entry.address).then((ok) => {
@@ -266,6 +317,13 @@ function SleeperRow({
                 X
               </a>
             ) : null}
+            {/*
+              Two different clocks, side by side on purpose. "in band" is the
+              coin's own history, read off candles that predate us; "on list" is
+              how long WE have been showing it. The first is the lead, the
+              second is our honesty about it.
+            */}
+            {inBand ? <span className="badge badge-inband">{`in band ${inBand}`}</span> : null}
             {/* Persistence, not rotation (round 9): still qualifying is still interesting. */}
             {persistent ? (
               <span className="badge badge-onlist">

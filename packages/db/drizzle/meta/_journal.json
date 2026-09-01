@@ -50,6 +50,13 @@
       "when": 1788287923885,
       "tag": "0006_friendly_doctor_doom",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788293445253,
+      "tag": "0007_great_thor",
+      "breakpoints": true
     }
   ]
 }

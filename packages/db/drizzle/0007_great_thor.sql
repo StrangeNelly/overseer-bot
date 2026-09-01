@@ -1,0 +1,1 @@
+ALTER TABLE "sleeper_entries" ADD COLUMN "in_band_hours" double precision DEFAULT 0 NOT NULL;

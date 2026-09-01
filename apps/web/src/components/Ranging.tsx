@@ -1,5 +1,11 @@
+import { useEffect } from 'react';
 import type { RangeBoardResponse, RangeCard, RangeDurationHours } from '@groupie/shared';
-import { RANGE_DURATION_HOURS, RANGE_PRESETS } from '@groupie/shared';
+import {
+  RANGE_DURATION_HOURS,
+  RANGE_PRESETS,
+  fmtDurationHours,
+  rangeHoursAllowed,
+} from '@groupie/shared';
 import {
   avatarHue,
   fmtAge,
@@ -39,6 +45,13 @@ export const DEFAULT_CONTROLS: RangeControls = {
   hours: 6,
 };
 
+/**
+ * Where a duration the current band cannot offer falls back to. The shortest
+ * duration every band supports — never a longer one, which would silently
+ * answer a different question than the one on screen.
+ */
+const FALLBACK_HOURS: RangeDurationHours = 3;
+
 function parseBound(raw: string): number | null {
   const value = parseMoney(raw);
   if (value === null || value < MIN_USD || value > MAX_USD) return null;
@@ -55,6 +68,18 @@ export function resolveBand(controls: RangeControls): RangeBand | null {
   const hiUsd = parseBound(controls.customHi);
   if (loUsd === null || hiUsd === null || loUsd >= hiUsd) return null;
   return { loUsd, hiUsd };
+}
+
+/**
+ * Controls the current band can actually ask for. A persisted 30m against a
+ * 500K–1M band is a real state (the band chip moved after the duration was
+ * chosen, or the blob was hand-edited) and it would otherwise leave the first
+ * fetch of the session asking the server for something it answers with a 400.
+ */
+export function sanitizeRangeControls(controls: RangeControls): RangeControls {
+  const band = resolveBand(controls);
+  if (band === null || rangeHoursAllowed(controls.hours, band.hiUsd)) return controls;
+  return { ...controls, hours: FALLBACK_HOURS };
 }
 
 interface RangingProps {
@@ -102,6 +127,18 @@ export function Ranging({
   now,
 }: RangingProps) {
   const custom = controls.presetIndex === null;
+  // The band decides which durations exist (30m/1h are a small-cap instrument,
+  // enforced server-side); a null band is mid-typing, so nothing is disabled yet.
+  const allows = (hours: RangeDurationHours) => band === null || rangeHoursAllowed(hours, band.hiUsd);
+
+  // Switching to a bigger band while a short duration is selected would leave
+  // the chips describing a query the server refuses. Fall back rather than show
+  // an error for a state the user did not choose.
+  useEffect(() => {
+    if (band !== null && !rangeHoursAllowed(controls.hours, band.hiUsd)) {
+      onControls({ ...controls, hours: FALLBACK_HOURS });
+    }
+  }, [band, controls, onControls]);
 
   return (
     <>
@@ -170,17 +207,22 @@ export function Ranging({
 
         <div className="chips chips-hours" role="group" aria-label="Minimum time in range">
           <span className="chips-label">HELD FOR ≥</span>
-          {RANGE_DURATION_HOURS.map((hours) => (
-            <button
-              key={hours}
-              type="button"
-              className={`chip chip-hours${controls.hours === hours ? ' is-active' : ''}`}
-              aria-pressed={controls.hours === hours}
-              onClick={() => onControls({ ...controls, hours })}
-            >
-              {`${hours}h`}
-            </button>
-          ))}
+          {RANGE_DURATION_HOURS.map((hours) => {
+            const enabled = allows(hours);
+            return (
+              <button
+                key={hours}
+                type="button"
+                className={`chip chip-hours${controls.hours === hours ? ' is-active' : ''}`}
+                aria-pressed={controls.hours === hours}
+                disabled={!enabled}
+                title={enabled ? undefined : 'Only for bands up to $500K'}
+                onClick={() => onControls({ ...controls, hours })}
+              >
+                {fmtDurationHours(hours)}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -225,7 +267,7 @@ function RangeList({
     // The response's own band, so the sentence always describes what was asked.
     return (
       <p className="empty">
-        {`Nothing holding ${fmtUsd(data.loUsd)}–${fmtUsd(data.hiUsd)} for ${data.minHours}h+ right now.`}
+        {`Nothing holding ${fmtUsd(data.loUsd)}–${fmtUsd(data.hiUsd)} for ${fmtDurationHours(data.minHours)}+ right now.`}
       </p>
     );
   }

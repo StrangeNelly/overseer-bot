@@ -5,6 +5,7 @@ import type {
   MeResponse,
   RangeBoardResponse,
   RangeDurationHours,
+  SleeperDurationHours,
   SleepersResponse,
   TelegramLoginAvailability,
 } from '@groupie/shared';
@@ -130,14 +131,19 @@ export function fetchRange(
 
 /**
  * Sleepers: the chain-wide discovery stream. `all` drops the twitter-required
- * default. Snapshot data on a 3-hourly server scan — never on the live stream.
+ * default; `minHours` is the time-in-band filter (round 14). Snapshot data on a
+ * 3-hourly server scan — never on the live stream.
  */
 export function fetchSleepers(
   slug: string,
   all: boolean,
+  minHours: SleeperDurationHours,
   signal?: AbortSignal,
 ): Promise<SleepersResponse> {
-  return request<SleepersResponse>(`${groupPath(slug)}/sleepers?all=${all ? '1' : '0'}`, { signal });
+  return request<SleepersResponse>(
+    `${groupPath(slug)}/sleepers?all=${all ? '1' : '0'}&minHours=${minHours}`,
+    { signal },
+  );
 }
 
 export function binCall(slug: string, callId: number): Promise<void> {

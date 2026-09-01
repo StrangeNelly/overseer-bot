@@ -3,7 +3,12 @@ import { sleeperEntries, sleeperSeen, type Db } from '@groupie/db';
 import { SLEEPERS, twitterUrlFrom, websiteUrlFrom } from '@groupie/shared';
 import * as ds from '../market/dexscreener.js';
 import * as gt from '../market/geckoterminal.js';
-import { selectSleepers, type PoolCandidate, type SleeperPick } from './sleeperLogic.js';
+import {
+  computeResidency,
+  selectSleepers,
+  type PoolCandidate,
+  type SleeperPick,
+} from './sleeperLogic.js';
 
 /**
  * The Sleepers chain-wide scan (docs/decisions.md round 9).
@@ -21,12 +26,22 @@ import { selectSleepers, type PoolCandidate, type SleeperPick } from './sleeperL
 const DS_BATCH = 30;
 
 /**
- * Spacing between listing pages. The GeckoTerminal budgeter's window is 25/min
- * with no intra-window pacing, and firing ten pages back to back reliably drew
- * a 429 in testing (verified live 2026-09-02) — this is a three-hourly job with
+ * Spacing between GeckoTerminal requests. The budgeter's window is 25/min with
+ * no intra-window pacing, and firing ten pages back to back reliably drew a 429
+ * in testing (verified live 2026-09-02) — this is a three-hourly job with
  * nothing waiting on it, so it can afford to be polite.
  */
 const PAGE_GAP_MS = 1_500;
+
+/**
+ * Spacing for the round-14 OHLCV residency calls, deliberately slower than the
+ * listing pages: up to ~60 of these run back to back, and at 1.5s they would
+ * eat the whole 25/min budget for minutes at a stretch — queueing the fresh-
+ * tier polls (and with them nuke-alert detection) behind a discovery job. At
+ * 4s the scan holds itself to ~15/min, leaving the live board real headroom;
+ * the scan finishing a few minutes later costs nothing at a 3h cadence.
+ */
+const OHLCV_GAP_MS = 4_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -72,6 +87,7 @@ async function collect(): Promise<{ candidates: PoolCandidate[]; pages: number }
         poolAddress: pool.poolAddress,
         poolName: pool.poolName,
         mcapUsd: pool.mcapUsd,
+        priceUsd: pool.priceUsd,
         liquidityUsd: pool.liquidityUsd,
         vol24Usd: pool.vol24Usd,
         txns24: pool.txns24,
@@ -132,13 +148,78 @@ async function enrich(picks: SleeperPick[]): Promise<EnrichedPick[]> {
   });
 }
 
+interface ScoredPick extends EnrichedPick {
+  /** Continuous hours in band, measured off candles (round 14). */
+  inBandHours: number;
+}
+
+/** One OHLCV call, with a single retry — same discipline as a listing page. */
+async function fetchOhlcv(
+  poolAddress: string,
+  timeframe: 'hour' | 'day',
+  limit: number,
+): Promise<gt.GtCandle[]> {
+  await sleep(OHLCV_GAP_MS);
+  try {
+    return await gt.getOhlcv(poolAddress, timeframe, limit);
+  } catch (err) {
+    console.warn(`sleeper scan: ${timeframe} ohlcv for ${poolAddress} failed, retrying once:`, err);
+    await sleep(OHLCV_GAP_MS);
+    return gt.getOhlcv(poolAddress, timeframe, limit);
+  }
+}
+
+/**
+ * Time in band for every kept entry (docs/decisions.md round 14).
+ *
+ * Hourly candles first: 100 of them reach ~4 days back, which covers every
+ * duration up to 3d on its own. Only when the streak survives that whole window
+ * is a second, daily call worth making — so the common case is one call per
+ * pool and the long-residency case is two.
+ *
+ * A pool whose candles cannot be read reports 0 rather than a guess. That means
+ * it is filtered out of every duration view for one cycle, which is the honest
+ * failure: we do not know how long it has been sitting there.
+ */
+async function measureResidency(picks: EnrichedPick[], nowMs: number): Promise<ScoredPick[]> {
+  const out: ScoredPick[] = [];
+  let failures = 0;
+  for (const pick of picks) {
+    let inBandHours = 0;
+    try {
+      const shared = {
+        band: pick.band,
+        entryMcapUsd: pick.mcapUsd,
+        entryPriceUsd: pick.priceUsd,
+        nowMs,
+      };
+      const hourly = await fetchOhlcv(pick.poolAddress, 'hour', SLEEPERS.inBandHourlyLimit);
+      const fromHourly = computeResidency({ ...shared, hourly });
+      // hourlyExhausted is only ever true off a live, in-band streak, so this
+      // is the one case where a second call can find more history.
+      if (fromHourly.hourlyExhausted) {
+        const daily = await fetchOhlcv(pick.poolAddress, 'day', SLEEPERS.inBandDailyLimit);
+        inBandHours = computeResidency({ ...shared, hourly, daily }).hours;
+      } else {
+        inBandHours = fromHourly.hours;
+      }
+    } catch (err) {
+      failures++;
+      console.warn(`sleeper scan: no residency for ${pick.address}:`, err);
+    }
+    out.push({ ...pick, inBandHours });
+  }
+  if (failures > 0) console.warn(`sleeper scan: ${failures}/${picks.length} residency reads failed`);
+  return out;
+}
+
 /**
  * Replace-style write. The insert lands first and the delete is scoped to
  * strictly older scans, so a reader between the two statements sees the old
  * scan or the new one — never nothing. Only the latest scan is kept; round 9
  * asked for a snapshot stream, not a history.
  */
-async function persist(db: Db, scanAt: Date, picks: EnrichedPick[]): Promise<void> {
+async function persist(db: Db, scanAt: Date, picks: ScoredPick[]): Promise<void> {
   if (picks.length > 0) {
     await db.insert(sleeperEntries).values(
       picks.map((pick) => ({
@@ -158,6 +239,7 @@ async function persist(db: Db, scanAt: Date, picks: EnrichedPick[]): Promise<voi
         liquidityUsd: pick.liquidityUsd,
         txns24: Math.round(pick.txns24),
         turnover: pick.turnover,
+        inBandHours: pick.inBandHours,
         poolCreatedAt: pick.poolCreatedAt,
       })),
     );
@@ -196,13 +278,17 @@ export async function runSleeperScan(db: Db): Promise<SleeperScanResult> {
   const { candidates, pages } = await collect();
   const picks = selectSleepers(candidates, scanAt.getTime());
   const enriched = await enrich(picks);
+  // Measured against the scan's own clock, so every entry in a scan answers the
+  // duration filter as of the same instant.
+  const scored = await measureResidency(enriched, scanAt.getTime());
 
-  await persist(db, scanAt, enriched);
-  await recordSeen(db, scanAt, [...new Set(enriched.map((e) => e.address))]);
+  await persist(db, scanAt, scored);
+  await recordSeen(db, scanAt, [...new Set(scored.map((e) => e.address))]);
 
   console.log(
-    `sleeper scan: ${candidates.length} pools over ${pages} page(s) -> ${enriched.length} kept ` +
-      `(${enriched.filter((e) => e.twitterUrl !== null).length} with X)`,
+    `sleeper scan: ${candidates.length} pools over ${pages} page(s) -> ${scored.length} kept ` +
+      `(${scored.filter((e) => e.twitterUrl !== null).length} with X, ` +
+      `${scored.filter((e) => e.inBandHours >= 24).length} in band 24h+)`,
   );
-  return { scanned: candidates.length, kept: enriched.length, pages };
+  return { scanned: candidates.length, kept: scored.length, pages };
 }

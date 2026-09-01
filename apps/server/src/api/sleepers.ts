@@ -2,28 +2,68 @@ import { asc, eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { calls, sleeperEntries, sleeperSeen, tokens, type Db } from '@groupie/db';
 import {
-  RANGE_PRESETS,
+  SLEEPER_DURATIONS_HOURS,
+  SLEEPER_LONG_ONLY_MIN_HOURS,
   SLEEPERS,
+  sleeperBandsFor,
   tradingLinks,
   type SleeperBand,
+  type SleeperDurationHours,
   type SleeperEntry,
   type SleepersResponse,
 } from '@groupie/shared';
 import type { ApiEnv } from './membership.js';
 
 /**
- * GET /api/g/:slug/sleepers?all=0|1 — the chain-wide discovery stream
- * (docs/decisions.md round 9).
+ * GET /api/g/:slug/sleepers?all=0|1&minHours=<SLEEPER_DURATIONS_HOURS member>
+ * — the chain-wide discovery stream (docs/decisions.md rounds 9 and 14).
  *
  * The scan itself is group-agnostic: one sweep of the chain serves every group.
  * Everything group-specific happens HERE, at read time:
  *   - drop any address this group has already called (it is not a lead any
  *     more — it is on the board);
+ *   - drop anything that has not held its band for the requested duration;
  *   - default to entries that have an X account, with `all=1` to see the rest;
- *   - cut each band to SLEEPERS.servePerBand after both filters.
+ *   - cut each band to SLEEPERS.servePerBand after every filter.
  */
 
 type EntryRow = typeof sleeperEntries.$inferSelect;
+
+/** 3h — the shortest duration, and what an unasked query means. */
+const DEFAULT_MIN_HOURS: SleeperDurationHours = 3;
+
+/**
+ * The duration filter, or the message to answer a 400 with. Membership of the
+ * fixed tuple, not a range: the chips are the contract, and an arbitrary number
+ * would ask the client to invent a filter the scan cannot back.
+ */
+export function parseMinHours(
+  raw: string | undefined,
+): { minHours: SleeperDurationHours } | { error: string } {
+  if (raw === undefined || raw === '') return { minHours: DEFAULT_MIN_HOURS };
+  const value = Number(raw);
+  if (!(SLEEPER_DURATIONS_HOURS as readonly number[]).includes(value)) {
+    return { error: `minHours must be one of ${SLEEPER_DURATIONS_HOURS.join(', ')}` };
+  }
+  return { minHours: value as SleeperDurationHours };
+}
+
+/**
+ * Round 9's 10-day pool-age ceiling, applied only to the short-horizon views.
+ * The scan admits pools up to inBandMaxDays so the 2w/1m chips can serve at
+ * all (a coin three weeks in band is by definition older than 10 days); this
+ * keeps every shorter view exactly what round 9 specced. An entry with no
+ * recorded pool age cannot prove it is young enough, so it fails.
+ */
+export function passesServeAgeCeiling(
+  poolCreatedAt: Date | null,
+  minHours: SleeperDurationHours,
+  nowMs: number,
+): boolean {
+  if (minHours >= SLEEPER_LONG_ONLY_MIN_HOURS) return true;
+  const ageMs = poolCreatedAt ? nowMs - poolCreatedAt.getTime() : Infinity;
+  return ageMs <= SLEEPERS.maxPoolAgeDays * 24 * 3_600_000;
+}
 
 /**
  * Addresses this group has a call for, in any state. A died or binned call
@@ -77,6 +117,7 @@ function toEntry(row: EntryRow, onListSinceHours: number): SleeperEntry {
     turnover: row.turnover,
     poolCreatedAt: row.poolCreatedAt?.toISOString() ?? null,
     onListSinceHours,
+    inBandHours: row.inBandHours,
     links: tradingLinks(row.address),
   };
 }
@@ -89,6 +130,14 @@ export function createSleeperRoutes(db: Db): Hono<ApiEnv> {
     // Anything but an explicit "1" keeps the twitter-required default: this
     // surface leans on an X account being the cheapest way to research a lead.
     const showAll = c.req.query('all') === '1';
+    const parsed = parseMinHours(c.req.query('minHours'));
+    if ('error' in parsed) return c.json({ error: parsed.error }, 400);
+    const { minHours } = parsed;
+    // The $1M–$3M band only exists at 2w/1m (round 14). Deciding it here, off
+    // the band list, means the entries filter and the payload's band list can
+    // never disagree about which bands this duration has.
+    const bandSpecs = sleeperBandsFor(minHours);
+    const visibleBandLos = new Set(bandSpecs.map((band) => band.loUsd));
 
     // Scoped to the newest scan_at. Only one scan is ever kept, but the
     // replace-style write inserts before it deletes, so a read landing between
@@ -110,6 +159,9 @@ export function createSleeperRoutes(db: Db): Hono<ApiEnv> {
     const byBand = new Map<number, SleeperEntry[]>();
     for (const row of rows) {
       const address = row.address.toLowerCase();
+      if (!visibleBandLos.has(row.bandLoUsd)) continue;
+      if (row.inBandHours < minHours) continue;
+      if (!passesServeAgeCeiling(row.poolCreatedAt, minHours, nowMs)) continue;
       if (called.has(address)) continue;
       if (!showAll && row.twitterUrl === null) continue;
       const list = byBand.get(row.bandLoUsd) ?? [];
@@ -119,9 +171,10 @@ export function createSleeperRoutes(db: Db): Hono<ApiEnv> {
       byBand.set(row.bandLoUsd, list);
     }
 
-    // Every band is always present, empty or not: the tab says so per band
-    // rather than silently collapsing to whichever ones had entries.
-    const bands: SleeperBand[] = RANGE_PRESETS.map((preset) => ({
+    // Every band this duration can see is always present, empty or not: the tab
+    // says so per band rather than silently collapsing to whichever ones had
+    // entries.
+    const bands: SleeperBand[] = bandSpecs.map((preset) => ({
       loUsd: preset.loUsd,
       hiUsd: preset.hiUsd,
       entries: byBand.get(preset.loUsd) ?? [],
@@ -129,6 +182,7 @@ export function createSleeperRoutes(db: Db): Hono<ApiEnv> {
 
     const body: SleepersResponse = {
       refreshedAt: rows[0]?.scanAt.toISOString() ?? null,
+      minHours,
       bands,
     };
     return c.json(body);

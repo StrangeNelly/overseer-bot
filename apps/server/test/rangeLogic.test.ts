@@ -147,4 +147,23 @@ describe('qualifies', () => {
   it('accepts a streak and span exactly equal to the filter', () => {
     expect(qualifies(info(48), 48, 48)).toBe(true);
   });
+
+  // The 30-minute filter (owner ask, small bands only) is the first fractional
+  // duration: every hurdle here has to scale rather than assume whole hours.
+  it('scales the coverage floor to the half-hour filter: 3 of 6 buckets', () => {
+    expect(qualifies(info(0.5, 3), 0.5, 1)).toBe(true);
+    expect(qualifies(info(0.5, 2), 0.5, 1)).toBe(false);
+  });
+
+  it('still enforces streak and data span at the half-hour filter', () => {
+    // 25 minutes of streak is not 30.
+    expect(qualifies(info(0.4166, 6), 0.5, 4)).toBe(false);
+    // Full coverage, but the token has only been watched 15 minutes.
+    expect(qualifies(info(0.5, 6), 0.5, 0.25)).toBe(false);
+  });
+
+  it('needs 6 of 12 buckets at the one-hour filter', () => {
+    expect(qualifies(info(1, 6), 1, 1)).toBe(true);
+    expect(qualifies(info(1, 5), 1, 1)).toBe(false);
+  });
 });

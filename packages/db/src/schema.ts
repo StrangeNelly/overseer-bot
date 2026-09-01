@@ -251,7 +251,11 @@ export const sleeperEntries = pgTable(
   {
     id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
     scanAt: timestamp('scan_at', { withTimezone: true }).notNull(),
-    /** The RANGE_PRESETS band this entry was bucketed into. */
+    /**
+     * The SLEEPER_BANDS band this entry was bucketed into. Stored as plain
+     * numbers, not an enum or a foreign key, so adding a band (round 14 added
+     * $1M–$3M) is a constant change and never a migration.
+     */
     bandLoUsd: doublePrecision('band_lo_usd').notNull(),
     bandHiUsd: doublePrecision('band_hi_usd').notNull(),
     /** 1-based, by turnover desc within the band. */
@@ -269,6 +273,13 @@ export const sleeperEntries = pgTable(
     txns24: integer('txns24').notNull(),
     /** vol24 / mcap — the ranking figure, stored so reads never recompute it. */
     turnover: doublePrecision('turnover').notNull(),
+    /**
+     * Continuous hours inside the band at scan time, off GeckoTerminal candles
+     * (docs/decisions.md round 14) — the duration filter reads this. Defaults
+     * to 0 so rows written before the column existed (and any scan whose candle
+     * reads failed) simply claim no residency rather than a fictional one.
+     */
+    inBandHours: doublePrecision('in_band_hours').notNull().default(0),
     poolCreatedAt: timestamp('pool_created_at', { withTimezone: true }),
   },
   // The read is always "the latest scan, band ascending, rank ascending".

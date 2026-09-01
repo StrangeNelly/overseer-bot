@@ -3,6 +3,9 @@ import { Hono } from 'hono';
 import { calls, snapshots, tokens, type Db } from '@groupie/db';
 import {
   RANGE_DURATION_HOURS,
+  RANGE_SHORT_DURATION_MAX_HI_USD,
+  fmtDurationHours,
+  rangeHoursAllowed,
   type RangeBoardResponse,
   type RangeCard,
   type RangeDurationHours,
@@ -43,6 +46,10 @@ function parseUsd(raw: string | undefined, fallback: number): number | null {
   return Number.isSafeInteger(value) ? value : null;
 }
 
+/**
+ * Fractional by design: the tuple carries 0.5 (30 minutes) since the owner
+ * asked for sub-hour coils, so this cannot be an integer parse.
+ */
 function parseHours(raw: string | undefined): RangeDurationHours | null {
   if (raw === undefined || raw === '') return DEFAULT_HOURS;
   const value = Number(raw);
@@ -52,7 +59,9 @@ function parseHours(raw: string | undefined): RangeDurationHours | null {
 }
 
 /** Returns the parsed query, or the message to send back with a 400. */
-function parseQuery(query: (key: string) => string | undefined): RangeQuery | { error: string } {
+export function parseQuery(
+  query: (key: string) => string | undefined,
+): RangeQuery | { error: string } {
   const loUsd = parseUsd(query('lo'), DEFAULT_LO_USD);
   const hiUsd = parseUsd(query('hi'), DEFAULT_HI_USD);
   if (loUsd === null || hiUsd === null) return { error: 'lo and hi must be whole USD numbers' };
@@ -62,6 +71,17 @@ function parseQuery(query: (key: string) => string | undefined): RangeQuery | { 
 
   const hours = parseHours(query('hours'));
   if (hours === null) return { error: `hours must be one of ${RANGE_DURATION_HOURS.join(', ')}` };
+  // The short durations are a small-cap instrument: a 30-minute hold means
+  // something on a $60K coin and nothing on a $2M one, where that is just the
+  // gap between two trades. Enforced on the band's HIGH so a custom band
+  // behaves like the preset it resembles.
+  if (!rangeHoursAllowed(hours, hiUsd)) {
+    return {
+      error:
+        `${fmtDurationHours(hours)} is only available for bands up to ` +
+        `${RANGE_SHORT_DURATION_MAX_HI_USD}`,
+    };
+  }
   return { loUsd, hiUsd, hours };
 }
 

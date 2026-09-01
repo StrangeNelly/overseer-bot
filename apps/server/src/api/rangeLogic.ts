@@ -96,6 +96,10 @@ export function computeInRange(
  *    never claim a 6h range (docs/decisions.md);
  * 3. the streak is backed by real data, not two lonely buckets either side of a
  *    polling outage: >= 50% of the buckets a 5-minute cadence would produce.
+ *
+ * `minHours` may be fractional (the 30-minute filter is 0.5) — every hurdle
+ * here scales, and the coverage floor lands on 3 of the 6 buckets half an hour
+ * of 5-minute polling would produce.
  */
 export function qualifies(info: RangeInfo, minHours: number, dataSpanHours: number): boolean {
   return (
