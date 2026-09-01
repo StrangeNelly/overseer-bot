@@ -61,6 +61,11 @@ export interface BoardCard {
   dataAsOf: string | null;
   /** on the group's alert watchlist */
   watched: boolean;
+  /**
+   * Set while the token wears the Reviving badge: it survived rug probation
+   * by holding >= the revival mcap (decisions round 6). ISO; null otherwise.
+   */
+  revivingAt: string | null;
   links: TradingLinkRow;
   /** Last 24h of mcap snapshots, downsampled to <= 30 points, oldest first. */
   sparkline: SparkPoint[];
@@ -82,6 +87,12 @@ export interface BoardResponse {
      * is stamped per call, so nulls-last only catches pre-M3 rows.
      */
     died: BoardCard[];
+    /**
+     * Came back from rug probation within the last 24h (revivingAt set);
+     * sorted by revivingAt desc. These cards ALSO classify into the other
+     * sections normally — the section is a spotlight, not an exile.
+     */
+    reviving: BoardCard[];
   };
 }
 

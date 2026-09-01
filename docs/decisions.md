@@ -19,6 +19,17 @@ Running record of decisions made with the owner. Newest at the bottom.
 
 - COV link label in Phanes: unidentified; dropped as non-blocking.
 
+## 2026-09-02 — Rug probation v2: hide fast, monitor quietly, revive visibly (round 6, supersedes round 5's 6h rule)
+
+- Owner: 6h was too slow to clean the feed, but nothing should be missable. New lifecycle:
+  1. **Hide** after just **1h** continuously under $8K (bucket maxima, coverage rules): call disappears from ALL board sections. Not dead, not binned — probation (tokens.rug_hidden_at).
+  2. **Probation**: polled every **30 min** for **24h**.
+  3. **Revival**: reaches **>= $30K and holds for 3h** (every reading at/above; a dip breaks the hold) → back into view under a new **"Reviving"** section, badge for 24h (tokens.reviving_at), then classifies normally. Un-hides and resumes activity-based polling.
+  4. **Expiry**: 24h of probation without revival → the permanent rug: markTokenDead('rug_floor') + system-bin (round 5's mechanics).
+  5. **Repost during probation cancels it** (renewed-attention rule): straight back into view; tanks again → new 1h clock.
+- The instant armed-curve-floor death is RETIRED (the hide covers retrace-to-floor with a comeback path). liquidity_floor stays immediate (a drained pool cannot revive on mcap). never_graduated 48h stays.
+- Thresholds as constants for now: hide $8K/1h, probation 30min/24h, revival $30K/3h.
+
 ## 2026-09-02 — Rug auto-removal + peak-volume capacity (round 5)
 
 - **Rug rule (owner):** a token whose mcap sits below $8K continuously for 6+ hours is a rug — automatically removed from the board. Implemented as system auto-bin (binnedBy null = auto), with the token marked dead (reason `rug_floor`) if not already: repost still un-bins and re-evaluates (renewed-attention rule keeps working), and a later storage purge job can hard-delete long-binned tokens. Continuity judged like Ranging: max mcap over the 6h window under the floor, with data-span + coverage requirements so a token we barely watched can't be auto-condemned.
