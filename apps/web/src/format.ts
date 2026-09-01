@@ -103,3 +103,46 @@ export function avatarHue(seed: string): number {
   for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) % 360;
   return h;
 }
+
+/** `+38%`, `-12%`, `—` — a signed percentage change (already in percent). */
+export function fmtSignedPct(pct: number | null | undefined): string {
+  if (!isNum(pct)) return DASH;
+  const rounded = Math.round(pct);
+  return `${rounded > 0 ? '+' : rounded < 0 ? '-' : ''}${Math.abs(rounded)}%`;
+}
+
+/**
+ * Death reason as the board prints it: `liquidity_floor` -> `LIQ FLOOR`.
+ * Unknown reasons still read as a label rather than a raw column value.
+ */
+export function fmtDeathReason(reason: string | null | undefined): string | null {
+  if (typeof reason !== 'string' || reason.length === 0) return null;
+  if (reason === 'liquidity_floor') return 'LIQ FLOOR';
+  return reason.replace(/_/g, ' ').toUpperCase();
+}
+
+/**
+ * `$50,000` — the custom-band echo. Grouped, never compact: the whole point is
+ * to show the number the input really means.
+ */
+export function fmtExactUsd(value: number): string {
+  const whole = Math.round(value);
+  return `$${whole.toLocaleString('en-US')}`;
+}
+
+/**
+ * Custom band input -> dollars. Accepts `50000`, `50k`, `1.5M`, `$120,000`.
+ * Bare numbers are DOLLARS (round 8 behavior change: the old bare-K reading is
+ * what the dollar echo exists to kill). null = not a number at all.
+ */
+export function parseMoney(raw: string): number | null {
+  const trimmed = raw.trim().replace(/[$,\s]/g, '');
+  if (trimmed === '') return null;
+  const match = /^(\d+(?:\.\d+)?)([kmb])?$/i.exec(trimmed);
+  if (!match) return null;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value)) return null;
+  const suffix = match[2]?.toLowerCase();
+  const scale = suffix === 'b' ? 1e9 : suffix === 'm' ? 1e6 : suffix === 'k' ? 1e3 : 1;
+  return value * scale;
+}

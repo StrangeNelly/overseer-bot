@@ -11,12 +11,12 @@ interface WindowSwitcherProps {
 
 export function WindowSwitcher({ value, onChange, disabled }: WindowSwitcherProps) {
   return (
-    <div className="windows" role="group" aria-label="Time window">
+    <div className="wins" role="group" aria-label="Time window">
       {WINDOWS.map((w) => (
         <button
           key={w}
           type="button"
-          className={`window-btn${w === value ? ' is-active' : ''}`}
+          className={`win${w === value ? ' is-active' : ''}`}
           aria-pressed={w === value}
           disabled={disabled}
           onClick={() => onChange(w)}

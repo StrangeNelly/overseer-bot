@@ -1,32 +1,64 @@
 /*
- * Groupie board — structural styling only.
- * A dedicated design pass comes later; keep this plain and easy to replace.
- * Colour lives in custom properties so that pass can restyle from the top.
+ * overseer — Degen Neon.
+ * Implements design/extracted/design_handoff_overseer_board (round 8).
+ * Every colour in the handoff's token table lives here as a custom property;
+ * nothing below invents a hue. Green and red are P&L ONLY — magenta is the
+ * brand, cyan is state (live, reviving, watchlist, ranging).
  */
 
 :root {
-  --bg: #0e1116;
-  --bg-header: rgba(14, 17, 22, 0.94);
-  --card: #151a22;
-  --card-hover: #19202a;
-  --border: #232b37;
-  --border-strong: #2f3a49;
-  --text: #e6eaf0;
-  --dim: #8b95a7;
-  --dimmer: #626d7f;
-  --up: #35d07f;
-  --down: #f0616d;
-  --accent: #5b8cff;
+  /* backgrounds */
+  --bg-top: #0c0616;
+  --bg-bottom: #080310;
+  --panel-border: #2a1640;
+  --hairline: #170b26;
+  --sect-border: #221238;
+  --fill-1: #1a0f2e;
+  --fill-2: #150c26;
+  /* ink on a magenta/cyan fill */
+  --ink: #0a0512;
+
+  /* text */
+  --text: #f2eafb;
+  --text-2: #c9b8e0;
+  --dim: #8e7ba8;
+  --dimmer: #6e5c8c;
+  --faint: #4a2e66;
+
+  /* accents */
+  --magenta: #ff3dbe;
+  --cyan: #23d9ff;
+  --badge-border: #33204d;
+  --badge-border-cyan: #1b4a5c;
+  /* the sparkline's dotted 1x baseline */
+  --spark-base: #3a2454;
+
+  /* P&L ONLY */
+  --up: #00ff9c;
+  --down: #ff4d6d;
+  --amber: #ffb84d;
+
+  /* glows — static everywhere except the top runner */
+  --glow-magenta: 0 0 14px rgba(255, 61, 190, 0.7);
+  --glow-magenta-soft: 0 0 10px rgba(255, 61, 190, 0.6);
+  --glow-cyan: 0 0 12px rgba(35, 217, 255, 0.5);
+  --glow-cyan-dot: 0 0 8px rgba(35, 217, 255, 0.9);
+  --glow-up: 0 0 12px rgba(0, 255, 156, 0.6);
+
+  /* magenta washes (Pulse band, bridge, new-call bloom) */
+  --wash-magenta: rgba(255, 61, 190, 0.06);
+  --wash-magenta-edge: rgba(255, 61, 190, 0.22);
+
+  --font-display: 'Space Grotesk', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    Helvetica, Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
+    'Liberation Mono', monospace;
+  --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    Helvetica, Arial, sans-serif;
 
   --radius: 10px;
-  --tap: 40px;
-  --gap: 10px;
-  --pad: 12px;
-  --maxw: 640px;
-
-  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial,
-    'Apple Color Emoji', sans-serif;
-  --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  --tap: 44px;
+  --maxw: 720px;
 
   color-scheme: dark;
 }
@@ -42,9 +74,11 @@ body {
 }
 
 body {
-  background: var(--bg);
+  min-height: 100vh;
+  background: linear-gradient(180deg, var(--bg-top), var(--bg-bottom)) no-repeat fixed;
+  background-color: var(--bg-bottom);
   color: var(--text);
-  font-family: var(--font);
+  font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.4;
   -webkit-font-smoothing: antialiased;
@@ -68,8 +102,20 @@ a {
 }
 
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--magenta);
   outline-offset: 2px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* ---------- shell ---------- */
@@ -81,50 +127,87 @@ a {
   padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
 }
 
-.header {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  background: var(--bg-header);
-  backdrop-filter: blur(8px);
-  border-bottom: 1px solid var(--border);
-  padding: calc(10px + env(safe-area-inset-top, 0px)) var(--pad) 8px;
+.app-desk {
+  max-width: 1440px;
 }
 
-.header-top {
+.main {
+  padding: 0;
+}
+
+/* ---------- header + brand ---------- */
+
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: calc(12px + env(safe-area-inset-top, 0px)) 14px 9px;
+}
+
+.head-left,
+.head-right {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 24px;
+  gap: 10px;
+  min-width: 0;
+  flex: 1 1 100%;
 }
 
-.header-title {
+.head-right {
+  justify-content: space-between;
+}
+
+.head-mini {
+  padding: 0 14px 8px;
+  flex-wrap: nowrap;
+  justify-content: space-between;
+}
+
+.head-desk {
+  flex-wrap: nowrap;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--sect-border);
+  justify-content: space-between;
+}
+
+.head-desk .head-left,
+.head-desk .head-right {
+  flex: 0 1 auto;
+  gap: 16px;
+}
+
+/* The wordmark: lowercase Space Grotesk, magenta, glowing, with the cyan
+   period — the peak dot lifted out of the sparkline. */
+.wordmark {
+  flex: 0 0 auto;
+  font: 700 14px var(--font-display);
+  letter-spacing: 1px;
+  color: var(--magenta);
+  text-shadow: var(--glow-magenta);
+}
+
+.head-desk .wordmark {
+  font-size: 16px;
+}
+
+.wordmark-dot {
+  color: var(--cyan);
+  text-shadow: 0 0 10px rgba(35, 217, 255, 0.8);
+}
+
+.group-title {
   flex: 1 1 auto;
   margin: 0;
-  font-size: 16px;
-  font-weight: 600;
+  font: 600 15px var(--font-display);
+  color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* Plumbing-grade: enough to be tappable and legible. The design pass owns how
-   this bridge actually presents (docs/decisions.md round 7). */
-.handoff-btn {
-  flex: 0 0 auto;
-  padding: 4px 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--card);
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.handoff-btn:disabled {
-  color: var(--dim);
-  opacity: 0.7;
+.head-desk .group-title {
+  flex: 0 1 auto;
 }
 
 .live {
@@ -132,70 +215,205 @@ a {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 11px;
-  color: var(--dim);
+  font: 500 9px var(--font-mono);
+  letter-spacing: 1px;
+  color: var(--cyan);
 }
 
 .live-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--dimmer);
+  background: var(--cyan);
+  box-shadow: var(--glow-cyan-dot);
 }
 
-.live-on .live-dot {
-  background: var(--up);
+.live-off {
+  color: var(--dimmer);
 }
 
 .live-off .live-dot {
   background: var(--dimmer);
+  box-shadow: none;
 }
 
-.main {
-  padding: 0 var(--pad);
+.asof {
+  font: 400 10px var(--font-mono);
+  color: var(--dimmer);
+  white-space: nowrap;
 }
 
-/* ---------- window switcher ---------- */
+.asof.is-stale {
+  color: var(--amber);
+}
 
-.windows {
+/* ---------- window chips ---------- */
+
+.wins {
   display: flex;
-  gap: 4px;
-  margin-top: 8px;
+  gap: 2px;
   overflow-x: auto;
   scrollbar-width: none;
 }
 
-.windows::-webkit-scrollbar {
+.wins::-webkit-scrollbar {
   display: none;
 }
 
-.window-btn {
-  flex: 1 1 0;
-  min-width: 44px;
-  min-height: var(--tap);
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+.win {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 4px 7px;
+  border: 0;
+  border-radius: 3px;
   background: transparent;
-  color: var(--dim);
-  font-size: 13px;
+  color: var(--dimmer);
+  font: 500 10px var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 
-.window-btn.is-active {
-  background: var(--card);
-  border-color: var(--border-strong);
-  color: var(--text);
+.win.is-active {
+  background: var(--cyan);
+  color: var(--ink);
   font-weight: 600;
+  box-shadow: 0 0 10px rgba(35, 217, 255, 0.5);
+}
+
+/* ---------- pulse ---------- */
+
+.pulse {
+  background: var(--wash-magenta);
+  border-top: 1px solid var(--wash-magenta-edge);
+  border-bottom: 1px solid var(--wash-magenta-edge);
+}
+
+.pulse-tag {
+  flex: 0 0 auto;
+  color: var(--magenta);
+  font: 700 10px var(--font-mono);
+  letter-spacing: 2px;
+  text-shadow: var(--glow-magenta-soft);
+}
+
+.pulse-age {
+  flex: 0 0 auto;
+  font: 400 9px var(--font-mono);
+  color: var(--dimmer);
+  white-space: nowrap;
+}
+
+.pulse-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  font: 500 10.5px var(--font-mono);
+  color: var(--text-2);
+  overflow-x: auto;
+  scrollbar-width: none;
+  white-space: nowrap;
+}
+
+.pulse-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.pulse-numbers {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pulse-dot {
+  color: var(--faint);
+}
+
+.pulse-item {
+  white-space: nowrap;
+}
+
+.pulse-muted {
+  color: var(--dim);
+}
+
+.pulse-best {
+  color: var(--up);
+  font-weight: 600;
+  text-shadow: 0 0 10px rgba(0, 255, 156, 0.5);
+}
+
+.pulse-reviving {
+  color: var(--cyan);
+}
+
+.pulse-died {
+  color: var(--dim);
+}
+
+.pulse-say {
+  color: var(--cyan);
+  font-weight: 600;
+  animation: print-in 400ms ease-out;
+}
+
+.pulse-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px 12px;
+}
+
+.pulse-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.pulse-big {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.pulse-calls,
+.pulse-hero .pulse-best {
+  font: 700 22px var(--font-display);
+  color: var(--text);
+}
+
+.pulse-hero .pulse-best {
+  color: var(--up);
+  text-shadow: 0 0 14px rgba(0, 255, 156, 0.55);
+}
+
+.pulse-unit {
+  margin-left: 5px;
+  font: 500 11px var(--font-mono);
+  color: var(--dim);
+  text-shadow: none;
+}
+
+.pulse-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font: 500 10px var(--font-mono);
+}
+
+/* Only the Pulse numbers shimmer while a silent refetch is in flight. */
+.is-revalidating {
+  animation: revalidate 1.1s ease-in-out infinite;
 }
 
 /* ---------- section tabs ---------- */
 
 .tabs {
   display: flex;
-  gap: 2px;
-  margin: 10px 0 12px;
-  border-bottom: 1px solid var(--border);
+  gap: 0;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--sect-border);
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -205,28 +423,28 @@ a {
 }
 
 .tab {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
   gap: 5px;
-  min-height: var(--tap);
-  padding: 0 10px;
+  min-height: 38px;
+  padding: 9px 8px 7px;
   border: 0;
   border-bottom: 2px solid transparent;
   background: transparent;
-  color: var(--dim);
+  color: var(--dimmer);
+  font: 500 10px var(--font-mono);
+  letter-spacing: 0.5px;
   white-space: nowrap;
 }
 
 .tab.is-active {
   color: var(--text);
-  border-bottom-color: var(--accent);
   font-weight: 600;
+  border-bottom-color: var(--magenta);
 }
 
 .tab-count {
-  font-size: 11px;
   color: var(--dimmer);
   font-variant-numeric: tabular-nums;
 }
@@ -235,244 +453,288 @@ a {
   color: var(--dim);
 }
 
-/* ---------- ranging controls ---------- */
+/* Reviving is the one cyan tab — cyan is the comeback state colour. */
+.tab-cyan .tab-count {
+  color: var(--cyan);
+}
 
-.range-controls {
+.tab-cyan.is-active {
+  border-bottom-color: var(--cyan);
+}
+
+/* ---------- rows ---------- */
+
+.rows,
+.feed {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-bottom: 12px;
 }
 
-.chips {
-  display: flex;
-  gap: 4px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.chips::-webkit-scrollbar {
-  display: none;
-}
-
-.chip {
-  flex: 1 1 auto;
-  min-height: var(--tap);
-  padding: 0 10px;
-  border: 1px solid var(--border);
+.feed {
+  border: 1px solid var(--sect-border);
   border-radius: var(--radius);
-  background: transparent;
-  color: var(--dim);
-  font-size: 12px;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
+  overflow: hidden;
 }
 
-.chip.is-active {
-  background: var(--card);
-  border-color: var(--border-strong);
-  color: var(--text);
-  font-weight: 600;
+.feed-attached {
+  border-radius: 0 0 var(--radius) var(--radius);
+  border-top: none;
+  margin: 0 8px;
 }
 
-.range-custom {
+.row {
+  position: relative;
+  border-left: 2px solid var(--badge-border);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.rows > .row:last-child,
+.feed > .row:last-child {
+  border-bottom: 0;
+}
+
+/* Status edge: P&L direction, cyan reviving, solid died, dashed unresolved. */
+.edge-up {
+  border-left-color: var(--up);
+}
+
+.edge-down {
+  border-left-color: var(--down);
+}
+
+.edge-cyan {
+  border-left-color: var(--cyan);
+}
+
+.edge-died {
+  border-left-color: var(--badge-border);
+}
+
+.edge-unresolved {
+  border-left-style: dashed;
+  border-left-color: var(--badge-border);
+}
+
+.row-head {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  height: 52px;
+  padding: 0 12px 0 8px;
 }
 
-.range-field {
-  flex: 1 1 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: var(--tap);
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--card);
+.row-mini .row-head {
+  height: 44px;
+  padding-right: 14px;
 }
 
-.range-field-label,
-.range-field-unit {
-  flex: 0 0 auto;
-  color: var(--dim);
-  font-size: 12px;
+.row-desk .row-head {
+  height: 48px;
 }
 
-.range-input {
-  flex: 1 1 0;
-  min-width: 0;
+/* Top runner: taller row, and the only glow on the board that breathes. */
+.row-hero .row-head {
+  height: 56px;
+  box-shadow: inset 0 0 28px rgba(0, 255, 156, 0.06);
+}
+
+/* The whole row is the tap target; only the links and bin sit above it. */
+.row-head > * {
+  pointer-events: none;
+}
+
+.row-head > .row-hit,
+.row-head > .row-hoverlinks,
+.row-head > .bin-btn {
+  pointer-events: auto;
+}
+
+.row-hit {
+  position: absolute;
+  inset: 0;
+  padding: 0;
   border: 0;
   background: transparent;
-  color: var(--text);
-  font: inherit;
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
-  padding: 0;
-}
-
-.range-input:focus {
-  outline: none;
-}
-
-.range-field:focus-within {
-  border-color: var(--accent);
-}
-
-.range-dash {
-  flex: 0 0 auto;
-  color: var(--dimmer);
-}
-
-.range-line {
-  color: var(--dim);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.range-sep {
-  margin: 0 5px;
-  color: var(--dimmer);
-}
-
-/* ---------- cards ---------- */
-
-.cards {
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap);
-}
-
-.card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: var(--pad);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.card-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
+  border-radius: 0;
 }
 
 .avatar {
   flex: 0 0 auto;
-  width: 28px;
-  height: 28px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
   object-fit: cover;
-  background: var(--border);
+  background: var(--fill-1);
+}
+
+.row-mini .avatar {
+  width: 18px;
+  height: 18px;
+}
+
+.row-desk .avatar {
+  width: 20px;
+  height: 20px;
 }
 
 .avatar-fallback {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--text);
+  font: 600 10px var(--font-mono);
+  color: #dce4ea;
 }
 
-.head-text {
+.avatar-dead {
+  background: hsl(0 0% 22%);
+  color: #9aa4ad;
+}
+
+.avatar-unresolved {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px dashed var(--badge-border);
+  color: var(--dimmer);
+  font: 600 10px var(--font-mono);
+}
+
+.row-id {
   flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
   min-width: 0;
 }
 
-.head-line {
+.row-name {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .sym {
-  font-weight: 700;
-  font-size: 15px;
-  letter-spacing: 0.2px;
-}
-
-.name {
-  color: var(--dim);
-  font-size: 12px;
+  font: 600 12.5px var(--font-mono);
+  color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.age {
-  flex: 0 0 auto;
-  color: var(--dim);
+.row-mini .sym,
+.row-desk .sym {
   font-size: 12px;
-  font-variant-numeric: tabular-nums;
 }
 
+.is-died .sym {
+  color: var(--text-2);
+}
+
+.edge-unresolved .sym {
+  color: var(--dim);
+}
+
+.row-sub {
+  font: 400 10px var(--font-sans);
+  color: var(--dimmer);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.row-mini .row-sub,
+.row-desk .row-sub {
+  font-size: 9px;
+}
+
+.sub-sep {
+  margin: 0 4px;
+  color: var(--faint);
+}
+
+.sub-retrace {
+  color: var(--down);
+}
+
+.sub-stale {
+  color: var(--amber);
+}
+
+/* Watched is a 5px cyan dot beside the symbol — never a badge. */
+.watch-dot {
+  flex: 0 0 auto;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 6px var(--cyan);
+}
+
+/* ONE badge maximum: DIED > REVIVING > REVIVED > xN. */
 .badge {
+  flex: 0 0 auto;
   display: inline-block;
-  padding: 1px 6px;
-  border-radius: 999px;
-  border: 1px solid var(--border-strong);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.4px;
+  padding: 1px 4px;
+  border: 1px solid var(--badge-border);
+  border-radius: 3px;
+  font: 600 8.5px var(--font-mono);
+  letter-spacing: 0.3px;
   color: var(--dim);
   white-space: nowrap;
+}
+
+.badge-reviving {
+  color: var(--cyan);
+  border-color: var(--badge-border-cyan);
+}
+
+.badge-revived {
+  color: var(--text-2);
 }
 
 .badge-recall {
   font-variant-numeric: tabular-nums;
 }
 
-.badge-revived {
-  color: var(--up);
-  border-color: color-mix(in srgb, var(--up) 40%, var(--border-strong));
-}
-
-/* Survived rug probation (docs/decisions.md round 6). Same chip as REVIVED
-   until the design pass gives the comeback its own treatment. */
-.badge-reviving {
-  color: var(--up);
-  border-color: color-mix(in srgb, var(--up) 40%, var(--border-strong));
-}
-
-.badge-died {
-  color: var(--dim);
-  border-color: var(--border-strong);
-  text-transform: none;
-  font-family: var(--mono);
-  font-size: 10px;
-}
-
-/* ---------- headline row ---------- */
-
-.card-headline {
-  display: flex;
+.row-spark {
+  flex: 0 0 auto;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
 }
 
-.headline-main {
-  min-width: 0;
-}
-
-.headline-top {
+.row-num {
+  flex: 0 0 auto;
   display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  width: 92px;
+}
+
+.row-mini .row-num,
+.row-desk .row-num {
+  width: 96px;
 }
 
 .mult {
-  font-size: 26px;
-  font-weight: 700;
-  line-height: 1.1;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  font: 700 15px var(--font-mono);
   font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+
+.row-mini .mult,
+.row-desk .mult {
+  font-size: 14px;
+}
+
+.row-hero .mult {
+  font-size: 17px;
 }
 
 .mult-up {
@@ -483,129 +745,871 @@ a {
   color: var(--down);
 }
 
-/* Only reachable when the multiple is unknown — a full-size em dash reads as a bar. */
 .mult-flat {
-  color: var(--dimmer);
-  font-size: 18px;
+  color: var(--dim);
+}
+
+/* Null state: a small dim dash, never a hero number. */
+.mult-null {
+  color: var(--faint);
+}
+
+.mult-dead {
+  color: var(--dim);
+}
+
+/* Runners get a static glow; only the top one breathes (see Motion). */
+.is-runner .mult-up {
+  text-shadow: var(--glow-up);
+}
+
+.row-arrow {
+  font-size: 10px;
 }
 
 .mcaps {
-  color: var(--dim);
-  font-size: 13px;
+  font: 400 9.5px var(--font-mono);
+  color: var(--dimmer);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-.mcaps-arrow {
-  margin: 0 5px;
-  color: var(--dimmer);
+.mcaps-null {
+  color: var(--faint);
 }
 
-.retrace {
-  margin-top: 2px;
-  color: var(--dim);
-  font-size: 12px;
+.mcaps-arrow {
+  margin: 0 4px;
+  color: var(--faint);
+}
+
+.row-age {
+  flex: 0 0 auto;
+  width: 22px;
+  text-align: right;
+  font: 400 10px var(--font-mono);
+  color: var(--dimmer);
   font-variant-numeric: tabular-nums;
 }
 
-.spark {
-  flex: 0 0 auto;
-  display: block;
+/* Died rows dim out; red stays reserved for live P&L. */
+.is-died {
+  opacity: 0.55;
 }
 
-.spark polyline {
+.is-stale .mult {
+  opacity: 0.65;
+}
+
+/* ---------- link pills (never rendered by default) ---------- */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 4px 12px;
+  border: 1px solid var(--badge-border-cyan);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--cyan);
+  font: 600 9.5px var(--font-mono);
+  letter-spacing: 0.4px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.pill-copy {
+  color: var(--dim);
+  border-color: var(--badge-border);
+}
+
+/* Mobile: tap the row, a 34px pill row springs open (one at a time). */
+.row-pills {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 12px 6px 38px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  animation: spring-open 200ms ease-out;
+}
+
+.row-pills::-webkit-scrollbar {
+  display: none;
+}
+
+.is-open {
+  background: var(--wash-magenta);
+}
+
+/* Desktop: hover swaps the sparkline for the pills — no reserved row, no shift. */
+.row-hoverlinks {
+  display: none;
+  align-items: center;
+  gap: 6px;
+}
+
+.row-hoverlinks .pill {
+  min-height: 22px;
+  padding: 2px 6px;
+  font-size: 8.5px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .row:hover .row-spark {
+    display: none;
+  }
+
+  .row:hover .row-hoverlinks {
+    display: flex;
+  }
+
+  .row:hover {
+    background: var(--wash-magenta);
+  }
+}
+
+.bin-btn {
+  flex: 0 0 auto;
+  min-height: 26px;
+  padding: 4px 9px;
+  border: 1px solid var(--badge-border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dim);
+  font: 500 9.5px var(--font-mono);
+}
+
+/* ---------- sparkline ---------- */
+
+.spark {
+  display: block;
+  overflow: visible;
+}
+
+.spark-base {
+  stroke: var(--spark-base);
+  fill: none;
+}
+
+.spark-line {
   stroke: var(--dim);
 }
 
-.spark-up polyline {
+.spark-end,
+.spark-peak {
+  fill: var(--dim);
+}
+
+.spark-up .spark-line {
   stroke: var(--up);
 }
 
-.spark-down polyline {
+.spark-up .spark-end,
+.spark-up .spark-peak {
+  fill: var(--up);
+}
+
+.spark-down .spark-line {
   stroke: var(--down);
 }
 
-/* ---------- meta row ---------- */
+.spark-down .spark-end,
+.spark-down .spark-peak {
+  fill: var(--down);
+}
 
-.card-meta {
+.spark-cyan .spark-line {
+  stroke: var(--cyan);
+}
+
+.spark-cyan .spark-end,
+.spark-cyan .spark-peak {
+  fill: var(--cyan);
+}
+
+/* Dead = a dimmed line that simply ends (the end dot is not drawn). */
+.spark-dead .spark-line {
+  stroke: var(--dim);
+  opacity: 0.5;
+}
+
+.spark-drawdown {
+  fill: rgba(255, 77, 109, 0.1);
+}
+
+.spark-area {
+  fill: rgba(0, 255, 156, 0.07);
+}
+
+.spark-down .spark-area {
+  fill: rgba(255, 77, 109, 0.06);
+}
+
+/* In the hero cards the peak dot is magenta — the wordmark's period. */
+.spark-hero .spark-peak {
+  fill: var(--magenta);
+}
+
+/* ---------- spotlight cards ---------- */
+
+.spotlights {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 10px;
-  flex-wrap: wrap;
+  padding: 12px 14px;
+}
+
+.sect-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 8px;
+}
+
+.sect-title {
+  font: 700 11px var(--font-mono);
+  letter-spacing: 2px;
+  color: var(--text);
+}
+
+.sect-count {
+  margin-left: 6px;
   color: var(--dim);
-  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 
-.meta-caller {
+.sect-note {
+  font: 400 9.5px var(--font-mono);
+  color: var(--dimmer);
+  text-align: right;
+}
+
+.sect-cyan .sect-title {
+  color: var(--cyan);
+  text-shadow: 0 0 8px rgba(35, 217, 255, 0.4);
+}
+
+.sect-dim .sect-title {
+  color: var(--dim);
+}
+
+.hero-card,
+.story-card,
+.revive-card {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  border: 1px solid var(--sect-border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+}
+
+.hero-card {
+  gap: 10px;
+  padding: 14px 16px;
+  border-color: rgba(0, 255, 156, 0.3);
+  box-shadow: inset 0 0 40px rgba(0, 255, 156, 0.04);
+}
+
+.revive-card {
+  border-color: rgba(35, 217, 255, 0.25);
+}
+
+.revive-card.is-featured {
+  border-color: rgba(35, 217, 255, 0.4);
+  box-shadow:
+    0 0 24px rgba(35, 217, 255, 0.08),
+    inset 0 0 30px rgba(35, 217, 255, 0.04);
+}
+
+.hero-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.hero-sym {
+  font: 600 14px var(--font-mono);
   color: var(--text);
-  max-width: 45%;
+}
+
+.story-sym {
+  font: 600 13px var(--font-mono);
+  color: var(--text);
+}
+
+.hero-meta {
+  font: 400 10px var(--font-sans);
+  color: var(--dimmer);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.meta-stale {
+.hero-mult {
+  margin-left: auto;
+  font: 700 26px var(--font-display);
+  color: var(--up);
+  text-shadow: 0 0 16px rgba(0, 255, 156, 0.6);
+  font-variant-numeric: tabular-nums;
+}
+
+.story-mult {
+  margin-left: auto;
+  font: 700 20px var(--font-display);
+  font-variant-numeric: tabular-nums;
+}
+
+.revive-delta {
+  margin-left: auto;
+  font: 700 18px var(--font-display);
+  color: var(--cyan);
+  text-shadow: var(--glow-cyan);
+}
+
+.hero-foot {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font: 400 10px var(--font-mono);
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.foot-now {
+  color: var(--text-2);
+}
+
+.foot-unit {
+  margin-left: 4px;
   color: var(--dimmer);
 }
 
-/* ---------- links row ---------- */
-
-.card-links {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
+.foot-down {
+  color: var(--down);
 }
 
-.link-btn,
-.bin-btn {
+.foot-strong {
+  color: var(--text-2);
+}
+
+.foot-links {
+  margin-left: auto;
   display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: var(--tap);
-  min-width: 64px;
-  padding: 0 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--dim);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.6px;
+  gap: 5px;
+  color: var(--cyan);
+}
+
+.foot-links a {
+  color: var(--cyan);
   text-decoration: none;
 }
 
-.link-btn:active {
-  background: var(--card-hover);
+.foot-sep {
+  color: var(--faint);
 }
 
-.bin-btn {
+/* ---------- desktop: every section at once, no tabs ---------- */
+
+.desk {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  padding: 16px 20px 24px;
+}
+
+.desk-col {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.desk-feed {
+  flex: 1.05;
+}
+
+.desk-stories {
+  flex: 1.1;
+}
+
+.desk-rail {
+  flex: 0.85;
+}
+
+.desk-block {
+  display: flex;
+  flex-direction: column;
+}
+
+.desk-block .spotlights {
+  padding: 0;
+}
+
+.desk-ranging {
+  padding: 12px 20px 24px;
+}
+
+.back-btn {
+  margin-bottom: 8px;
+}
+
+.rail {
+  border: 1px solid var(--sect-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  opacity: 0.75;
+}
+
+.rail-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.rail-row:last-child {
+  border-bottom: 0;
+}
+
+.rail-sym {
+  font: 600 11px var(--font-mono);
+  color: var(--text-2);
+}
+
+.rail-meta {
   margin-left: auto;
+  font: 400 9.5px var(--font-mono);
+  color: var(--dimmer);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.range-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--sect-border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+}
+
+.summary-line {
+  font: 400 10.5px var(--font-mono);
+  color: var(--dim);
+}
+
+.summary-line strong {
+  color: var(--text-2);
+  font-weight: 400;
+}
+
+.link-btn {
+  border: 0;
+  background: transparent;
+  color: var(--magenta);
+  font: 500 10px var(--font-mono);
+  padding: 4px 2px;
+}
+
+/* ---------- mini app half-sheet ---------- */
+
+.app-mini {
+  display: flex;
+  flex-direction: column;
+  max-width: none;
+  min-height: 100vh;
+  padding-bottom: 0;
+}
+
+.grabber {
+  width: 36px;
+  height: 4px;
+  margin: 8px auto 4px;
+  border-radius: 2px;
+  background: var(--badge-border);
+}
+
+.mini {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.mini-listhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 14px 5px;
+}
+
+.mini-label {
+  font: 600 9.5px var(--font-mono);
+  letter-spacing: 1.5px;
+  color: var(--dim);
+}
+
+.mini-listhead .link-btn {
+  color: var(--dimmer);
+  font-size: 9.5px;
+}
+
+.mini-rows {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.bridge {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 14px calc(12px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid rgba(255, 61, 190, 0.25);
+  background: rgba(255, 61, 190, 0.05);
+}
+
+.bridge-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--magenta);
+  color: var(--ink);
+  font: 700 12px var(--font-display);
+  box-shadow: 0 0 18px rgba(255, 61, 190, 0.4);
+}
+
+.bridge-note {
+  text-align: center;
+  font: 400 8.5px var(--font-mono);
+  color: var(--dimmer);
+}
+
+/* ---------- ranging ---------- */
+
+.range-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--sect-border);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.chips-label {
+  font: 500 9px var(--font-mono);
+  letter-spacing: 1px;
+  color: var(--dimmer);
+}
+
+.chip {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 4px 12px;
+  border: 1px solid var(--badge-border);
+  border-radius: 17px;
+  background: transparent;
+  color: var(--dim);
+  font: 500 9.5px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Band chips fill magenta when active; duration chips fill cyan. */
+.chip.is-active {
+  background: var(--magenta);
+  border-color: var(--magenta);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: 0 0 10px rgba(255, 61, 190, 0.4);
+}
+
+.chip-hours.is-active {
+  background: var(--cyan);
+  border-color: var(--cyan);
+  box-shadow: 0 0 10px rgba(35, 217, 255, 0.4);
+}
+
+.range-custom {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.range-field-wrap {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.range-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 7px 10px;
+  border: 1px solid var(--badge-border);
+  border-radius: 7px;
+  background: rgba(255, 61, 190, 0.03);
+}
+
+.range-field:focus-within {
+  border-color: var(--magenta);
+}
+
+.range-field-label {
+  flex: 0 0 auto;
+  font: 500 10px var(--font-mono);
+  color: var(--dimmer);
+}
+
+.range-input {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: 600 13px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.range-input:focus {
+  outline: none;
+}
+
+/* The dollar echo: what the field actually means. Red when the band is invalid. */
+.echo {
+  font: 500 9px var(--font-mono);
+  color: var(--cyan);
+}
+
+.echo-idle {
+  color: var(--dimmer);
+}
+
+.echo-bad {
   color: var(--down);
-  border-color: color-mix(in srgb, var(--down) 35%, var(--border-strong));
+}
+
+.range-dash {
+  flex: 0 0 auto;
+  padding-top: 12px;
+  font: 400 12px var(--font-mono);
+  color: var(--faint);
+}
+
+.range-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.range-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.range-row:last-child {
+  border-bottom: 0;
+}
+
+.range-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.range-sym {
+  font: 600 12.5px var(--font-mono);
+  color: var(--text);
+}
+
+.range-meta {
+  font: 400 9.5px var(--font-sans);
+  color: var(--dimmer);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Time in band is this tab's hero number. */
+.range-hero {
+  margin-left: auto;
+  font: 700 18px var(--font-display);
+  color: var(--cyan);
+  text-shadow: var(--glow-cyan);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.range-hero-unit {
+  margin-left: 5px;
+  font: 500 9px var(--font-mono);
+  color: var(--dim);
+  text-shadow: none;
+}
+
+/* Band bar: queried band as track, held range as fill, live mcap as the tick. */
+.band {
+  position: relative;
+  height: 14px;
+  border-radius: 7px;
+  background: var(--fill-2);
+  border: 1px solid var(--sect-border);
+}
+
+.band-held {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  border-radius: 5px;
+  background: rgba(35, 217, 255, 0.25);
+}
+
+.band-tick {
+  position: absolute;
+  top: -2px;
+  width: 2px;
+  height: 16px;
+  background: var(--cyan);
+  box-shadow: 0 0 6px var(--cyan);
+}
+
+.band-labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font: 400 8.5px var(--font-mono);
+  color: var(--dimmer);
+  font-variant-numeric: tabular-nums;
+}
+
+.band-held-label {
+  color: var(--dim);
+}
+
+/* ---------- skeleton ---------- */
+
+.ghosts {
+  display: flex;
+  flex-direction: column;
+}
+
+.ghost-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 52px;
+  padding: 0 12px 0 10px;
+  border-left: 2px solid var(--sect-border);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.ghost-disc {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--fill-1);
+}
+
+.ghost-id {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ghost-num {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.ghost-bar {
+  display: block;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--fill-2) 0%, var(--fill-1) 50%, var(--fill-2) 100%);
+  background-size: 300% 100%;
+  /* Shimmer ONCE, then hold still. */
+  animation: shimmer 1.2s ease-out 1 both;
+}
+
+.ghost-bar-sym {
+  width: 56px;
+  height: 9px;
+}
+
+.ghost-bar-sub {
+  width: 88px;
+  height: 7px;
+}
+
+.ghost-bar-mult {
+  width: 38px;
+  height: 11px;
+}
+
+.ghost-bar-mcap {
+  width: 64px;
+  height: 7px;
 }
 
 /* ---------- states ---------- */
 
 .empty {
-  margin: 24px 0;
+  margin: 0;
+  padding: 24px 16px;
   color: var(--dim);
   text-align: center;
+  font: 400 11px var(--font-mono);
+}
+
+.footnote {
+  margin: 0;
+  padding: 4px 2px 0;
+  font: 400 9px var(--font-mono);
+  color: var(--dimmer);
 }
 
 .banner {
-  margin: 10px 0;
+  margin: 10px 14px;
   padding: 10px 12px;
   border-radius: var(--radius);
-  border: 1px solid var(--border-strong);
-  background: var(--card);
+  border: 1px solid var(--badge-border);
+  background: var(--fill-2);
   font-size: 13px;
 }
 
 .banner-error {
   color: var(--down);
-  border-color: color-mix(in srgb, var(--down) 35%, var(--border-strong));
+  border-color: color-mix(in srgb, var(--down) 35%, var(--badge-border));
 }
 
 .banner-warn {
@@ -615,7 +1619,7 @@ a {
 .banner-btn {
   border: 0;
   background: transparent;
-  color: var(--accent);
+  color: var(--magenta);
   text-decoration: underline;
   padding: 4px;
 }
@@ -629,8 +1633,8 @@ a {
 
 .screen-title {
   margin: 0 0 8px;
-  font-size: 18px;
-  font-weight: 600;
+  font: 700 20px var(--font-display);
+  color: var(--text);
 }
 
 .screen-message {
@@ -642,9 +1646,287 @@ a {
   margin-top: 16px;
   min-height: var(--tap);
   padding: 0 18px;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--badge-border);
   border-radius: var(--radius);
-  background: var(--card);
+  background: var(--fill-2);
   color: var(--text);
   font-weight: 600;
+}
+
+/* ================= MOTION =================
+   Ceremony is rationed: three state changes, one breathing card, throttled
+   row flashes. Everything here is CSS or WAAPI — no animation library. */
+
+.odo-char {
+  display: inline-block;
+}
+
+.odo-roll {
+  animation: odo-roll 120ms ease-out both;
+}
+
+@keyframes odo-roll {
+  from {
+    transform: translateY(-0.85em);
+    opacity: 0;
+  }
+
+  60% {
+    opacity: 1;
+  }
+
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* Row update flash: ~6% toward the P&L colour, 400ms fade. */
+.is-flash-up {
+  animation: flash-up 400ms ease-out;
+}
+
+.is-flash-down {
+  animation: flash-down 400ms ease-out;
+}
+
+@keyframes flash-up {
+  from {
+    background-color: rgba(0, 255, 156, 0.06);
+  }
+
+  to {
+    background-color: transparent;
+  }
+}
+
+@keyframes flash-down {
+  from {
+    background-color: rgba(255, 77, 109, 0.06);
+  }
+
+  to {
+    background-color: transparent;
+  }
+}
+
+/* New call: drops in with a magenta bloom, 500ms decay. */
+.is-new {
+  animation:
+    bloom 500ms ease-out,
+    drop-in 500ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+@keyframes bloom {
+  from {
+    background-color: rgba(255, 61, 190, 0.09);
+    box-shadow: inset 0 0 30px rgba(255, 61, 190, 0.25);
+  }
+
+  to {
+    background-color: transparent;
+    box-shadow: inset 0 0 30px rgba(255, 61, 190, 0);
+  }
+}
+
+@keyframes drop-in {
+  from {
+    transform: translateY(-8px);
+    opacity: 0;
+  }
+
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* Ceremony 1 — death: the row desaturates over 600ms, the badge stamps in. */
+.is-death {
+  animation: desaturate 600ms ease-out forwards;
+}
+
+@keyframes desaturate {
+  from {
+    filter: saturate(1);
+  }
+
+  to {
+    filter: saturate(0.15);
+  }
+}
+
+.badge-stamp {
+  animation: stamp 220ms cubic-bezier(0.2, 1.4, 0.4, 1);
+}
+
+@keyframes stamp {
+  from {
+    transform: scale(1.7);
+    opacity: 0;
+  }
+
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Ceremony 2 — revival: a cyan bloom (the Pulse strip prints the line). */
+.is-revival {
+  animation: revive-bloom 700ms ease-out;
+}
+
+@keyframes revive-bloom {
+  from {
+    background-color: rgba(35, 217, 255, 0.12);
+    box-shadow: inset 0 0 30px rgba(35, 217, 255, 0.3);
+  }
+
+  to {
+    background-color: transparent;
+    box-shadow: inset 0 0 30px rgba(35, 217, 255, 0);
+  }
+}
+
+/* Ceremony 3 — crossing 10x: one shimmer sweep, then quiet. */
+.is-tenx::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    100deg,
+    transparent 30%,
+    rgba(242, 234, 251, 0.16) 50%,
+    transparent 70%
+  );
+  transform: translateX(-100%);
+  animation: sweep 900ms ease-out;
+}
+
+@keyframes sweep {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* The ONLY breathing glow on the board: the top runner, while it climbs. */
+.is-breathing .mult-up {
+  animation: breathe 4s ease-in-out infinite;
+}
+
+.hero-card.is-breathing .hero-mult {
+  animation: breathe-hero 4s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    text-shadow: 0 0 8px rgba(0, 255, 156, 0.35);
+  }
+
+  50% {
+    text-shadow: 0 0 18px rgba(0, 255, 156, 0.85);
+  }
+}
+
+@keyframes breathe-hero {
+  0%,
+  100% {
+    text-shadow: 0 0 12px rgba(0, 255, 156, 0.45);
+  }
+
+  50% {
+    text-shadow: 0 0 26px rgba(0, 255, 156, 0.9);
+  }
+}
+
+/* Desktop transit: the card physically travels to its new section. */
+.transit-ghost {
+  z-index: 60;
+  pointer-events: none;
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--bg-top), var(--bg-bottom));
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.55);
+  filter: saturate(0.6) brightness(1.05);
+}
+
+.is-arriving {
+  animation: arrive 450ms ease-out;
+}
+
+@keyframes arrive {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes spring-open {
+  from {
+    transform: translateY(-6px);
+    opacity: 0;
+  }
+
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes print-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes revalidate {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 150% 0;
+  }
+
+  to {
+    background-position: -150% 0;
+  }
+}
+
+/* Reduced motion: no flashes, blooms or rolls — direction arrows carry the
+   change instead, and every glow freezes at its static value. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .is-breathing .mult-up,
+  .hero-card.is-breathing .hero-mult {
+    text-shadow: var(--glow-up);
+  }
+
+  .is-tenx::after {
+    display: none;
+  }
 }

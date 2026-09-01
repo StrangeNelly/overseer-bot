@@ -109,8 +109,11 @@ export interface HandoffResponse {
   url: string;
 }
 
-/** Ranging board: accumulation-phase detection over the group's own calls. */
-export const RANGE_DURATION_HOURS = [6, 12, 24, 48] as const;
+/**
+ * Ranging board: accumulation-phase detection over the group's own calls.
+ * 3h added in the round 8 design pass — the shortest band a coil is readable in.
+ */
+export const RANGE_DURATION_HOURS = [3, 6, 12, 24, 48] as const;
 export type RangeDurationHours = (typeof RANGE_DURATION_HOURS)[number];
 
 export const RANGE_PRESETS = [

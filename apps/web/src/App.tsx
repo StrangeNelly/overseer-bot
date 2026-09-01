@@ -19,13 +19,30 @@ import {
   fetchMe,
   fetchRange,
 } from './api';
+import { readCachedBoard, writeCachedBoard } from './cache';
 import { Board } from './components/Board';
+import { DesktopBoard } from './components/DesktopBoard';
+import type { RangeSummary } from './components/DesktopBoard';
+import { MiniBoard } from './components/MiniBoard';
+import { Pulse } from './components/Pulse';
 import { DEFAULT_CONTROLS, Ranging, resolveBand } from './components/Ranging';
 import type { RangeBand, RangeControls } from './components/Ranging';
 import type { SectionKey } from './components/SectionTabs';
+import { GhostRows } from './components/Spotlight';
 import { WINDOWS, WindowSwitcher } from './components/WindowSwitcher';
-import { shortAddress } from './format';
-import { tgInitData, tgOpenLink, tgReady, tgStartParam } from './telegram';
+import { derivePulse, isStale } from './derive';
+import { fmtAge, fmtUsd, shortAddress } from './format';
+import { ANNOUNCEMENT_MS, suppressDiffAfter, useBoardChange, useTransient } from './motion';
+import {
+  tgExpand,
+  tgHaptic,
+  tgInitData,
+  tgIsExpanded,
+  tgOnViewportChanged,
+  tgOpenLink,
+  tgReady,
+  tgStartParam,
+} from './telegram';
 
 const WINDOW_STORAGE_KEY = 'groupie.window';
 const RANGE_STORAGE_KEY = 'groupie.range';
@@ -47,6 +64,8 @@ const LIVE_EVENT_NAMES = ['update', 'price_update', 'new_call', 're_call', 'toke
 /** Telegram start params and our slugs share this alphabet. */
 const SLUG_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const NO_HIDDEN: ReadonlySet<number> = new Set<number>();
+/** Design 2b: at this width the board stops being tabs and becomes columns. */
+const DESKTOP_MIN_PX = 1100;
 
 type BootState =
   | { kind: 'loading' }
@@ -56,6 +75,9 @@ type BootState =
   | { kind: 'blocked'; title: string; message: string; retry: boolean };
 
 type LiveState = 'idle' | 'open' | 'reconnecting';
+
+/** Half-sheet, single column, or the full terminal. */
+type LayoutMode = 'mini' | 'mobile' | 'desktop';
 
 /** What the ranging endpoint was last asked for — the unit a refetch repeats. */
 interface RangeQuery {
@@ -95,7 +117,12 @@ function isRangeHours(value: unknown): value is RangeDurationHours {
   return typeof value === 'number' && (RANGE_DURATION_HOURS as readonly number[]).includes(value);
 }
 
-/** Every field is re-validated: the stored blob is user-editable and can predate a preset change. */
+/**
+ * Every field is re-validated: the stored blob is user-editable and can predate
+ * a preset change. The custom fields were renamed in round 8 (they hold dollars
+ * with a suffix now, not bare thousands), so an old blob simply starts empty
+ * rather than silently meaning something 1000x smaller.
+ */
 function loadRangeControls(): RangeControls {
   try {
     const raw = window.localStorage.getItem(RANGE_STORAGE_KEY);
@@ -112,8 +139,8 @@ function loadRangeControls(): RangeControls {
               : DEFAULT_CONTROLS.presetIndex;
         return {
           presetIndex,
-          customLoK: typeof stored.customLoK === 'string' ? stored.customLoK : '',
-          customHiK: typeof stored.customHiK === 'string' ? stored.customHiK : '',
+          customLo: typeof stored.customLo === 'string' ? stored.customLo : '',
+          customHi: typeof stored.customHi === 'string' ? stored.customHi : '',
           hours: isRangeHours(stored.hours) ? stored.hours : DEFAULT_CONTROLS.hours,
         };
       }
@@ -249,6 +276,46 @@ function bootstrapOnce(): Promise<BootState> {
   return bootPromise;
 }
 
+/**
+ * Which of the three surfaces to draw. Inside Telegram the half-sheet owns the
+ * screen until the member drags it up (round 8: we never expand it for them);
+ * outside, it is a plain width question.
+ */
+function useLayoutMode(inTelegram: boolean): LayoutMode {
+  const [expanded, setExpanded] = useState(() => !inTelegram || tgIsExpanded());
+  const [wide, setWide] = useState(
+    () => typeof window !== 'undefined' && window.innerWidth >= DESKTOP_MIN_PX,
+  );
+
+  useEffect(() => {
+    if (!inTelegram) return;
+    const sync = () => setExpanded(tgIsExpanded());
+    sync();
+    return tgOnViewportChanged(sync);
+  }, [inTelegram]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    let mq: MediaQueryList;
+    try {
+      mq = window.matchMedia(`(min-width: ${DESKTOP_MIN_PX}px)`);
+    } catch {
+      return;
+    }
+    const sync = () => setWide(mq.matches);
+    sync();
+    if (typeof mq.addEventListener === 'function') {
+      mq.addEventListener('change', sync);
+      return () => mq.removeEventListener('change', sync);
+    }
+    mq.addListener?.(sync);
+    return () => mq.removeListener?.(sync);
+  }, []);
+
+  if (inTelegram && !expanded) return 'mini';
+  return wide ? 'desktop' : 'mobile';
+}
+
 export default function App() {
   const [boot, setBoot] = useState<BootState>({ kind: 'loading' });
   const [boardWindow, setBoardWindow] = useState<BoardWindow>(loadWindow);
@@ -256,6 +323,7 @@ export default function App() {
   const [board, setBoard] = useState<BoardResponse | null>(null);
   const [boardError, setBoardError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [revalidating, setRevalidating] = useState(false);
   const [live, setLive] = useState<LiveState>('idle');
   const [hidden, setHidden] = useState<ReadonlySet<number>>(NO_HIDDEN);
   const [binningId, setBinningId] = useState<number | null>(null);
@@ -275,6 +343,8 @@ export default function App() {
   const debounceRef = useRef<number | null>(null);
   const rangeSeqRef = useRef(0);
   const rangeQueryRef = useRef<RangeQuery | null>(null);
+  /** True once the server has answered: the cache never outranks a real payload. */
+  const paintedRef = useRef(false);
 
   // Bootstrap: slug -> auth -> /api/me.
   useEffect(() => {
@@ -294,11 +364,14 @@ export default function App() {
     // Latest-wins: a slower earlier response (window switch, or a refetch that
     // began before a bin committed) must not overwrite a newer one.
     const seq = ++loadSeqRef.current;
-    if (!options.silent) setLoading(true);
+    if (options.silent) setRevalidating(true);
+    else setLoading(true);
     try {
       const data = await fetchBoard(currentSlug, windowRef.current);
       if (seq !== loadSeqRef.current) return;
+      paintedRef.current = true;
       setBoard(data);
+      writeCachedBoard(currentSlug, windowRef.current, data);
       setBoardError(null);
       setHidden(NO_HIDDEN);
       setNow(Date.now());
@@ -326,14 +399,17 @@ export default function App() {
         setBoot({
           kind: 'blocked',
           title: 'Board not found',
-          message: 'That link does not match a group Groupie is tracking.',
+          message: 'That link does not match a group overseer is tracking.',
           retry: false,
         });
         return;
       }
       setBoardError(describe(err));
     } finally {
-      if (!options.silent && seq === loadSeqRef.current) setLoading(false);
+      if (seq === loadSeqRef.current) {
+        if (options.silent) setRevalidating(false);
+        else setLoading(false);
+      }
     }
   }, []);
 
@@ -344,6 +420,21 @@ export default function App() {
     windowRef.current = boardWindow;
     void loadBoard();
   }, [slug, boardWindow, loadBoard]);
+
+  /**
+   * Instant paint from the last board we saw (design: Performance). Strictly a
+   * pre-first-response courtesy: once the server has spoken in this session the
+   * cache is never consulted again, so it cannot resurrect a binned card or
+   * overwrite fresher numbers. Its successor is not diffed either — a stale
+   * cache must not fire a storm of "new call" blooms.
+   */
+  useEffect(() => {
+    if (!slug || paintedRef.current) return;
+    const cached = readCachedBoard(slug, boardWindow);
+    if (!cached) return;
+    suppressDiffAfter(cached);
+    setBoard((prev) => (prev === null && !paintedRef.current ? cached : prev));
+  }, [slug, boardWindow]);
 
   const loadRange = useCallback(async (query: RangeQuery, options: { silent?: boolean } = {}) => {
     const currentSlug = slugRef.current;
@@ -367,6 +458,7 @@ export default function App() {
 
   /** Fixed for the life of the page: the launch payload only exists in the webview. */
   const inTelegram = useMemo(() => tgInitData() !== null, []);
+  const layout = useLayoutMode(inTelegram);
   const rangeBand = useMemo(() => resolveBand(rangeControls), [rangeControls]);
   const rangingActive = section === 'ranging';
   const rangeHours = rangeControls.hours;
@@ -490,6 +582,8 @@ export default function App() {
   const onFullBoard = useCallback(async () => {
     const currentSlug = slugRef.current;
     if (!currentSlug) return;
+    // Design: the bridge tap is the one haptic on this surface.
+    tgHaptic();
     setHandoffPending(true);
     setActionError(null);
     try {
@@ -510,15 +604,39 @@ export default function App() {
     void bootstrapOnce().then(setBoot);
   }, []);
 
+  const change = useBoardChange(board);
+  const announcement = useTransient(change.announcement, ANNOUNCEMENT_MS);
+  const pulse = useMemo(
+    () => (board ? derivePulse(board, now, hidden) : null),
+    [board, now, hidden],
+  );
+  const rangeSummary = useMemo<RangeSummary | null>(() => {
+    if (!range) return null;
+    // The response is sorted by inRangeHours desc, so the first card is the longest.
+    const longest = range.cards[0];
+    return {
+      count: range.cards.length,
+      loUsd: range.loUsd,
+      hiUsd: range.hiUsd,
+      minHours: range.minHours,
+      longest: longest
+        ? {
+            label: longest.symbol ? `$${longest.symbol}` : shortAddress(longest.address),
+            hours: longest.range.inRangeHours,
+          }
+        : null,
+    };
+  }, [range]);
+
   if (boot.kind === 'loading') {
-    return <Screen title="Groupie" message="Opening the board…" />;
+    return <Screen title="overseer" message="Opening the board…" />;
   }
 
   if (boot.kind === 'no-slug') {
     return (
       <Screen
         title="No board selected"
-        message="Open this board from your group’s pinned link so Groupie knows which group to show."
+        message="Open this board from your group’s pinned link so overseer knows which group to show."
       />
     );
   }
@@ -551,29 +669,79 @@ export default function App() {
   }
 
   const title = board?.group.title ?? boot.slug;
+  const staleBoard =
+    board !== null && (board.sections.fresh ?? []).some((card) => isStale(card, now));
+
+  // ---- Telegram half-sheet (design 2a): its own surface, no tabs, one bridge.
+  if (layout === 'mini') {
+    return (
+      <div className="app app-mini">
+        <div className="grabber" aria-hidden="true" />
+        <header className="head head-mini">
+          <Wordmark />
+          <LiveDot state={live} />
+        </header>
+        {actionError ? (
+          <p className="banner banner-error" role="alert">
+            {actionError}
+          </p>
+        ) : null}
+        {board && pulse ? (
+          <MiniBoard
+            board={board}
+            now={now}
+            hiddenCallIds={hidden}
+            pulse={pulse}
+            announcement={announcement}
+            revalidating={revalidating}
+            onFullBoard={() => void onFullBoard()}
+            handoffPending={handoffPending}
+            onExpand={tgExpand}
+          />
+        ) : (
+          <div className="mini-rows">
+            <GhostRows count={5} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const desktop = layout === 'desktop';
 
   return (
-    <div className="app">
-      <header className="header">
-        <div className="header-top">
-          <h1 className="header-title" title={title}>
+    <div className={`app${desktop ? ' app-desk' : ''}`}>
+      <header className={`head${desktop ? ' head-desk' : ''}`}>
+        <div className="head-left">
+          <Wordmark />
+          <h1 className="group-title" title={title}>
             {title}
           </h1>
           <LiveDot state={live} />
-          {/* Telegram only: a browser tab is already the full board. */}
-          {inTelegram ? (
-            <button
-              type="button"
-              className="handoff-btn"
-              onClick={() => void onFullBoard()}
-              disabled={handoffPending}
-            >
-              {handoffPending ? 'Opening…' : 'Full board ↗'}
-            </button>
-          ) : null}
         </div>
-        <WindowSwitcher value={boardWindow} onChange={onWindowChange} />
+        <div className="head-right">
+          {pulse?.asOfMs !== undefined && pulse?.asOfMs !== null && (desktop || staleBoard) ? (
+            <span className={`asof${staleBoard ? ' is-stale' : ''}`}>
+              {`data as of ${fmtAge(new Date(Date.now() - pulse.asOfMs).toISOString())} ago`}
+            </span>
+          ) : null}
+          <WindowSwitcher value={boardWindow} onChange={onWindowChange} />
+        </div>
       </header>
+
+      {board && pulse ? (
+        <Pulse
+          data={pulse}
+          variant="strip"
+          announcement={announcement}
+          revalidating={revalidating}
+          rangingNote={
+            desktop && rangeSummary
+              ? `${rangeSummary.count} coiling in ${fmtUsd(rangeSummary.loUsd)}–${fmtUsd(rangeSummary.hiUsd)}`
+              : null
+          }
+        />
+      ) : null}
 
       <main className="main">
         {actionError ? (
@@ -592,28 +760,61 @@ export default function App() {
         ) : null}
 
         {board ? (
-          <Board
-            board={board}
-            section={section}
-            onSection={setSection}
-            now={now}
-            hiddenCallIds={hidden}
-            binningId={binningId}
-            onBin={onBin}
-            rangingCount={range === null ? null : range.cards.length}
-            ranging={
-              <Ranging
-                controls={rangeControls}
-                onControls={onRangeControls}
-                band={rangeBand}
-                data={range}
-                loading={rangeLoading}
-                error={rangeError}
-                onRetry={onRangeRetry}
+          desktop ? (
+            section === 'ranging' ? (
+              <div className="desk-ranging">
+                <button type="button" className="link-btn back-btn" onClick={() => setSection('fresh')}>
+                  ◂ board
+                </button>
+                <Ranging
+                  controls={rangeControls}
+                  onControls={onRangeControls}
+                  band={rangeBand}
+                  data={range}
+                  loading={rangeLoading}
+                  error={rangeError}
+                  onRetry={onRangeRetry}
+                  now={now}
+                />
+              </div>
+            ) : (
+              <DesktopBoard
+                board={board}
                 now={now}
+                hiddenCallIds={hidden}
+                binningId={binningId}
+                onBin={onBin}
+                ceremonies={change.ceremonies}
+                moved={change.moved}
+                rangeSummary={rangeSummary}
+                onOpenRanging={setSection}
               />
-            }
-          />
+            )
+          ) : (
+            <Board
+              board={board}
+              section={section}
+              onSection={setSection}
+              now={now}
+              hiddenCallIds={hidden}
+              binningId={binningId}
+              onBin={onBin}
+              ceremonies={change.ceremonies}
+              rangingCount={range === null ? null : range.cards.length}
+              ranging={
+                <Ranging
+                  controls={rangeControls}
+                  onControls={onRangeControls}
+                  band={rangeBand}
+                  data={range}
+                  loading={rangeLoading}
+                  error={rangeError}
+                  onRetry={onRangeRetry}
+                  now={now}
+                />
+              }
+            />
+          )
         ) : boardError ? (
           <div className="screen">
             <h2 className="screen-title">Could not load the board</h2>
@@ -622,11 +823,22 @@ export default function App() {
               Try again
             </button>
           </div>
+        ) : loading ? (
+          <GhostRows />
         ) : (
-          <p className="empty">{loading ? 'Loading the board…' : 'Nothing here yet.'}</p>
+          <p className="empty">Nothing here yet.</p>
         )}
       </main>
     </div>
+  );
+}
+
+/** Lowercase, magenta, glowing — with the cyan peak dot for a period. */
+function Wordmark() {
+  return (
+    <span className="wordmark">
+      overseer<span className="wordmark-dot">.</span>
+    </span>
   );
 }
 
@@ -635,7 +847,7 @@ function LiveDot({ state }: { state: LiveState }) {
     return (
       <span className="live live-off" title="Live connection dropped; retrying">
         <span className="live-dot" />
-        reconnecting…
+        RECONNECTING
       </span>
     );
   }
@@ -643,7 +855,7 @@ function LiveDot({ state }: { state: LiveState }) {
     return (
       <span className="live live-on" title="Live updates connected">
         <span className="live-dot" />
-        live
+        LIVE
       </span>
     );
   }

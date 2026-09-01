@@ -1,41 +1,72 @@
-import { useState } from 'react';
-import type { BoardCard, RangeInfo } from '@groupie/shared';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
+import type { BoardCard } from '@groupie/shared';
 import {
-  ageMs,
+  RUNNER_MULTIPLE,
+  isDied,
+  isReviving,
+  isStale,
+  isUnresolved,
+  revivalDelta,
+  statusEdge,
+} from '../derive';
+import {
   avatarHue,
   fmtAge,
-  fmtHours,
+  fmtDeathReason,
   fmtMultiple,
   fmtRetrace,
+  fmtSignedPct,
   fmtUsd,
   multipleTone,
   shortAddress,
 } from '../format';
+import { canFlash, requestMotion, useReducedMotion } from '../motion';
+import type { Ceremony } from '../motion';
+import { Odometer } from './Odometer';
 import { Sparkline } from './Sparkline';
+import type { SparkTone } from './Sparkline';
 import type { SectionKey } from './SectionTabs';
 
-/** Market numbers older than this get a visible "as of" hint. */
-const STALE_AFTER_MS = 5 * 60 * 1000;
-/** The comeback badge runs for 24h (docs/decisions.md round 6), same as the section. */
-const REVIVING_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Row heights from the handoff: half-sheet, mobile, desktop feed, top runner, died rail. */
+export type RowSize = 'mini' | 'row' | 'desk' | 'hero' | 'rail';
+
+/** How the link pills are reached on this surface. */
+export type LinkMode = 'tap' | 'hover' | 'none';
+
+/** How long each ceremony holds its class (design: Motion). */
+const CEREMONY_MS: Record<Ceremony, number> = {
+  death: 600,
+  revival: 700,
+  tenx: 900,
+  new: 500,
+};
+
+const FLASH_MS = 400;
+/** Reduced motion swaps the flash for a direction arrow, which needs longer to read. */
+const ARROW_MS = 2_000;
 
 interface TokenCardProps {
   card: BoardCard;
+  /** Which list this row is being drawn in — decides badge wording and subline. */
   section: SectionKey;
   /** Shared clock so every age on the board ticks together. */
   now: number;
+  size?: RowSize;
+  links?: LinkMode;
+  expanded?: boolean;
+  onToggle?: (callId: number) => void;
   onBin?: (card: BoardCard) => void;
   binning?: boolean;
-  /**
-   * Ranging tab only: the token's in-band streak plus the band it was matched
-   * against (RangeInfo carries the observed extremes, not the query). Both are
-   * needed for the line, so it renders only when both arrive.
-   */
-  range?: RangeInfo;
-  band?: { loUsd: number; hiUsd: number };
+  /** The one state change this row should play, if any. */
+  ceremony?: Ceremony;
+  /** The single breathing glow on the board. */
+  topRunner?: boolean;
+  /** Half-sheet rows never animate (design: noise budget). */
+  animate?: boolean;
 }
 
-function TokenAvatar({ card }: { card: BoardCard }) {
+function TokenAvatar({ card, unresolved }: { card: BoardCard; unresolved: boolean }) {
   const [broken, setBroken] = useState(false);
   const seed = card.symbol ?? card.address;
   const letter = (card.symbol ?? '?').trim().charAt(0).toUpperCase() || '?';
@@ -53,10 +84,18 @@ function TokenAvatar({ card }: { card: BoardCard }) {
     );
   }
 
+  if (unresolved) {
+    return (
+      <span className="avatar avatar-unresolved" aria-hidden="true">
+        ?
+      </span>
+    );
+  }
+
   return (
     <span
-      className="avatar avatar-fallback"
-      style={{ background: `hsl(${avatarHue(seed)} 45% 28%)` }}
+      className={`avatar avatar-fallback${isDied(card) ? ' avatar-dead' : ''}`}
+      style={isDied(card) ? undefined : { background: `hsl(${avatarHue(seed)} 45% 28%)` }}
       aria-hidden="true"
     >
       {letter}
@@ -75,106 +114,305 @@ function fullTime(iso: string | null): string | undefined {
   }
 }
 
-export function TokenCard({ card, section, now, onBin, binning, range, band }: TokenCardProps) {
+interface Badge {
+  text: string;
+  kind: 'died' | 'reviving' | 'revived' | 'recall';
+}
+
+/** Design: ONE badge, highest priority only. DIED > REVIVING > REVIVED > xN. */
+function badgeFor(card: BoardCard, section: SectionKey, now: number): Badge | null {
+  if (isDied(card)) {
+    const reason = fmtDeathReason(card.deathReason);
+    // Inside the Died list the section already says "died"; elsewhere it must.
+    const text = section === 'died' ? (reason ?? 'DIED') : reason ? `DIED · ${reason}` : 'DIED';
+    return { text, kind: 'died' };
+  }
+  if (isReviving(card, now)) return { text: 'REVIVING', kind: 'reviving' };
+  if (card.revived) return { text: 'REVIVED', kind: 'revived' };
+  if (card.mentionsCount > 1) return { text: `×${card.mentionsCount}`, kind: 'recall' };
+  return null;
+}
+
+/** Copy without the async clipboard API, for webviews that withhold it. */
+function legacyCopy(text: string): boolean {
+  try {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(area);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+export function TokenCard({
+  card,
+  section,
+  now,
+  size = 'row',
+  links = 'none',
+  expanded = false,
+  onToggle,
+  onBin,
+  binning,
+  ceremony,
+  topRunner = false,
+  animate = true,
+}: TokenCardProps) {
+  const reduced = useReducedMotion();
   const title = card.symbol ? `$${card.symbol}` : shortAddress(card.address);
+  const died = isDied(card);
+  const unresolved = isUnresolved(card);
+  const reviving = isReviving(card, now);
+  const stale = isStale(card, now);
+  const edge = statusEdge(card, now);
   const tone = multipleTone(card.multiple);
-  const dataAge = ageMs(card.dataAsOf, now);
-  const stale = dataAge !== null && dataAge > STALE_AFTER_MS;
-  // The server never clears a stale reviving_at (a later hide does), so the
-  // window lives on the read side — here and in classifySections.
-  const revivingAge = ageMs(card.revivingAt, now);
-  const reviving = revivingAge !== null && revivingAge < REVIVING_WINDOW_MS;
+  const badge = badgeFor(card, section, now);
+  const runner = card.multiple !== null && card.multiple >= RUNNER_MULTIPLE;
 
-  return (
-    <article className="card">
-      <div className="card-head">
-        <TokenAvatar card={card} />
-        <div className="head-text">
-          <div className="head-line">
-            <span className="sym">{title}</span>
-            {card.mentionsCount > 1 ? (
-              <span className="badge badge-recall" title={`Called ${card.mentionsCount} times`}>
-                {`×${card.mentionsCount}`}
-              </span>
-            ) : null}
-            {card.revived ? <span className="badge badge-revived">REVIVED</span> : null}
-            {reviving ? (
-              <span className="badge badge-reviving" title={`Back from rug probation ${fullTime(card.revivingAt) ?? ''}`}>
-                REVIVING
-              </span>
-            ) : null}
-            {section === 'died' ? (
-              <span className="badge badge-died">
-                {card.deathReason ? `DIED ${card.deathReason}` : 'DIED'}
-              </span>
-            ) : null}
-          </div>
-          {card.name ? <div className="name">{card.name}</div> : null}
-        </div>
-        <span className="age" title={fullTime(card.calledAt)}>
-          {fmtAge(card.calledAt, now)}
+  const [copied, setCopied] = useState(false);
+  const [flash, setFlash] = useState<'up' | 'down' | null>(null);
+  const [playing, setPlaying] = useState<Ceremony | null>(null);
+  const [climbing, setClimbing] = useState(true);
+  const prevMcap = useRef(card.mcapUsd);
+  const prevMultiple = useRef(card.multiple);
+
+  // Row update flash: tint toward the P&L colour, throttled 1 per row per 10s.
+  useEffect(() => {
+    const prev = prevMcap.current;
+    const next = card.mcapUsd;
+    prevMcap.current = next;
+    if (!animate || prev === null || next === null || prev === next) return;
+    if (!canFlash(card.callId)) return;
+    setFlash(next > prev ? 'up' : 'down');
+    const id = window.setTimeout(() => setFlash(null), reduced ? ARROW_MS : FLASH_MS);
+    return () => window.clearTimeout(id);
+  }, [card.mcapUsd, card.callId, animate, reduced]);
+
+  // Only the top runner breathes, and only while its multiple is climbing.
+  useEffect(() => {
+    const prev = prevMultiple.current;
+    prevMultiple.current = card.multiple;
+    if (prev === null || card.multiple === null || prev === card.multiple) return;
+    setClimbing(card.multiple > prev);
+  }, [card.multiple]);
+
+  // Ceremony, inside the noise budget: overflow queues instead of piling up.
+  useEffect(() => {
+    if (!ceremony || !animate) return;
+    let cancelled = false;
+    let timer = 0;
+    const ms = CEREMONY_MS[ceremony];
+    requestMotion(() => {
+      if (cancelled) return;
+      setPlaying(ceremony);
+      timer = window.setTimeout(() => setPlaying(null), ms);
+    }, ms);
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [ceremony, animate]);
+
+  const onCopy = useCallback(() => {
+    const done = () => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1_400);
+    };
+    const clipboard = navigator.clipboard;
+    if (clipboard && typeof clipboard.writeText === 'function') {
+      clipboard.writeText(card.address).then(done, () => {
+        if (legacyCopy(card.address)) done();
+      });
+      return;
+    }
+    if (legacyCopy(card.address)) done();
+  }, [card.address]);
+
+  const pills = (
+    <>
+      <a className="pill" href={card.links.axiom} target="_blank" rel="noopener">
+        AXIOM
+      </a>
+      <a className="pill" href={card.links.gmgn} target="_blank" rel="noopener">
+        GMGN
+      </a>
+      <a className="pill" href={card.links.dexscreener} target="_blank" rel="noopener">
+        DEXS
+      </a>
+      <button type="button" className="pill pill-copy" onClick={onCopy}>
+        {copied ? 'COPIED ✓' : 'COPY CA'}
+      </button>
+    </>
+  );
+
+  // ---- the died rail (desktop right column) is its own, flatter anatomy.
+  if (size === 'rail') {
+    return (
+      <div className="rail-row" data-call={card.callId}>
+        <span className="rail-sym">{title}</span>
+        {badge ? <span className={`badge badge-${badge.kind}`}>{badge.text}</span> : null}
+        <span className="rail-meta">
+          {`${fmtUsd(card.mcapUsd)} at death · ${fmtAge(card.diedAt ?? card.calledAt, now)}`}
         </span>
-      </div>
-
-      <div className="card-headline">
-        <div className="headline-main">
-          <div className="headline-top">
-            <span className={`mult mult-${tone}`}>{fmtMultiple(card.multiple)}</span>
-            <span className="mcaps">
-              {fmtUsd(card.mcapUsd)}
-              <span className="mcaps-arrow">{'←'}</span>
-              {fmtUsd(card.mcapAtCall)}
-            </span>
-          </div>
-          {section === 'retraced' ? (
-            <div className="retrace">
-              {`${fmtRetrace(card.retraceFromPeakPct)} from peak ${fmtUsd(card.peakMcapSinceCall)}`}
-            </div>
-          ) : null}
-        </div>
-        <Sparkline points={card.sparkline} />
-      </div>
-
-      {range && band ? (
-        <div className="range-line" title={`In range since ${fullTime(range.inRangeSince) ?? '—'} (${range.bucketCount} 5-minute buckets)`}>
-          {`in ${fmtUsd(band.loUsd)}–${fmtUsd(band.hiUsd)} for ${fmtHours(range.inRangeHours)}`}
-          <span className="range-sep">·</span>
-          {`band ${fmtUsd(range.observedLowUsd)}–${fmtUsd(range.observedHighUsd)}`}
-        </div>
-      ) : null}
-
-      <div className="card-meta">
-        <span className="meta-caller">{card.callerName}</span>
-        <span className="meta-item">LP {fmtUsd(card.liquidityUsd)}</span>
-        <span className="meta-item">Vol {fmtUsd(card.vol24Usd)}</span>
-        {stale ? (
-          <span className="meta-stale" title={fullTime(card.dataAsOf)}>
-            as of {fmtAge(card.dataAsOf, now)} ago
-          </span>
-        ) : null}
-      </div>
-
-      <div className="card-links">
-        <a className="link-btn" href={card.links.axiom} target="_blank" rel="noopener">
-          AXIOM
-        </a>
-        <a className="link-btn" href={card.links.gmgn} target="_blank" rel="noopener">
-          GMGN
-        </a>
-        <a className="link-btn" href={card.links.dexscreener} target="_blank" rel="noopener">
-          DEXS
-        </a>
-        {section === 'died' && onBin ? (
-          <button
-            type="button"
-            className="bin-btn"
-            disabled={binning}
-            onClick={() => onBin(card)}
-          >
-            {binning ? 'Binning' : 'Bin'}
+        {onBin ? (
+          <button type="button" className="bin-btn" disabled={binning} onClick={() => onBin(card)}>
+            {binning ? 'binning' : 'bin'}
           </button>
         ) : null}
       </div>
-    </article>
+    );
+  }
+
+  const sparkTone: SparkTone | undefined = died ? 'dead' : reviving ? 'cyan' : undefined;
+  const showSpark = size !== 'mini' && !died && !unresolved;
+  const revived = reviving ? revivalDelta(card) : null;
+
+  const sub: ReactNode[] = [];
+  if (card.callerName) sub.push(card.callerName);
+  if (unresolved) {
+    sub.push('awaiting first data');
+  } else if (reviving) {
+    sub.push(
+      revived === null
+        ? `revived ${fmtAge(card.revivingAt, now)} ago`
+        : `${fmtSignedPct(revived)} since revival · ${fmtAge(card.revivingAt, now)}`,
+    );
+  } else if (died) {
+    sub.push(`died ${fmtAge(card.diedAt ?? card.calledAt, now)} ago`);
+  } else if (section === 'retraced') {
+    sub.push(
+      <span key="retrace" className="sub-retrace">
+        {`${fmtRetrace(card.retraceFromPeakPct)} from peak ${fmtUsd(card.peakMcapSinceCall)}`}
+      </span>,
+    );
+  } else if (section === 'runners') {
+    sub.push(`peak ${fmtUsd(card.peakMcapSinceCall)}`);
+  } else if (card.watched) {
+    sub.push('on watchlist');
+  } else if (size === 'desk' && card.liquidityUsd !== null) {
+    sub.push(`LP ${fmtUsd(card.liquidityUsd)}`);
+  }
+  if (stale) {
+    sub.push(
+      <span key="stale" className="sub-stale" title={fullTime(card.dataAsOf)}>
+        {`as of ${fmtAge(card.dataAsOf, now)} ago`}
+      </span>,
+    );
+  }
+
+  const rowClass = [
+    'row',
+    `row-${size}`,
+    `edge-${edge}`,
+    died ? 'is-died' : '',
+    stale ? 'is-stale' : '',
+    runner ? 'is-runner' : '',
+    topRunner && climbing ? 'is-breathing' : '',
+    expanded ? 'is-open' : '',
+    flash && !reduced ? `is-flash-${flash}` : '',
+    playing ? `is-${playing}` : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  return (
+    <div className={rowClass} data-call={card.callId}>
+      <div className="row-head">
+        {links === 'tap' && onToggle ? (
+          <button
+            type="button"
+            className="row-hit"
+            aria-expanded={expanded}
+            aria-label={`Trading links for ${title}`}
+            onClick={() => onToggle(card.callId)}
+          />
+        ) : null}
+
+        <TokenAvatar card={card} unresolved={unresolved} />
+
+        <div className="row-id">
+          <div className="row-name">
+            <span className="sym">{title}</span>
+            {badge ? (
+              <span className={`badge badge-${badge.kind}${playing === 'death' ? ' badge-stamp' : ''}`}>
+                {badge.text}
+              </span>
+            ) : null}
+            {card.watched ? <span className="watch-dot" title="On the group watchlist" /> : null}
+          </div>
+          <div className="row-sub">
+            {sub.map((part, index) => (
+              <span key={index} className="sub-part">
+                {index > 0 ? <span className="sub-sep">·</span> : null}
+                {part}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        {showSpark ? (
+          <span className="row-spark">
+            <Sparkline
+              points={card.sparkline}
+              mcapAtCall={card.mcapAtCall}
+              peak={card.peakMcapSinceCall}
+              tone={sparkTone}
+              drawdown={section === 'retraced'}
+            />
+          </span>
+        ) : null}
+
+        {links === 'hover' ? <span className="row-hoverlinks">{pills}</span> : null}
+
+        <div className="row-num">
+          {unresolved ? (
+            <>
+              <span className="mult mult-null">—</span>
+              <span className="mcaps mcaps-null">indexing…</span>
+            </>
+          ) : died ? (
+            <>
+              <span className="mult mult-dead">{fmtMultiple(card.multiple)}</span>
+              <span className="mcaps">{`${fmtUsd(card.mcapUsd)} at death`}</span>
+            </>
+          ) : (
+            <>
+              <span className={`mult mult-${tone}`}>
+                <Odometer value={fmtMultiple(card.multiple)} />
+                {reduced && flash ? (
+                  <span className="row-arrow" aria-hidden="true">
+                    {flash === 'up' ? '▲' : '▼'}
+                  </span>
+                ) : null}
+              </span>
+              <span className="mcaps">
+                <Odometer value={fmtUsd(card.mcapUsd)} />
+                <span className="mcaps-arrow">←</span>
+                {fmtUsd(card.mcapAtCall)}
+              </span>
+            </>
+          )}
+        </div>
+
+        {section === 'died' && onBin ? (
+          <button type="button" className="bin-btn" disabled={binning} onClick={() => onBin(card)}>
+            {binning ? 'binning' : 'bin'}
+          </button>
+        ) : (
+          <span className="row-age" title={fullTime(card.calledAt)}>
+            {fmtAge(card.calledAt, now)}
+          </span>
+        )}
+      </div>
+
+      {links === 'tap' && expanded ? <div className="row-pills">{pills}</div> : null}
+    </div>
   );
 }
