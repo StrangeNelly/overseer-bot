@@ -1,37 +1,69 @@
-# Groupie design brief (for the design pass)
+# Groupie design brief v2 (for the Claude Design pass)
 
-*Owner's direction, 2026-09-02. This brief is the input for the dedicated design pass ("Claude design"). Read decisions.md and try the live app before designing.*
+*Owner direction, 2026-09-02 (supersedes v1). Companion prompt: `docs/design-prompt.md`. The product is LIVE with the owner's real trading group on it — this pass designs what real users see tomorrow.*
 
-## The feel
+## What Groupie is (one paragraph)
 
-- **Visual and tactile.** This is a way of *feeling* the market at a glance, not reading a spreadsheet. The board should reward the twice-a-day check-in in the first second: what ran, what died, what's coiling.
-- **Motion is welcome when it serves use.** Animations, pops, moving parts — number ticks on live price updates, cards sliding when sections change, a pulse when something crosses a threshold. Restraint where motion would slow comprehension; drama where it aids it. Respect `prefers-reduced-motion`.
-- **The multiple is the hero.** Everything else supports the x-since-call number and the story around it (called → peaked → now).
+A private crypto Telegram group posts token contract addresses ("calls") all day. Groupie's bot silently ingests them, tracks every called coin's market data continuously, and gives the group a board: what was called, what's running, what retraced, what's quietly ranging, what died, what's coming back from the dead. Its numbers are call-relative (multiple since call, peak since call, time-in-range) — data no generic screener has. Live at `https://groupie-production-3bbd.up.railway.app` (current UI is deliberately unstyled structure).
 
-## Both surfaces, equally
+## Two surfaces, one app (owner decision)
 
-- **Telegram Mini App** (phone-first, ~390px, inside the webview) AND **browser webapp** (desktop tab next to Axiom). Same app, both must feel native to their context. Browser login (Telegram OIDC) is on the roadmap — design the logged-out browser state assuming it exists.
+**Same product, two presentations — never a feature fork.**
+
+### 1. Telegram Mini App — compact "pulse" mode
+- Opens by default in Telegram's **small half-sheet window** (~390px wide, roughly 500-600px visible). We will STOP auto-expanding; the design owns the compact state.
+- **Leads with the Pulse**: a dense story strip — today's call count, best runner (e.g. "HDFI 2.4x"), died count, anything Reviving — followed by a tight fresh-calls list. A member should absorb the day in two seconds without scrolling.
+- Everything else (tabs, ranging controls, watchlist) still reachable — compact-first, not cut-down.
+- A prominent **"Full board ↗"** affordance opens the browser version *already signed in* (one-time handoff link; backend being built now). This is the bridge to the big-screen experience — make it feel like a natural graduation, not an exit.
+- If the user drags the sheet to full height (Telegram native gesture), the layout may relax toward the mobile-browser presentation.
+
+### 2. Full web app — the real deal
+- **Desktop (~1440px): dense multi-column trading-terminal energy.** Sections side by side (e.g. Fresh feed | Runners+Retraced | Reviving+Died rail), more data per screen, built to live in a tab next to Axiom. This is the "web component really good" mandate.
+- **Mobile browser (390px): single column**, richer than the compact pulse (full cards, all tabs).
+
+## Identity: EXPLORE 2-3 DIRECTIONS (owner decision)
+
+Present side-by-side on the canvas, then build out the full screen set in whichever reads strongest (owner picks on the canvas):
+1. **Clean terminal** — restrained pro-tool dark: near-black, one disciplined accent, green/red reserved strictly for P&L meaning, personality carried by motion and typography.
+2. **Degen neon** — crypto-native: neon accents, glow, louder energy. Risk: fatigue; keep data legible.
+3. **A hybrid** — terminal bones, one expressive signature element (e.g. the Pulse strip or the multiple as glowing hero).
+
+Also wanted: a **"Groupie" wordmark**, an app icon, and a 640×360 BotFather cover image in the chosen direction.
+
+## The feel (owner's philosophy, verbatim intent)
+
+- **Visual and tactile — a way of *feeling* the market, not reading a spreadsheet.** Animations, pops, and moving parts are GOOD where they serve human use: rolling number ticks on live updates, direction-tinted flashes (throttled), cards that physically move when their state changes, ceremony reserved for real events (a death, a revival, a runner crossing 10x). Haptics in Telegram where it makes sense (thumb actions).
+- A **noise budget**: motion earns its place; the board must stay calm enough to read. Respect `prefers-reduced-motion`.
+- **The multiple since call is the hero number** everywhere. Its story: called → peaked → now.
 
 ## Performance IS design
 
-The Mini App currently loads too slowly. Perceived speed is in scope:
-- Instant skeleton/last-known-board paint (cache last board response locally, revalidate behind it).
-- Collapse sequential auth/board round-trips where possible.
-- (Infra, done separately: server region moved close to the user/DB.)
+The board must *appear* instantly: skeleton/cached-last-board first paint, revalidate behind it. Design the loading, empty, and stale states explicitly (a "data as of Xm ago" treatment exists in the contract — `dataAsOf`).
 
-## Known rough edges to fix (from build/review flags)
+## Screens to design (the canvas deliverable list)
 
-- Card density: ~2.5 cards per phone screen is too few for scanning; Runners/Died want a tighter variant.
-- Null-state headline: the em-dash at hero size reads like a glitch; needs a real "no data yet" treatment.
-- Sparkline doesn't tell the retrace story (no baseline/peak marker; flat lines centered but anonymous).
-- Badge row (×N, REVIVED, DIED reason) competes with the symbol and wraps.
-- Trading-links row eats 40px per card for three rarely-tapped buttons.
-- Custom range inputs (in K) are a footgun — typing 150000 means $150M.
-- Ranging cards need their own identity (band + time-in-range are the hero there, not the multiple).
-- Alert/watchlist affordances (once alerts ship): watched coins should be visibly "followed" on the board.
+1. **Compact Mini App** — Pulse + fresh list (half-sheet)
+2. **Full board, desktop 1440** — dense multi-column
+3. **Full board, mobile browser 390** — single column
+4. **Token card anatomy** — every state: fresh, runner (≥3x), retraced (−40% from peak), died (with reason), REVIVING spotlight, watched (on alert watchlist), re-called ×N, revived, no-data/unresolved. Include the **call-story sparkline**: dotted baseline at mcap-at-call, peak dot, drawdown shading — the called→peaked→now story drawn, not implied.
+5. **Ranging tab** — band presets + custom lo/hi (K-inputs today are a flagged footgun), duration chips, time-in-range as that tab's hero.
+6. **Reviving treatment** — the comeback spotlight (section sits right after Fresh).
+7. **Wordmark / icon / BotFather 640×360.**
 
-## Non-negotiables (product principles)
+## Data cheat sheet (design with REAL numbers)
 
-- Simple. The chat curates; the board displays. No filter forests.
-- Neutral data framing — never "buy this" labels (retrace/range data yes, advice no).
-- No emojis in the web UI. Dark-first. Numbers formatted compact ($1.2M, 4.2x, 14h).
+Sections: Fresh (all active, newest activity first) · Runners (≥3x multiple) · Retraced (peaked ≥3x, now ≥40% below peak — neutral data, never "buy" labels) · Ranging (held a mcap band N hours) · Died (with reason: liquidity_floor, rug_floor, never_graduated) · Reviving (survived rug probation: back over $30K for 3h+).
+Real examples from production to use in mockups: HDFI called $256K → $609K (2.4x, ~1h, LP ~$80K); WATCH called $134K → $88K (0.66x); pokepad called $60K → $5.6K (0.09x, hidden by rug probation); MICA died liquidity_floor at $52K; a Reviving example: "$41K, revived 3h ago, +38% since". Callers: @denzelbeckons, @pwnzssg. Numbers compact ($1.2M, 4.2x, 14h). **No emojis in the UI.**
+
+## Known rough edges the design must solve
+
+- Density: ~2.5 cards/screen today → target 8-9 scannable rows (status via colored edge, links behind tap-to-expand).
+- Null-state hero number reads like a glitch at 26px.
+- Badge row (×N, REVIVED, DIED reason, watched) fights the symbol and wraps.
+- Links row (AXIOM/GMGN/DEXS) costs 40px per card for rare taps.
+- Ranging custom inputs: typing 150000 means $150M (K-suffix is the only guard).
+- Sparkline is anonymous: no baseline/peak, flat lines read as dead.
+
+## Non-negotiables
+
+Simple — the chat curates, the board displays; no filter forests. Neutral framing — retrace/range data yes, advice never. Dark-first. One system: compact, mobile, desktop must be recognizably the same product.

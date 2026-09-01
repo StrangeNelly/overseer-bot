@@ -19,6 +19,14 @@ Running record of decisions made with the owner. Newest at the bottom.
 
 - COV link label in Phanes: unidentified; dropped as non-blocking.
 
+## 2026-09-02 — Design pass shape (round 7)
+
+- Owner runs the pass with Claude Design on Fable 5; inputs are docs/design-brief.md (v2) + docs/design-prompt.md.
+- Two surfaces, one app: Telegram Mini App = compact "pulse" mode in the default half-sheet (Pulse strip + fresh list, everything reachable, no more auto-expand) with a prominent "Full board" bridge; full web = the flagship (desktop 1440 dense multi-column terminal; mobile browser single column).
+- The bridge is a **seamless handoff link**: the authenticated Mini App mints a one-time short-TTL link that opens the browser already signed in (backend built this phase). Browser OIDC login page for direct visitors remains a later milestone.
+- Identity: canvas explores 3 directions (clean terminal / degen neon / hybrid); owner picks on the canvas; wordmark + icon + BotFather cover included.
+- Design output = mockups; implementing the chosen design is the following build milestone.
+
 ## 2026-09-02 — Rug probation v2: hide fast, monitor quietly, revive visibly (round 6, supersedes round 5's 6h rule)
 
 - Owner: 6h was too slow to clean the feed, but nothing should be missable. New lifecycle:
