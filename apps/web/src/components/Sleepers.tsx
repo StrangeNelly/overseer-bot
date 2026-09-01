@@ -363,6 +363,16 @@ function SleeperRow({
               X
             </a>
           ) : null}
+          {/*
+            The scan has stored a website since round 9 and nothing ever showed
+            it. On an uncurated surface it is the second-best way to research a
+            name nobody in the group has mentioned (round 15).
+          */}
+          {entry.websiteUrl ? (
+            <a className="pill" href={entry.websiteUrl} target="_blank" rel="noopener">
+              WEBSITE
+            </a>
+          ) : null}
         </div>
       ) : null}
     </div>

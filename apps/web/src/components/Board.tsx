@@ -2,10 +2,28 @@ import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { BoardCard, BoardResponse } from '@groupie/shared';
 import type { Ceremony } from '../motion';
+import type { WatchControl } from './LinkPills';
 import { SectionTabs, BOARD_SECTIONS } from './SectionTabs';
 import type { BoardSectionKey, SectionKey } from './SectionTabs';
 import { RevivingCard } from './Spotlight';
 import { TokenCard } from './TokenCard';
+
+/**
+ * The watch toggle, per card: one handler for the whole board plus the id of
+ * the card whose request is in flight. Passed down rather than contexted, like
+ * every other action on this board.
+ */
+export interface WatchProps {
+  onWatch: (card: BoardCard, next: boolean) => void;
+  /** tokenId of the toggle currently in flight, or null. */
+  watchingTokenId: number | null;
+}
+
+/** The per-card slice of that, or undefined where no toggle should render. */
+export function watchFor(card: BoardCard, props: WatchProps | undefined): WatchControl | undefined {
+  if (!props) return undefined;
+  return { onWatch: props.onWatch, pending: props.watchingTokenId === card.tokenId };
+}
 
 /** Kept verbatim from the pre-redesign board — the copy was already right. */
 export const EMPTY_LINES: Record<BoardSectionKey, string> = {
@@ -26,6 +44,7 @@ interface BoardProps {
   hiddenCallIds: ReadonlySet<number>;
   binningId: number | null;
   onBin: (card: BoardCard) => void;
+  watch: WatchProps;
   /** Ranging tab body (its own controls + list); it has its own endpoint. */
   ranging: ReactNode;
   /** null until the ranging board has loaded once. */
@@ -61,6 +80,7 @@ export function Board({
   hiddenCallIds,
   binningId,
   onBin,
+  watch,
   ranging,
   rangingCount,
   sleepers,
@@ -92,18 +112,31 @@ export function Board({
       ) : section === 'sleepers' ? (
         sleepers
       ) : section === 'reviving' ? (
-        <RevivingList cards={visible.reviving} now={now} />
+        <RevivingList cards={visible.reviving} now={now} watch={watch} />
       ) : (
-        <BoardList
-          cards={visible[section]}
-          section={section}
-          now={now}
-          binningId={binningId}
-          onBin={onBin}
-          ceremonies={ceremonies}
-          openId={openId}
-          onToggle={toggle}
-        />
+        <>
+          <BoardList
+            cards={visible[section]}
+            section={section}
+            now={now}
+            binningId={binningId}
+            onBin={onBin}
+            watch={watch}
+            ceremonies={ceremonies}
+            openId={openId}
+            onToggle={toggle}
+          />
+          {/*
+            Probation hides a card from every section, died included (round 6),
+            so the Died tab is where a member goes looking for a coin that
+            vanished. Round 15: say how many are being held back.
+          */}
+          {section === 'died' && board.hiddenProbationCount > 0 ? (
+            <p className="footnote">
+              {`${board.hiddenProbationCount} more ${board.hiddenProbationCount === 1 ? 'coin is' : 'coins are'} hidden on rug probation — under the floor, not yet rugged. They come back on their own if they recover.`}
+            </p>
+          ) : null}
+        </>
       )}
     </>
   );
@@ -115,6 +148,7 @@ function BoardList({
   now,
   binningId,
   onBin,
+  watch,
   ceremonies,
   openId,
   onToggle,
@@ -124,6 +158,7 @@ function BoardList({
   now: number;
   binningId: number | null;
   onBin: (card: BoardCard) => void;
+  watch: WatchProps;
   ceremonies: ReadonlyMap<number, Ceremony>;
   openId: number | null;
   onToggle: (callId: number) => void;
@@ -146,6 +181,7 @@ function BoardList({
           onToggle={onToggle}
           onBin={section === 'died' ? onBin : undefined}
           binning={binningId === card.callId}
+          watch={watchFor(card, watch)}
           ceremony={ceremonies.get(card.callId)}
         />
       ))}
@@ -153,12 +189,26 @@ function BoardList({
   );
 }
 
-function RevivingList({ cards, now }: { cards: BoardCard[]; now: number }) {
+function RevivingList({
+  cards,
+  now,
+  watch,
+}: {
+  cards: BoardCard[];
+  now: number;
+  watch: WatchProps;
+}) {
   if (cards.length === 0) return <p className="empty">{EMPTY_LINES.reviving}</p>;
   return (
     <div className="spotlights">
       {cards.map((card, index) => (
-        <RevivingCard key={card.callId} card={card} now={now} featured={index === 0} />
+        <RevivingCard
+          key={card.callId}
+          card={card}
+          now={now}
+          featured={index === 0}
+          watch={watchFor(card, watch)}
+        />
       ))}
       <p className="footnote">
         spotlight, not exile — these coins still file into their normal sections; the badge and this

@@ -15,9 +15,12 @@ import {
 import {
   extractEvmAddresses,
   ROBINHOOD_CHAIN_ID,
+  WATCH_CAP_PER_MEMBER,
+  watchCapMessage,
   type AlertSettings,
 } from '@groupie/shared';
 import { publish } from '../events.js';
+import { activeWatchCount, addWatch, removeWatch } from '../watchlist.js';
 import {
   alertSettingsOf,
   clampAlertSetting,
@@ -176,6 +179,14 @@ function commandAddress(args: string[]): string | null {
   return extractEvmAddresses(args.join(' '))[0] ?? null;
 }
 
+/** The over-cap reply, with the chat-side way out appended. */
+function capReply(cap: number = WATCH_CAP_PER_MEMBER): string {
+  return (
+    `${watchCapMessage(cap)} /overseer watchlist to see them, ` +
+    `/overseer unwatch <ca> to free a slot.`
+  );
+}
+
 async function handleWatch(
   db: Db,
   ctx: Context,
@@ -188,24 +199,28 @@ async function handleWatch(
     await ctx.reply('Usage: /overseer watch <contract address>');
     return;
   }
+  // Cheap pre-check BEFORE upsertToken: a cap refusal must not leave behind an
+  // orphan tokens row — no call, no watch — that the poller would then chase
+  // at the fresh tier for a day (round 15 review). The advisory-locked check
+  // inside addWatch stays the authoritative gate; a race slipping past this
+  // one leaks at most a single row.
+  if ((await activeWatchCount(db, group.id, userId)) >= WATCH_CAP_PER_MEMBER) {
+    await ctx.reply(capReply());
+    return;
+  }
   const token = await upsertToken(db, address);
-  await db
-    .insert(watches)
-    .values({ groupId: group.id, tokenId: token.id, addedBy: userId })
-    .onConflictDoUpdate({
-      target: [watches.groupId, watches.tokenId],
-      // SET expressions see the OLD row: credit and clock only move when the
-      // watch was off, so re-watching an active coin changes nothing.
-      set: {
-        active: true,
-        addedBy: sql`case when ${watches.active} then ${watches.addedBy} else ${userId} end`,
-        addedAt: sql`case when ${watches.active} then ${watches.addedAt} else now() end`,
-      },
-    });
+  // One implementation for the chat command and the board button, cap included
+  // (docs/decisions.md round 15) — see apps/server/src/watchlist.ts.
+  const outcome = await addWatch(db, group.id, token.id, userId);
+  if (!outcome.ok) {
+    await ctx.reply(capReply(outcome.cap));
+    return;
+  }
 
   const s = alertSettingsOf(group.settings);
+  const held = await activeWatchCount(db, group.id, userId);
   await ctx.reply(
-    `Watching ${tokenLabel(token.symbol, address)} — ` +
+    `Watching ${tokenLabel(token.symbol, address)} (${held}/${WATCH_CAP_PER_MEMBER} of your slots) — ` +
       `nuke >${s.nukeDropPct}%/${s.nukeWindowMin}m, ` +
       `buy-opp ≥${s.buyRetracePct}% retrace over ${s.buyMinDeclineHours}-${s.buyPeakWindowHours}h. ` +
       `/overseer alerts to tune.`,
@@ -239,39 +254,48 @@ async function handleUnwatch(
     await ctx.reply(`${shortAddress(address)} wasn't watched.`);
     return;
   }
-  const stopped = await db
-    .update(watches)
-    .set({ active: false })
-    .where(
-      and(
-        eq(watches.groupId, group.id),
-        eq(watches.tokenId, token.id),
-        eq(watches.active, true),
-      ),
-    )
-    .returning({ id: watches.id });
+  // Any member may unwatch, whoever added it (the "any member can bin" rule).
+  const stopped = await removeWatch(db, group.id, token.id);
   const label = tokenLabel(token.symbol, address);
-  await ctx.reply(stopped[0] ? `Stopped watching ${label}.` : `${label} wasn't watched.`);
+  await ctx.reply(stopped ? `Stopped watching ${label}.` : `${label} wasn't watched.`);
 }
 
-async function handleWatchlist(db: Db, ctx: Context, group: GroupRow): Promise<void> {
+async function handleWatchlist(
+  db: Db,
+  ctx: Context,
+  group: GroupRow,
+  userId: number,
+): Promise<void> {
   const rows = await db
-    .select({ symbol: tokens.symbol, address: tokens.address, mcapUsd: tokens.mcapUsd })
+    .select({
+      symbol: tokens.symbol,
+      address: tokens.address,
+      mcapUsd: tokens.mcapUsd,
+      addedBy: watches.addedBy,
+    })
     .from(watches)
     .innerJoin(tokens, eq(tokens.id, watches.tokenId))
     .where(and(eq(watches.groupId, group.id), eq(watches.active, true)))
     .orderBy(watches.addedAt);
+  // The cap is per member, so the list has to say which rows are the reader's
+  // (docs/decisions.md round 15) — otherwise "you have 3" is unactionable.
+  const mine = rows.filter((r) => r.addedBy === userId).length;
   if (rows.length === 0) {
     await ctx.reply('Watchlist is empty. /overseer watch <ca> to follow a coin.');
     return;
   }
   const lines = rows
     .slice(0, WATCHLIST_MAX_LINES)
-    .map((r) => `${tokenLabel(r.symbol, r.address)} ${fmtUsd(r.mcapUsd)}`);
+    .map(
+      (r) =>
+        `${tokenLabel(r.symbol, r.address)} ${fmtUsd(r.mcapUsd)}${r.addedBy === userId ? ' (yours)' : ''}`,
+    );
   if (rows.length > WATCHLIST_MAX_LINES) {
     lines.push(`+${rows.length - WATCHLIST_MAX_LINES} more`);
   }
-  await ctx.reply(`Watching ${rows.length}:\n${lines.join('\n')}`);
+  await ctx.reply(
+    `Watching ${rows.length} (${mine}/${WATCH_CAP_PER_MEMBER} of your slots):\n${lines.join('\n')}`,
+  );
 }
 
 const SET_USAGE =
@@ -335,7 +359,7 @@ async function handleGroupieCommand(
       await handleUnwatch(db, ctx, group, args.slice(1));
       return true;
     case 'watchlist':
-      await handleWatchlist(db, ctx, group);
+      await handleWatchlist(db, ctx, group, userId);
       return false;
     case 'alerts':
       await ctx.reply(alertsSummary(alertSettingsOf(group.settings)));

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { calls, tokens } from '@groupie/db';
 import { tradingLinks, type BoardCard } from '@groupie/shared';
 import { toCard } from '../src/api/board.js';
-import { classifySections } from '../src/api/boardLogic.js';
+import { classifySections, parseTzOffsetMin, startOfLocalDayMs } from '../src/api/boardLogic.js';
 
 const HOUR = 3_600_000;
 
@@ -33,6 +33,7 @@ function card(spec: CardSpec): BoardCard {
     name: null,
     imageUrl: null,
     twitterUrl: null,
+    websiteUrl: null,
     phase: 'graduated',
     callStatus: spec.callStatus ?? 'active',
     mcapUsd,
@@ -53,8 +54,10 @@ function card(spec: CardSpec): BoardCard {
     revived: false,
     diedAt: spec.diedAt ?? null,
     deathReason: null,
+    mcapAtDeath: null,
     dataAsOf: new Date().toISOString(),
     watched: false,
+    watchedByMe: false,
     revivingAt: spec.revivingAt ?? null,
     links: tradingLinks(address),
     sparkline: [],
@@ -342,6 +345,7 @@ function callRow(overrides: Partial<CallRow> = {}): CallRow {
     status: 'active',
     diedAt: null,
     deathReason: null,
+    mcapAtDeath: null,
     binnedBy: null,
     binnedAt: null,
     reviveRequested: false,
@@ -365,6 +369,7 @@ function tokenRow(overrides: Partial<TokenRow> = {}): TokenRow {
     graduatedAt: null,
     diedAt: null,
     deathReason: null,
+    mcapAtDeath: null,
     revivedAt: null,
     rugHiddenAt: null,
     revivingAt: null,
@@ -469,5 +474,142 @@ describe('toCard death info', () => {
       ),
     ]);
     expect(ids(sections.died)).toEqual([30, 31]);
+  });
+});
+
+/**
+ * Mcap-at-death (docs/decisions.md round 15). The rail printed the LAST POLLED
+ * mcap and captioned it "at death"; for a corpse that keeps being polled those
+ * are different numbers, and the caption was the lie.
+ */
+describe('toCard mcap-at-death', () => {
+  const callDeath = new Date(Date.now() - 2 * HOUR);
+
+  it('takes the mcap from the same row as the date and reason', () => {
+    const result = toCard(
+      callRow({
+        status: 'died',
+        diedAt: callDeath,
+        deathReason: 'call_liquidity_collapse',
+        mcapAtDeath: 12_400,
+      }),
+      // The token has traded on since, so its cached mcap is a different number.
+      tokenRow({ mcapUsd: 61_000 }),
+      [],
+      false,
+    );
+    expect(result.mcapAtDeath).toBe(12_400);
+    expect(result.mcapUsd).toBe(61_000);
+  });
+
+  it('never mixes a call death with the token s mcap-at-death', () => {
+    const result = toCard(
+      callRow({ status: 'died', diedAt: callDeath, mcapAtDeath: null }),
+      tokenRow({ diedAt: new Date(Date.now() - 40 * HOUR), mcapAtDeath: 900 }),
+      [],
+      false,
+    );
+    // The call's death is the one being reported, so its (absent) mcap is the
+    // honest answer — the card says "last seen" rather than borrowing $900.
+    expect(result.diedAt).toBe(callDeath.toISOString());
+    expect(result.mcapAtDeath).toBeNull();
+  });
+
+  it('falls back to the token record when the call has no death stamp', () => {
+    const result = toCard(
+      callRow({ status: 'died' }),
+      tokenRow({ phase: 'dead', diedAt: callDeath, deathReason: 'liquidity_floor', mcapAtDeath: 7_100 }),
+      [],
+      false,
+    );
+    expect(result.mcapAtDeath).toBe(7_100);
+  });
+
+  it('is null for a living card, and for a death recorded before the column', () => {
+    expect(toCard(callRow(), tokenRow(), [], false).mcapAtDeath).toBeNull();
+    expect(
+      toCard(callRow({ status: 'died', diedAt: callDeath }), tokenRow(), [], false).mcapAtDeath,
+    ).toBeNull();
+  });
+});
+
+/** Round 15: a website link wherever links render, proved off the same blob as X. */
+describe('toCard websiteUrl', () => {
+  it('reads a website out of the socials blob', () => {
+    const card = toCard(
+      callRow(),
+      tokenRow({ socials: { website: 'https://example.com', twitter: 'https://x.com/example' } }),
+      [],
+      false,
+    );
+    expect(card.websiteUrl).toBe('https://example.com');
+    expect(card.twitterUrl).toBe('https://x.com/example');
+  });
+
+  it('is null when there is none, and never trusts a non-http scheme', () => {
+    expect(toCard(callRow(), tokenRow(), [], false).websiteUrl).toBeNull();
+    expect(
+      toCard(callRow(), tokenRow({ socials: { website: 'javascript:alert(1)' } }), [], false)
+        .websiteUrl,
+    ).toBeNull();
+  });
+});
+
+/**
+ * The client's own midnight (docs/decisions.md round 15). The board's
+ * todayCallCount is a claim about the reader's day, and the server runs in UTC
+ * — so the offset arrives on the query string and is validated here.
+ */
+describe('parseTzOffsetMin', () => {
+  it('takes minutes east of UTC, both signs', () => {
+    expect(parseTzOffsetMin('600')).toBe(600); // AEST
+    expect(parseTzOffsetMin('-300')).toBe(-300); // EST
+    expect(parseTzOffsetMin('0')).toBe(0);
+  });
+
+  it('accepts the real extremes and rejects what is beyond them', () => {
+    expect(parseTzOffsetMin('840')).toBe(840);
+    expect(parseTzOffsetMin('-840')).toBe(-840);
+    expect(parseTzOffsetMin('841')).toBe(0);
+    expect(parseTzOffsetMin('-1440')).toBe(0);
+  });
+
+  it('falls back to UTC rather than failing the whole board', () => {
+    for (const raw of [undefined, '', 'abc', '1.5', 'NaN', 'Infinity']) {
+      expect(parseTzOffsetMin(raw)).toBe(0);
+    }
+  });
+});
+
+describe('startOfLocalDayMs', () => {
+  const at = (iso: string) => Date.parse(iso);
+
+  it('is UTC midnight at offset 0', () => {
+    expect(startOfLocalDayMs(at('2026-09-02T13:45:00Z'), 0)).toBe(at('2026-09-02T00:00:00Z'));
+  });
+
+  it('rolls the day over for a reader ahead of UTC', () => {
+    // 23:00Z is already the 3rd in Sydney (+10), so their day started at 14:00Z.
+    expect(startOfLocalDayMs(at('2026-09-02T23:00:00Z'), 600)).toBe(at('2026-09-02T14:00:00Z'));
+  });
+
+  it('holds the day back for a reader behind UTC', () => {
+    // 02:00Z is still the 1st in New York (-5): their day started at 04:00Z.
+    expect(startOfLocalDayMs(at('2026-09-02T02:00:00Z'), -300)).toBe(at('2026-09-01T05:00:00Z'));
+  });
+
+  it('never returns a start in the future', () => {
+    for (const offset of [-840, -300, 0, 330, 600, 840]) {
+      for (const iso of ['2026-09-02T00:00:00Z', '2026-09-02T12:00:00Z', '2026-09-02T23:59:59Z']) {
+        const now = at(iso);
+        const start = startOfLocalDayMs(now, offset);
+        expect(start).toBeLessThanOrEqual(now);
+        expect(now - start).toBeLessThan(86_400_000);
+      }
+    }
+  });
+
+  it('handles a half-hour offset (India, +5:30)', () => {
+    expect(startOfLocalDayMs(at('2026-09-02T10:00:00Z'), 330)).toBe(at('2026-09-01T18:30:00Z'));
   });
 });

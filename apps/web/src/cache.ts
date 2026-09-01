@@ -29,6 +29,11 @@ function isBoard(value: unknown): value is BoardResponse {
   const board = value as Partial<BoardResponse>;
   if (typeof board.generatedAt !== 'string') return false;
   if (!board.group || typeof board.group !== 'object') return false;
+  // Round 15's honesty counts. A blob saved before they existed is dropped
+  // rather than painted, so no surface has to invent a number for them — the
+  // skeleton for one load is the cheaper honesty.
+  if (typeof board.todayCallCount !== 'number') return false;
+  if (typeof board.hiddenProbationCount !== 'number') return false;
   const sections = board.sections;
   if (!sections || typeof sections !== 'object') return false;
   for (const name of ['fresh', 'runners', 'retraced', 'died', 'reviving'] as const) {

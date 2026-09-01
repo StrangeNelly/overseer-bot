@@ -824,6 +824,37 @@ a {
   border-color: var(--badge-border);
 }
 
+/* The watch toggle (docs/decisions.md round 15). Off it reads as a neutral
+   action, like COPY CA; ON it fills cyan — the same "we are analysing this
+   coin" accent the watch dot and the ranging numbers already use. Never
+   magenta (brand) and never green/red (P&L). */
+.pill-watch {
+  color: var(--dim);
+  border-color: var(--badge-border);
+}
+
+.pill-watch.is-on {
+  background: var(--cyan);
+  border-color: var(--cyan);
+  color: var(--ink);
+  font-weight: 700;
+  box-shadow: 0 0 10px rgba(35, 217, 255, 0.35);
+}
+
+.pill-watch:disabled {
+  opacity: 0.55;
+}
+
+/* The died-rail variant: compact enough for the 40px rail row, kept cyan —
+   it is the one place desktop can free a cap slot held by a corpse. */
+.rail-watch {
+  flex: 0 0 auto;
+  min-height: 20px;
+  padding: 2px 6px;
+  font-size: 8.5px;
+  box-shadow: none;
+}
+
 /* Mobile: tap the row, a 34px pill row springs open (one at a time). */
 .row-pills {
   display: flex;
@@ -1099,21 +1130,28 @@ a {
   color: var(--text-2);
 }
 
-.foot-links {
-  margin-left: auto;
-  display: inline-flex;
-  gap: 5px;
-  color: var(--cyan);
+/* The spotlight cards' link row (docs/decisions.md round 15). The hero, story
+   and comeback cards are the ones a member acts on, so they carry the SAME
+   pills a list row reveals rather than three bare text links — always visible
+   here, because these cards have the room and there is no row to tap open. */
+.card-links {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--sect-border);
 }
 
-.foot-links a {
-  color: var(--cyan);
-  text-decoration: none;
+.card-links .pill {
+  min-height: 24px;
+  padding: 3px 8px;
+  font-size: 8.5px;
 }
 
-.foot-sep {
-  color: var(--faint);
-}
+/* (.foot-links / .foot-sep retired in round 15: the hero card's three bare
+   text links became the same pill row every other card variant carries.) */
 
 /* ---------- desktop: every section at once, no tabs ---------- */
 

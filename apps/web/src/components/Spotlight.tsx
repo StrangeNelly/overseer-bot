@@ -10,12 +10,18 @@ import {
   multipleTone,
   shortAddress,
 } from '../format';
+import { LinkPills } from './LinkPills';
+import type { WatchControl } from './LinkPills';
 import { Odometer } from './Odometer';
 import { Sparkline } from './Sparkline';
 
 /**
  * The cards that get room to breathe: the top runner, the retraced story, and
  * the comeback spotlight. Shared by the desktop columns and the mobile tabs.
+ *
+ * Round 15: all three carry the full link row now. They shipped with three bare
+ * text links (runner) or none at all (retraced, reviving) — so the cards a
+ * member is most likely to act on were the ones they could not act from.
  */
 
 function label(card: BoardCard): string {
@@ -70,15 +76,26 @@ export function SectionHead({
   );
 }
 
+/** The spotlight cards' link row: the same pills the list rows reveal. */
+function CardLinks({ card, watch }: { card: BoardCard; watch?: WatchControl }) {
+  return (
+    <div className="card-links">
+      <LinkPills card={card} watch={watch} />
+    </div>
+  );
+}
+
 /** The runners hero: the one card that breathes while its multiple climbs. */
 export function RunnerHero({
   card,
   now,
   breathing,
+  watch,
 }: {
   card: BoardCard;
   now: number;
   breathing: boolean;
+  watch?: WatchControl;
 }) {
   return (
     <article className={`hero-card${breathing ? ' is-breathing' : ''}`} data-call={card.callId}>
@@ -107,26 +124,22 @@ export function RunnerHero({
         <span>{`called ${fmtUsd(card.mcapAtCall)}`}</span>
         <span>{`peak ${fmtUsd(card.peakMcapSinceCall)}`}</span>
         {card.liquidityUsd !== null ? <span>{`LP ${fmtUsd(card.liquidityUsd)}`}</span> : null}
-        <span className="foot-links">
-          <a href={card.links.axiom} target="_blank" rel="noopener">
-            AXIOM
-          </a>
-          <span className="foot-sep">·</span>
-          <a href={card.links.gmgn} target="_blank" rel="noopener">
-            GMGN
-          </a>
-          <span className="foot-sep">·</span>
-          <a href={card.links.dexscreener} target="_blank" rel="noopener">
-            DEXS
-          </a>
-        </span>
       </div>
+      <CardLinks card={card} watch={watch} />
     </article>
   );
 }
 
 /** Retraced: the drawdown told honestly — data, never advice. */
-export function RetracedCard({ card, now }: { card: BoardCard; now: number }) {
+export function RetracedCard({
+  card,
+  now,
+  watch,
+}: {
+  card: BoardCard;
+  now: number;
+  watch?: WatchControl;
+}) {
   return (
     <article className="story-card" data-call={card.callId}>
       <div className="hero-top">
@@ -152,6 +165,7 @@ export function RetracedCard({ card, now }: { card: BoardCard; now: number }) {
         <span>{`peaked ${fmtMultiple(card.peakMultiple)} · ${fmtUsd(card.peakMcapSinceCall)}`}</span>
         <span>{`now ${fmtUsd(card.mcapUsd)}`}</span>
       </div>
+      <CardLinks card={card} watch={watch} />
     </article>
   );
 }
@@ -164,10 +178,12 @@ export function RevivingCard({
   card,
   now,
   featured,
+  watch,
 }: {
   card: BoardCard;
   now: number;
   featured: boolean;
+  watch?: WatchControl;
 }) {
   const delta = revivalDelta(card);
   return (
@@ -194,6 +210,7 @@ export function RevivingCard({
         <span>{`revived ${fmtAge(card.revivingAt, now)} ago`}</span>
         <span className="foot-strong">{`${fmtMultiple(card.multiple)} from call`}</span>
       </div>
+      <CardLinks card={card} watch={watch} />
     </article>
   );
 }

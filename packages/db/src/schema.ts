@@ -48,6 +48,13 @@ export const tokens = pgTable(
     graduatedAt: timestamp('graduated_at', { withTimezone: true }),
     diedAt: timestamp('died_at', { withTimezone: true }),
     deathReason: text('death_reason'),
+    // The freshest cached mcap when the death was stamped (docs/decisions.md
+    // round 15). Written from the token's OWN column inside the death UPDATE:
+    // for poll-path deaths that is the reading the verdict was reached on; a
+    // rug-expiry death runs on the sweep's own clock, so there it can trail
+    // died_at by up to the probation poll interval (~30 min). Null for deaths
+    // stamped before this column existed.
+    mcapAtDeath: doublePrecision('mcap_at_death'),
     // Set when a dead token comes back; died_at/death_reason are kept as the
     // last-death record, so the board can show "revived" plus that history.
     revivedAt: timestamp('revived_at', { withTimezone: true }),
@@ -104,6 +111,11 @@ export const calls = pgTable(
     // the last-death record, exactly like tokens.died_at/death_reason.
     diedAt: timestamp('died_at', { withTimezone: true }),
     deathReason: text('death_reason'),
+    // Mcap at THIS call's death, stamped with died_at/death_reason so the three
+    // always describe the same death (docs/decisions.md round 15). The died
+    // rail printed the last polled mcap and labelled it "at death"; this is the
+    // real number, and null means the rail must not make the claim at all.
+    mcapAtDeath: doublePrecision('mcap_at_death'),
     // Null on a binned call = the SYSTEM binned it (rug auto-removal,
     // docs/decisions.md round 5); a member's bin always records their user id.
     binnedBy: bigint('binned_by', { mode: 'number' }),
@@ -183,7 +195,12 @@ export const watches = pgTable(
     addedAt: timestamp('added_at', { withTimezone: true }).notNull().defaultNow(),
     active: boolean('active').notNull().default(true),
   },
-  (t) => [uniqueIndex('watches_group_token_uq').on(t.groupId, t.tokenId)],
+  (t) => [
+    uniqueIndex('watches_group_token_uq').on(t.groupId, t.tokenId),
+    // The per-member cap (docs/decisions.md round 15) counts a member's active
+    // rows in a group on every watch attempt — from the bot AND the web button.
+    index('watches_group_member_idx').on(t.groupId, t.addedBy),
+  ],
 );
 
 export const alerts = pgTable(

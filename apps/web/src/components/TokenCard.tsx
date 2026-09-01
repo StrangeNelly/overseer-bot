@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { BoardCard } from '@groupie/shared';
-import { copyText } from '../clipboard';
 import {
   RUNNER_MULTIPLE,
   isDied,
@@ -24,6 +23,8 @@ import {
 } from '../format';
 import { canFlash, requestMotion, useReducedMotion } from '../motion';
 import type { Ceremony } from '../motion';
+import { LinkPills } from './LinkPills';
+import type { WatchControl } from './LinkPills';
 import { Odometer } from './Odometer';
 import { Sparkline } from './Sparkline';
 import type { SparkTone } from './Sparkline';
@@ -59,6 +60,8 @@ interface TokenCardProps {
   onToggle?: (callId: number) => void;
   onBin?: (card: BoardCard) => void;
   binning?: boolean;
+  /** The watchlist toggle in the link row; omitted where there is no link row. */
+  watch?: WatchControl;
   /** The one state change this row should play, if any. */
   ceremony?: Ceremony;
   /** The single breathing glow on the board. */
@@ -115,6 +118,20 @@ function fullTime(iso: string | null): string | undefined {
   }
 }
 
+/**
+ * What a dead card's money line may claim (docs/decisions.md round 15).
+ *
+ * It used to print the last polled market cap and label it "at death" — for a
+ * corpse that kept being polled daily, those are different numbers. Now the
+ * real one is stored, and a row that does not have it (a death stamped before
+ * the column existed) says "last seen" instead of making the claim.
+ */
+function deathMcap(card: BoardCard): string {
+  return card.mcapAtDeath !== null
+    ? `${fmtUsd(card.mcapAtDeath)} at death`
+    : `${fmtUsd(card.mcapUsd)} last seen`;
+}
+
 interface Badge {
   text: string;
   kind: 'died' | 'reviving' | 'revived' | 'recall';
@@ -144,6 +161,7 @@ export function TokenCard({
   onToggle,
   onBin,
   binning,
+  watch,
   ceremony,
   topRunner = false,
   animate = true,
@@ -159,7 +177,6 @@ export function TokenCard({
   const badge = badgeFor(card, section, now);
   const runner = card.multiple !== null && card.multiple >= RUNNER_MULTIPLE;
 
-  const [copied, setCopied] = useState(false);
   const [flash, setFlash] = useState<'up' | 'down' | null>(null);
   const [playing, setPlaying] = useState<Ceremony | null>(null);
   const [climbing, setClimbing] = useState(true);
@@ -203,36 +220,7 @@ export function TokenCard({
     };
   }, [ceremony, animate]);
 
-  const onCopy = useCallback(() => {
-    void copyText(card.address).then((ok) => {
-      if (!ok) return;
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1_400);
-    });
-  }, [card.address]);
-
-  const pills = (
-    <>
-      <a className="pill" href={card.links.axiom} target="_blank" rel="noopener">
-        AXIOM
-      </a>
-      <a className="pill" href={card.links.gmgn} target="_blank" rel="noopener">
-        GMGN
-      </a>
-      <a className="pill" href={card.links.dexscreener} target="_blank" rel="noopener">
-        DEXS
-      </a>
-      <button type="button" className="pill pill-copy" onClick={onCopy}>
-        {copied ? 'COPIED ✓' : 'COPY CA'}
-      </button>
-      {/* The project's X account, where we have one (docs/decisions.md round 9). */}
-      {card.twitterUrl ? (
-        <a className="pill" href={card.twitterUrl} target="_blank" rel="noopener">
-          X
-        </a>
-      ) : null}
-    </>
-  );
+  const pills = <LinkPills card={card} watch={watch} />;
 
   // ---- the died rail (desktop right column) is its own, flatter anatomy.
   if (size === 'rail') {
@@ -241,8 +229,27 @@ export function TokenCard({
         <span className="rail-sym">{title}</span>
         {badge ? <span className={`badge badge-${badge.kind}`}>{badge.text}</span> : null}
         <span className="rail-meta">
-          {`${fmtUsd(card.mcapUsd)} at death · ${fmtAge(card.diedAt ?? card.calledAt, now)}`}
+          {`${deathMcap(card)} · ${fmtAge(card.diedAt ?? card.calledAt, now)}`}
         </span>
+        {/* A watched corpse still holds someone's cap slot, and this rail is
+            the only place desktop shows it — without an unwatch here the slot
+            strands until the member finds the bot command (round 15 review).
+            Un-watched dead coins get nothing: the rail stays flat. */}
+        {watch && card.watched ? (
+          <button
+            type="button"
+            className="pill pill-watch is-on rail-watch"
+            title={
+              card.watchedByMe
+                ? 'Your watch — dead coins never alert. Tap to free the slot.'
+                : 'Watched (another member’s slot) — dead coins never alert. Tap to stop.'
+            }
+            disabled={watch.pending}
+            onClick={() => watch.onWatch(card, false)}
+          >
+            {watch.pending ? '…' : card.watchedByMe ? 'WATCHING·YOU' : 'WATCHING'}
+          </button>
+        ) : null}
         {onBin ? (
           <button type="button" className="bin-btn" disabled={binning} onClick={() => onBin(card)}>
             {binning ? 'binning' : 'bin'}
@@ -362,7 +369,7 @@ export function TokenCard({
           ) : died ? (
             <>
               <span className="mult mult-dead">{fmtMultiple(card.multiple)}</span>
-              <span className="mcaps">{`${fmtUsd(card.mcapUsd)} at death`}</span>
+              <span className="mcaps">{deathMcap(card)}</span>
             </>
           ) : (
             <>

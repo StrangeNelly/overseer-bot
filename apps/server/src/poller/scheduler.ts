@@ -212,10 +212,33 @@ async function loadCandidates(db: Db): Promise<Candidate[]> {
   }));
 }
 
+/**
+ * How often to re-check a corpse for a comeback (docs/decisions.md round 15).
+ *
+ * A death that happened hours ago is the one most likely to be wrong or
+ * reversible — OMNI was declared dead three seconds after its call and then
+ * traded to $132k — and under the old flat daily cadence the board carried that
+ * corpse for a full day. So: every 3h for the first 48h after death, daily
+ * afterwards. The REVIVAL BAR is untouched (THRESHOLDS.revivalMcapUsd, round
+ * 13); this only changes how often we ask.
+ *
+ * An unreadable or missing died_at means an old row we cannot date — treated as
+ * long dead, which is the conservative (cheaper) answer. Exported for tests.
+ */
+export function deadPollSeconds(diedAt: Date | null, nowMs: number): number {
+  const at = diedAt?.getTime();
+  if (at === undefined || !Number.isFinite(at)) return POLL_TIERS.deadSeconds;
+  const hoursDead = (nowMs - at) / 3_600_000;
+  return hoursDead < POLL_TIERS.deadRecentHours
+    ? POLL_TIERS.deadRecentSeconds
+    : POLL_TIERS.deadSeconds;
+}
+
 function isDue(c: Candidate, nowMs: number): boolean {
   const last = c.token.lastPolledAt?.getTime() ?? 0;
   if (c.token.phase === 'dead') {
-    return c.reviveRequested || nowMs - last >= POLL_TIERS.deadSeconds * 1000;
+    if (c.reviveRequested) return true;
+    return nowMs - last >= deadPollSeconds(c.token.diedAt, nowMs) * 1000;
   }
   const quietHours = (nowMs - c.lastActivityMs) / 3_600_000;
   // A watch is a standing request for minute-scale alerts, so a watched token
@@ -337,11 +360,24 @@ async function applySnapshot(
     for (const call of collapsed) {
       if (callLiquidityDeath(call.liquidityAtCall, series, Date.now(), age)) {
         // The token is still alive, so only the call carries this death: stamp
-        // it here or the board has no date/reason to show or sort by.
-        await db
+        // it here or the board has no date/reason to show or sort by. The mcap
+        // is this poll's reading — the one the verdict was reached on. Guarded
+        // on status like every other transition: a bot-triggered pollTokenNow
+        // can race this tick onto the same token, and the loser must be a
+        // no-op rather than a re-kill that drifts diedAt.
+        const killed = await db
           .update(calls)
-          .set({ status: 'died', diedAt: new Date(), deathReason: 'call_liquidity_collapse' })
-          .where(eq(calls.id, call.id));
+          .set({
+            status: 'died',
+            diedAt: new Date(),
+            deathReason: 'call_liquidity_collapse',
+            mcapAtDeath: snap.mcapUsd,
+          })
+          .where(and(eq(calls.id, call.id), eq(calls.status, 'active')))
+          .returning({ id: calls.id });
+        if (killed[0]) {
+          console.log(`call ${call.id} (${token.address}) died: call_liquidity_collapse`);
+        }
       }
     }
   }
@@ -588,6 +624,9 @@ async function pollDead(db: Db, token: TokenRow, opts: PollOpts): Promise<void> 
       status: 'died',
       diedAt: token.diedAt ?? new Date(),
       deathReason: token.deathReason,
+      // Inherited with the rest of the record: the death being dated here is
+      // the TOKEN's, so it must carry the token's mcap-at-death, not today's.
+      mcapAtDeath: token.mcapAtDeath,
     })
     .where(and(eq(calls.tokenId, token.id), eq(calls.status, 'active')));
 

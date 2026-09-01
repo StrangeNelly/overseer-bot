@@ -114,9 +114,36 @@ export const POLL_TIERS = {
    * for the revival window, cheap enough to run for 24h on every rug.
    */
   probationSeconds: 1_800,
-  /** Confirmed dead: daily revival check. */
+  /**
+   * Round 15: a corpse is checked every `deadRecentSeconds` for the first
+   * `deadRecentHours` after death, then daily.
+   *
+   * The OMNI case is why: a token declared dead minutes after the call (and
+   * trading happily meanwhile) had to wait a full day for its first revival
+   * check, so the board carried a corpse that was not one. Deaths that are
+   * hours old are the ones most likely to be wrong or reversible; a month-old
+   * grave is not, and it keeps the daily cadence.
+   */
+  deadRecentSeconds: 10_800,
+  deadRecentHours: 48,
+  /** Confirmed dead and past that window: daily revival check. */
   deadSeconds: 86_400,
 } as const;
+
+/**
+ * Alert watchlist cap (docs/decisions.md round 15): each member may hold this
+ * many ACTIVE watches per group, counted by watches.added_by. Unwatching frees
+ * a slot; a watch someone else added is theirs, not yours.
+ */
+export const WATCH_CAP_PER_MEMBER = 3;
+
+/**
+ * The one over-cap sentence, shared by the bot reply and the API error body so
+ * the two surfaces cannot drift.
+ */
+export function watchCapMessage(cap: number = WATCH_CAP_PER_MEMBER): string {
+  return `You already have ${cap} coins on watch — unwatch one first.`;
+}
 
 /**
  * Watchlist alert defaults (docs/decisions.md round 4). Per-group overrides live

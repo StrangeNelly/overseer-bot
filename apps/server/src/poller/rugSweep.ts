@@ -1,5 +1,5 @@
 import { and, eq, gte, inArray, isNotNull, isNull, lt, max, ne, sql } from 'drizzle-orm';
-import { calls, snapshots, tokens, type Db } from '@groupie/db';
+import { calls, snapshots, tokens, watches, type Db } from '@groupie/db';
 import { THRESHOLDS } from '@groupie/shared';
 import { publish } from '../events.js';
 import { markTokenDead } from './markDead.js';
@@ -313,9 +313,24 @@ async function runExpiryPass(db: Db, hiddenTokens: TokenRow[], nowMs: number): P
       .update(calls)
       .set({ status: 'binned', binnedAt: new Date(), binnedBy: null })
       .where(and(eq(calls.tokenId, token.id), ne(calls.status, 'binned')))
-      .returning({ id: calls.id });
+      .returning({ id: calls.id, groupId: calls.groupId });
     for (const call of binned) {
-      publish({ type: 'call_binned', tokenId: token.id, callId: call.id });
+      publish({ type: 'call_binned', tokenId: token.id, callId: call.id, groupId: call.groupId });
+    }
+
+    // A permanent rug frees its watch slots (round 15 review). The alert
+    // engine skips dead-phase tokens, so these watches could never fire again
+    // — but they would still count against their adders' 3-slot cap, with the
+    // card they could be unwatched from gone from every board. Every group's
+    // watch goes: the rug is a fact about the token, not about one group. A
+    // member who believes in the comeback can re-watch after the revival.
+    const released = await db
+      .update(watches)
+      .set({ active: false })
+      .where(and(eq(watches.tokenId, token.id), eq(watches.active, true)))
+      .returning({ groupId: watches.groupId });
+    for (const groupId of new Set(released.map((w) => w.groupId))) {
+      publish({ type: 'watch_changed', tokenId: token.id, groupId });
     }
 
     expired += 1;

@@ -197,6 +197,7 @@ export function createRangeRoutes(db: Db): Hono<ApiEnv> {
           m.token,
           sparklines.get(m.token.id) ?? [],
           watchedIds.has(m.token.id),
+          watchedIds.get(m.token.id) === c.get('userId'),
         ),
         range: m.range,
       }))

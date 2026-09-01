@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { tokens } from '@groupie/db';
-import { THRESHOLDS } from '@groupie/shared';
+import { POLL_TIERS, THRESHOLDS } from '@groupie/shared';
 import type { DsPair } from '../src/market/dexscreener.js';
 import {
   callLiquidityDeath,
@@ -9,7 +9,7 @@ import {
   MAX_LIQUIDITY_READING_AGE_MS,
   type LiquidityReading,
 } from '../src/poller/death.js';
-import { isSuspiciousPair } from '../src/poller/scheduler.js';
+import { deadPollSeconds, isSuspiciousPair } from '../src/poller/scheduler.js';
 
 const NOW = Date.UTC(2026, 8, 2, 12, 0, 0);
 const MINUTE = 60_000;
@@ -385,5 +385,50 @@ describe('isSuspiciousPair', () => {
         pair({ pairAddress: '0xother', liquidityUsd: 5 }),
       ),
     ).toBe(false);
+  });
+});
+
+/**
+ * How often a corpse gets re-checked (docs/decisions.md round 15). OMNI was
+ * declared dead three seconds after its call and then traded to $132k; under
+ * the flat daily cadence the board carried that corpse for a full day. Fresh
+ * deaths are the ones most likely to be wrong, so they are checked every 3h for
+ * 48h. The revival BAR is untouched — this is only how often we ask.
+ */
+describe('deadPollSeconds (docs/decisions.md round 15)', () => {
+  const HOUR_MS = 3_600_000;
+  const ago = (hours: number) => new Date(NOW - hours * HOUR_MS);
+
+  it('checks a death minutes old on the fast cadence', () => {
+    expect(deadPollSeconds(ago(0), NOW)).toBe(POLL_TIERS.deadRecentSeconds);
+    expect(deadPollSeconds(ago(3), NOW)).toBe(POLL_TIERS.deadRecentSeconds);
+  });
+
+  it('holds the fast cadence right up to the 48h boundary', () => {
+    expect(deadPollSeconds(ago(POLL_TIERS.deadRecentHours - 0.01), NOW)).toBe(
+      POLL_TIERS.deadRecentSeconds,
+    );
+    // At exactly 48h the window is over — "for the first 48h" is exclusive.
+    expect(deadPollSeconds(ago(POLL_TIERS.deadRecentHours), NOW)).toBe(POLL_TIERS.deadSeconds);
+  });
+
+  it('drops an old grave to the daily cadence', () => {
+    expect(deadPollSeconds(ago(72), NOW)).toBe(POLL_TIERS.deadSeconds);
+    expect(deadPollSeconds(ago(24 * 30), NOW)).toBe(POLL_TIERS.deadSeconds);
+  });
+
+  it('treats an undatable death as long dead — the cheap answer', () => {
+    expect(deadPollSeconds(null, NOW)).toBe(POLL_TIERS.deadSeconds);
+    expect(deadPollSeconds(new Date(NaN), NOW)).toBe(POLL_TIERS.deadSeconds);
+  });
+
+  it('is not fooled into slowing down by a clock-skewed future stamp', () => {
+    expect(deadPollSeconds(new Date(NOW + HOUR_MS), NOW)).toBe(POLL_TIERS.deadRecentSeconds);
+  });
+
+  it('is strictly faster than the daily tier it replaces', () => {
+    expect(POLL_TIERS.deadRecentSeconds).toBeLessThan(POLL_TIERS.deadSeconds);
+    expect(POLL_TIERS.deadRecentSeconds).toBe(3 * 3_600);
+    expect(POLL_TIERS.deadRecentHours).toBe(48);
   });
 });

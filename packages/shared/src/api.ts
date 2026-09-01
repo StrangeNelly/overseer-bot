@@ -37,6 +37,11 @@ export interface BoardCard {
    * have never seen one.
    */
   twitterUrl: string | null;
+  /**
+   * The token's website, from the same `tokens.socials` blob (round 15: every
+   * coin with a stored website gets a link app-wide). null when we have none.
+   */
+  websiteUrl: string | null;
   phase: TokenPhase;
   callStatus: CallStatus;
   mcapUsd: number | null;
@@ -63,10 +68,25 @@ export interface BoardCard {
    */
   diedAt: string | null;
   deathReason: string | null;
+  /**
+   * Market cap at the moment of THAT death, captured when the death was
+   * stamped (round 15). Taken from the same row as diedAt/deathReason, so all
+   * three describe one death. null for deaths recorded before the column
+   * existed — the card must say "last seen" rather than claim a death price it
+   * does not have.
+   */
+  mcapAtDeath: number | null;
   /** tokens.lastSnapshotAt — when the market numbers were last real. */
   dataAsOf: string | null;
   /** on the group's alert watchlist */
   watched: boolean;
+  /**
+   * ...and the ACTIVE watch was added by the requesting member (round 15
+   * review). The cap is per member, so "unwatch one first" is only actionable
+   * when the board says which WATCHING pills are the reader's own — the bot's
+   * watchlist marks "(yours)" for exactly the same reason.
+   */
+  watchedByMe: boolean;
   /**
    * Set while the token wears the Reviving badge: it survived rug probation
    * by holding >= the revival mcap (decisions round 6). ISO; null otherwise.
@@ -81,6 +101,27 @@ export interface BoardResponse {
   group: { slug: string; title: string | null };
   window: BoardWindow;
   generatedAt: string;
+  /**
+   * Round 15 (API honesty): every call this group made since the member's own
+   * local midnight — counted in SQL, NOT off the payload. The board window
+   * truncates what is shown; Pulse's "N calls today" was reading that truncated
+   * list and under-reporting a busy day on a 6h window.
+   *
+   * The client's UTC offset arrives as `?tz=<minutes east of UTC>`; without it
+   * the server counts a UTC day.
+   */
+  todayCallCount: number;
+  /**
+   * Round 15 (API honesty): this group's non-binned calls whose token is on rug
+   * probation RIGHT NOW — hidden from every section, died included
+   * (docs/decisions.md round 6), and therefore invisible to members until this
+   * number said so.
+   *
+   * Deliberately NOT windowed: probation lasts at most 24h and the point of the
+   * number is that nothing is silently missing, so under-reporting it on a 6h
+   * window would defeat it.
+   */
+  hiddenProbationCount: number;
   sections: {
     /** Every non-binned active call with activity in the window, newest activity first. */
     fresh: BoardCard[];

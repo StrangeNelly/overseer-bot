@@ -4,13 +4,28 @@ import { fmtDurationHours } from '@groupie/shared';
 import { fmtUsd } from '../format';
 import { prefersReducedMotion, requestMotion } from '../motion';
 import type { Ceremony } from '../motion';
-import { EMPTY_LINES, useVisibleSections } from './Board';
+import { EMPTY_LINES, useVisibleSections, watchFor } from './Board';
+import type { WatchProps } from './Board';
 import type { SectionKey } from './SectionTabs';
 import { RetracedCard, RevivingCard, RunnerHero, SectionHead } from './Spotlight';
 import { TokenCard } from './TokenCard';
 
 /** Design: a card that changes section physically travels, over 450ms. */
 const TRANSIT_MS = 450;
+
+/**
+ * The Died rail's note. Rug probation hides a card from EVERY section, died
+ * included (docs/decisions.md round 6), so until round 15 those coins simply
+ * were not on the board and nothing said so. Now the rail admits how many it is
+ * holding back — the one place a member can ask "where did it go".
+ */
+export function diedNote(hiddenProbation: number): string {
+  // Positive-or-nothing rather than `<= 0`: a payload that somehow carries no
+  // number must fall back to the plain note, never print "undefined more".
+  if (!(hiddenProbation > 0)) return 'bin to purge for the group';
+  const coins = hiddenProbation === 1 ? 'coin' : 'coins';
+  return `${hiddenProbation} more ${coins} hidden on rug probation · bin to purge`;
+}
 
 export interface RangeSummary {
   count: number;
@@ -26,6 +41,7 @@ interface DesktopBoardProps {
   hiddenCallIds: ReadonlySet<number>;
   binningId: number | null;
   onBin: (card: BoardCard) => void;
+  watch: WatchProps;
   ceremonies: ReadonlyMap<number, Ceremony>;
   /** Cards that changed section on this update — the transit set. */
   moved: ReadonlySet<number>;
@@ -87,6 +103,7 @@ export function DesktopBoard({
   hiddenCallIds,
   binningId,
   onBin,
+  watch,
   ceremonies,
   moved,
   rangeSummary,
@@ -140,6 +157,7 @@ export function DesktopBoard({
                 now={now}
                 size="desk"
                 links="hover"
+                watch={watchFor(card, watch)}
                 ceremony={ceremonies.get(card.callId)}
               />
             ))}
@@ -152,7 +170,12 @@ export function DesktopBoard({
           <SectionHead title="RUNNERS" count={runners.length} note="≥3x since call" />
           {topRunner ? (
             <>
-              <RunnerHero card={topRunner} now={now} breathing />
+              <RunnerHero
+                card={topRunner}
+                now={now}
+                breathing
+                watch={watchFor(topRunner, watch)}
+              />
               {runners.length > 1 ? (
                 <div className="feed feed-attached">
                   {runners.slice(1).map((card) => (
@@ -163,6 +186,7 @@ export function DesktopBoard({
                       now={now}
                       size="desk"
                       links="hover"
+                      watch={watchFor(card, watch)}
                       ceremony={ceremonies.get(card.callId)}
                     />
                   ))}
@@ -184,7 +208,11 @@ export function DesktopBoard({
             <p className="empty">{EMPTY_LINES.retraced}</p>
           ) : (
             <>
-              <RetracedCard card={retraced[0]!} now={now} />
+              <RetracedCard
+                card={retraced[0]!}
+                now={now}
+                watch={watchFor(retraced[0]!, watch)}
+              />
               {retraced.length > 1 ? (
                 <div className="feed feed-attached">
                   {retraced.slice(1).map((card) => (
@@ -195,6 +223,7 @@ export function DesktopBoard({
                       now={now}
                       size="desk"
                       links="hover"
+                      watch={watchFor(card, watch)}
                       ceremony={ceremonies.get(card.callId)}
                     />
                   ))}
@@ -218,7 +247,13 @@ export function DesktopBoard({
           ) : (
             <div className="spotlights">
               {visible.reviving.map((card, index) => (
-                <RevivingCard key={card.callId} card={card} now={now} featured={index === 0} />
+                <RevivingCard
+                  key={card.callId}
+                  card={card}
+                  now={now}
+                  featured={index === 0}
+                  watch={watchFor(card, watch)}
+                />
               ))}
             </div>
           )}
@@ -228,7 +263,7 @@ export function DesktopBoard({
           <SectionHead
             title="DIED"
             count={visible.died.length}
-            note="bin to purge for the group"
+            note={diedNote(board.hiddenProbationCount)}
             tone="dim"
           />
           {visible.died.length === 0 ? (
@@ -244,6 +279,7 @@ export function DesktopBoard({
                   size="rail"
                   onBin={onBin}
                   binning={binningId === card.callId}
+                  watch={watchFor(card, watch)}
                 />
               ))}
             </div>

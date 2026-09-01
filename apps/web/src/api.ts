@@ -102,14 +102,27 @@ export function fetchMe(): Promise<MeResponse> {
   return request<MeResponse>('/api/me');
 }
 
+/**
+ * Minutes EAST of UTC — the negation of getTimezoneOffset(), which is what the
+ * board's todayCallCount needs to know where the reader's midnight is. A
+ * browser that throws here simply gets a UTC day.
+ */
+function tzOffsetMin(): number {
+  try {
+    const offset = -new Date().getTimezoneOffset();
+    return Number.isInteger(offset) ? offset : 0;
+  } catch {
+    return 0;
+  }
+}
+
 export function fetchBoard(
   slug: string,
   boardWindow: BoardWindow,
   signal?: AbortSignal,
 ): Promise<BoardResponse> {
-  return request<BoardResponse>(`${groupPath(slug)}/board?window=${encodeURIComponent(boardWindow)}`, {
-    signal,
-  });
+  const params = new URLSearchParams({ window: boardWindow, tz: String(tzOffsetMin()) });
+  return request<BoardResponse>(`${groupPath(slug)}/board?${params.toString()}`, { signal });
 }
 
 /** Ranging board: tokens whose mcap has held `loUsd`..`hiUsd` for `hours`+. */
@@ -149,6 +162,17 @@ export function fetchSleepers(
 export function binCall(slug: string, callId: number): Promise<void> {
   return request<void>(`${groupPath(slug)}/calls/${encodeURIComponent(String(callId))}/bin`, {
     method: 'POST',
+  });
+}
+
+/**
+ * Turn the group's Telegram alerts on/off for one coin (docs/decisions.md round
+ * 15) — the same watchlist `/overseer watch` writes to, and the same per-member
+ * cap. A 409 carries the friendly over-cap sentence in `error`.
+ */
+export function setWatch(slug: string, tokenId: number, watched: boolean): Promise<void> {
+  return request<void>(`${groupPath(slug)}/tokens/${encodeURIComponent(String(tokenId))}/watch`, {
+    method: watched ? 'POST' : 'DELETE',
   });
 }
 

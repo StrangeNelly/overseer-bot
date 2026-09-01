@@ -1,6 +1,39 @@
 import { THRESHOLDS, type BoardCard, type BoardResponse } from '@groupie/shared';
 
 /**
+ * Widest real UTC offset either way (+14:00 Kiritimati, -12:00 Baker Island),
+ * so anything outside it is a broken client rather than a timezone.
+ */
+const MAX_TZ_OFFSET_MIN = 14 * 60;
+
+/**
+ * The `?tz=` board parameter: MINUTES EAST OF UTC, i.e. the negation of the
+ * browser's `Date#getTimezoneOffset()` (AEST sends 600, EST sends -300).
+ *
+ * Anything absent, non-numeric, fractional or beyond the real range falls back
+ * to 0. A bad offset must not 400 the whole board over one derived count — a
+ * UTC day is a defensible answer, an empty board is not.
+ */
+export function parseTzOffsetMin(raw: string | undefined): number {
+  if (raw === undefined || raw === '') return 0;
+  const value = Number(raw);
+  if (!Number.isInteger(value)) return 0;
+  return Math.abs(value) <= MAX_TZ_OFFSET_MIN ? value : 0;
+}
+
+/**
+ * Midnight of the reader's local day, as a UTC instant. Shifting into local
+ * time, flooring to the day, and shifting back is the whole trick — the server
+ * process's own timezone (UTC on Railway, whatever a dev box says) never enters
+ * into it.
+ */
+export function startOfLocalDayMs(nowMs: number, tzOffsetMin: number): number {
+  const offsetMs = tzOffsetMin * 60_000;
+  const local = nowMs + offsetMs;
+  return Math.floor(local / 86_400_000) * 86_400_000 - offsetMs;
+}
+
+/**
  * Retraced = it WAS a runner (peak >= 3x call), has since given back 40-85% of
  * that peak, and is still a live market. Death is a separate section, so only
  * active calls reach here — a retraced card is explicitly "pulled back but NOT

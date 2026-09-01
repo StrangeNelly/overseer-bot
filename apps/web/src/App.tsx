@@ -22,10 +22,12 @@ import {
   fetchRange,
   fetchSleepers,
   fetchTelegramLoginAvailable,
+  setWatch,
   telegramLoginUrl,
 } from './api';
 import { readCachedBoard, writeCachedBoard } from './cache';
 import { Board } from './components/Board';
+import type { WatchProps } from './components/Board';
 import { DesktopBoard } from './components/DesktopBoard';
 import type { RangeSummary } from './components/DesktopBoard';
 import { MiniBoard } from './components/MiniBoard';
@@ -403,6 +405,8 @@ export default function App() {
   const [live, setLive] = useState<LiveState>('idle');
   const [hidden, setHidden] = useState<ReadonlySet<number>>(NO_HIDDEN);
   const [binningId, setBinningId] = useState<number | null>(null);
+  /** tokenId of the watch toggle in flight — the card shows it, nothing else. */
+  const [watchingTokenId, setWatchingTokenId] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [handoffPending, setHandoffPending] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -583,14 +587,20 @@ export default function App() {
 
   // Ranging is analytical, not live: it loads when its tab is open, when a
   // control changes, and on tab focus — never off an SSE event.
+  //
+  // Round 15 adds the desktop board itself as a reason to load: its rail
+  // carries a Ranging summary that could only ever say "open the tab to scan
+  // for coilers", because nothing had fetched the data. One analytical query
+  // per board load fills it in.
+  const rangingNeeded = rangingActive || layout === 'desktop';
   useEffect(() => {
-    if (!slug || !rangingActive) return;
+    if (!slug || !rangingNeeded) return;
     rangeQueryRef.current = rangeBand === null ? null : { band: rangeBand, hours: rangeHours };
     if (rangeBand === null) return;
     const query: RangeQuery = { band: rangeBand, hours: rangeHours };
     const id = window.setTimeout(() => void loadRange(query), customBand ? RANGE_DEBOUNCE_MS : 0);
     return () => window.clearTimeout(id);
-  }, [slug, rangingActive, rangeBand, rangeHours, customBand, loadRange]);
+  }, [slug, rangingNeeded, rangeBand, rangeHours, customBand, loadRange]);
 
   // Sleepers is a 3-hourly server snapshot, so it never rides the live stream:
   // it loads when its tab opens, when a filter changes, and on focus.
@@ -640,7 +650,7 @@ export default function App() {
       if (Date.now() - lastLoadRef.current < FOCUS_REFETCH_MIN_GAP_MS) return;
       void loadBoard({ silent: true });
       const query = rangeQueryRef.current;
-      if (rangingActive && query) void loadRange(query, { silent: true });
+      if (rangingNeeded && query) void loadRange(query, { silent: true });
       if (sleepersActive) {
         void loadSleepers(sleepersXOnlyRef.current, sleepersMinHoursRef.current, { silent: true });
       }
@@ -651,7 +661,7 @@ export default function App() {
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onFocus);
     };
-  }, [slug, loadBoard, loadRange, loadSleepers, rangingActive, sleepersActive]);
+  }, [slug, loadBoard, loadRange, loadSleepers, rangingNeeded, sleepersActive]);
 
   // Keeps every "3h" on the board honest without a refetch.
   useEffect(() => {
@@ -713,6 +723,44 @@ export default function App() {
       }
     },
     [loadBoard],
+  );
+
+  /**
+   * The watch toggle (docs/decisions.md round 15). Watching turns on the
+   * group's Telegram alerts for a coin, so this is a group-wide action like
+   * binning — and deliberately NOT optimistic: the server owns the per-member
+   * cap, so the only honest "watching" state is the one it hands back on the
+   * refetch. The pending pill covers the round trip.
+   */
+  const onWatch = useCallback(
+    async (card: BoardCard, next: boolean) => {
+      const currentSlug = slugRef.current;
+      if (!currentSlug) return;
+      const label = card.symbol ? `$${card.symbol}` : shortAddress(card.address);
+      setWatchingTokenId(card.tokenId);
+      setActionError(null);
+      try {
+        await setWatch(currentSlug, card.tokenId, next);
+        await loadBoard({ silent: true });
+      } catch (err) {
+        // The cap refusal arrives as a 409 whose message is the friendly
+        // sentence the bot sends; describe() surfaces it verbatim.
+        setActionError(
+          next ? `Could not watch ${label}. ${describe(err)}` : `Could not unwatch ${label}. ${describe(err)}`,
+        );
+      } finally {
+        // Clear only OUR pending marker: a second toggle on another card owns
+        // the slot by now, and nulling it from this (slower) request would
+        // re-enable that card's pill mid-flight.
+        setWatchingTokenId((cur) => (cur === card.tokenId ? null : cur));
+      }
+    },
+    [loadBoard],
+  );
+
+  const watchProps = useMemo<WatchProps>(
+    () => ({ onWatch: (card, next) => void onWatch(card, next), watchingTokenId }),
+    [onWatch, watchingTokenId],
   );
 
   /**
@@ -886,6 +934,7 @@ export default function App() {
             revalidating={revalidating}
             onFullBoard={() => void onFullBoard()}
             handoffPending={handoffPending}
+            watch={watchProps}
             onExpand={tgExpand}
           />
         ) : (
@@ -1002,6 +1051,7 @@ export default function App() {
                 hiddenCallIds={hidden}
                 binningId={binningId}
                 onBin={onBin}
+                watch={watchProps}
                 ceremonies={change.ceremonies}
                 moved={change.moved}
                 rangeSummary={rangeSummary}
@@ -1018,6 +1068,7 @@ export default function App() {
               hiddenCallIds={hidden}
               binningId={binningId}
               onBin={onBin}
+              watch={watchProps}
               ceremonies={change.ceremonies}
               rangingCount={range === null ? null : range.cards.length}
               ranging={

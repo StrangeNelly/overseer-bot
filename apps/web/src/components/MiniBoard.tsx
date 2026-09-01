@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import type { BoardCard, BoardResponse } from '@groupie/shared';
 import type { PulseData } from '../derive';
+import { watchFor } from './Board';
+import type { WatchProps } from './Board';
 import { Pulse } from './Pulse';
 import { TokenCard } from './TokenCard';
 
@@ -16,6 +18,7 @@ interface MiniBoardProps {
   revalidating: boolean;
   onFullBoard: () => void;
   handoffPending: boolean;
+  watch: WatchProps;
   /** Grow the sheet to full height — the member asked, we never do it on load. */
   onExpand: () => void;
 }
@@ -34,6 +37,7 @@ export function MiniBoard({
   revalidating,
   onFullBoard,
   handoffPending,
+  watch,
   onExpand,
 }: MiniBoardProps) {
   const [openId, setOpenId] = useState<number | null>(null);
@@ -67,6 +71,7 @@ export function MiniBoard({
               links="tap"
               expanded={openId === card.callId}
               onToggle={(callId) => setOpenId((prev) => (prev === callId ? null : callId))}
+              watch={watchFor(card, watch)}
               // Design: list rows never animate in the half-sheet.
               animate={false}
             />

@@ -57,6 +57,13 @@
       "when": 1788293445253,
       "tag": "0007_great_thor",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788294985247,
+      "tag": "0008_cultured_ricochet",
+      "breakpoints": true
     }
   ]
 }

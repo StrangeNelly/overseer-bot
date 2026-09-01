@@ -78,7 +78,11 @@ export function revivalDelta(card: BoardCard): number | null {
 }
 
 export interface PulseData {
-  /** Calls made since local midnight, as far as this window can see. */
+  /**
+   * Calls made since the reader's local midnight — the server's SQL count over
+   * the whole group (docs/decisions.md round 15), not a tally of the cards in
+   * this window. A 6h window used to make a 20-call day read as 4.
+   */
   calls: number;
   best: { label: string; multiple: number } | null;
   died: number;
@@ -113,9 +117,13 @@ export function allCards(board: BoardResponse, hidden: ReadonlySet<number>): Boa
 }
 
 /**
- * The Pulse band: today's story in one line. Everything is counted off the
- * board payload, so a short window necessarily sees fewer of today's calls
- * than a long one — the strip reports what the board is showing.
+ * The Pulse band: today's story in one line.
+ *
+ * The call count comes from the server (board.todayCallCount) because it is a
+ * claim about the GROUP's day, which the window truncates and probation hides
+ * from. Everything else is a claim about what is on screen — best runner, died,
+ * reviving — and stays derived from the payload, where it is honest by
+ * construction.
  */
 export function derivePulse(
   board: BoardResponse,
@@ -150,7 +158,9 @@ export function derivePulse(
   const generated = Date.parse(board.generatedAt);
 
   return {
-    calls: today.length,
+    // The server counts the day; the payload only ever knew this window's slice
+    // of it (cache.ts drops any blob that predates the field).
+    calls: board.todayCallCount,
     best,
     died: (board.sections.died ?? []).filter((card) => !hidden.has(card.callId)).length,
     reviving: reviving.length,

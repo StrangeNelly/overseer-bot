@@ -18,9 +18,16 @@ export type GroupieEvent =
   // for some unrelated poll event to reach open boards.
   | { type: 'rug_hidden'; tokenId: number }
   | { type: 'rug_revived'; tokenId: number }
-  // Binning is group-wide, so every other member's open board must drop the
-  // card without waiting for an unrelated poll event.
-  | { type: 'call_binned'; tokenId: number; callId: number }
+  // Binning is group-wide — every other member's open board must drop the
+  // card without waiting for an unrelated poll event — and group-SCOPED: the
+  // groupId lets the SSE layer deliver it only to that group's boards, rather
+  // than to every group that happens to share the token (round 15 review).
+  | { type: 'call_binned'; tokenId: number; callId: number; groupId: number }
+  // So is the watchlist (docs/decisions.md round 15): one member pressing watch
+  // turns on alerts for the whole chat, so every open board should show the
+  // marker rather than waiting for a poll. Group-scoped for the same reason —
+  // a watch is one group's state, not the token's.
+  | { type: 'watch_changed'; tokenId: number; groupId: number }
   // Already persisted in `alerts` and past its cooldown when this fires: the
   // subscriber's only job is delivering `message` to the group's chat.
   | {
