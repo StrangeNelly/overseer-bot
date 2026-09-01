@@ -20,6 +20,8 @@ import {
   fetchMe,
   fetchRange,
   fetchSleepers,
+  fetchTelegramLoginAvailable,
+  telegramLoginUrl,
 } from './api';
 import { readCachedBoard, writeCachedBoard } from './cache';
 import { Board } from './components/Board';
@@ -75,7 +77,8 @@ type BootState =
   | { kind: 'loading' }
   | { kind: 'ready'; slug: string }
   | { kind: 'no-slug' }
-  | { kind: 'telegram-only' }
+  /** No session and no Mini App: the login wall. `loginAvailable` decides whether it is a real one. */
+  | { kind: 'telegram-only'; slug: string; loginAvailable: boolean }
   | { kind: 'blocked'; title: string; message: string; retry: boolean };
 
 type LiveState = 'idle' | 'open' | 'reconnecting';
@@ -207,11 +210,13 @@ function resolveSlug(): string | null {
 }
 
 /**
- * Read `?handoff=expired` (set by the server when a browser handoff link is
- * dead) and strip it from the address bar, so a reload does not keep announcing
- * it. Runs at import — exactly once, unlike a StrictMode-doubled render.
+ * Read a one-shot flag the server set on a redirect (`?handoff=expired` for a
+ * dead handoff link, `?login=failed` for an OIDC round trip that did not
+ * complete) and strip it from the address bar, so a reload does not keep
+ * announcing it. Runs at import — exactly once, unlike a StrictMode-doubled
+ * render.
  */
-function takeHandoffExpired(): boolean {
+function takeQueryFlag(key: string, value: string): boolean {
   if (typeof window === 'undefined') return false;
   let params: URLSearchParams;
   try {
@@ -219,9 +224,9 @@ function takeHandoffExpired(): boolean {
   } catch {
     return false;
   }
-  if (params.get('handoff') !== 'expired') return false;
+  if (params.get(key) !== value) return false;
   try {
-    params.delete('handoff');
+    params.delete(key);
     const query = params.toString();
     const { pathname, hash } = window.location;
     window.history.replaceState(null, '', `${pathname}${query ? `?${query}` : ''}${hash}`);
@@ -231,7 +236,17 @@ function takeHandoffExpired(): boolean {
   return true;
 }
 
-const HANDOFF_EXPIRED = takeHandoffExpired();
+const HANDOFF_EXPIRED = takeQueryFlag('handoff', 'expired');
+const LOGIN_FAILED = takeQueryFlag('login', 'failed');
+
+/** Feature flag only, and it fails closed: an unreachable server shows the old wall. */
+async function loginAvailable(): Promise<boolean> {
+  try {
+    return (await fetchTelegramLoginAvailable()).available === true;
+  } catch {
+    return false;
+  }
+}
 
 async function bootstrap(): Promise<BootState> {
   const slug = resolveSlug();
@@ -268,9 +283,10 @@ async function bootstrap(): Promise<BootState> {
       try {
         await authDev();
       } catch (err) {
-        // No dev session endpoint in prod — browser login lands in a later milestone.
+        // No dev session endpoint (i.e. prod): this browser has to log in. Ask
+        // the server whether it can actually offer a login before we promise one.
         if (err instanceof ApiError && (err.status === 404 || err.status === 401 || err.status === 501)) {
-          return { kind: 'telegram-only' };
+          return { kind: 'telegram-only', slug, loginAvailable: await loginAvailable() };
         }
         return { kind: 'blocked', title: 'Sign-in failed', message: describe(err), retry: true };
       }
@@ -739,16 +755,46 @@ export default function App() {
   }
 
   if (boot.kind === 'telegram-only') {
-    return (
-      <Screen
-        title="Log in via Telegram"
-        message="This board opens from inside Telegram for now. Tap the pinned board link in your group. Browser login is coming in a later release."
-      >
+    // Both flags are read once at import, so they survive the boot round trip
+    // and disappear on the next reload.
+    const notices = (
+      <>
         {HANDOFF_EXPIRED ? (
           <p className="screen-message" role="status">
             That link expired — tap Full board in Telegram again.
           </p>
         ) : null}
+        {LOGIN_FAILED ? (
+          <p className="screen-message" role="status">
+            Sign-in didn’t complete — try again.
+          </p>
+        ) : null}
+      </>
+    );
+
+    // A plain link, not a fetch: the OIDC start leg is a top-level navigation
+    // that has to leave our origin and come back.
+    if (boot.loginAvailable) {
+      return (
+        <Screen
+          title="Log in to overseer"
+          message="Sign in with the Telegram account that is in this group."
+        >
+          <a className="bridge-btn login-btn" href={telegramLoginUrl(boot.slug)}>
+            Log in with Telegram
+          </a>
+          <p className="screen-note">Or open the board from your group’s pinned link.</p>
+          {notices}
+        </Screen>
+      );
+    }
+
+    return (
+      <Screen
+        title="Log in via Telegram"
+        message="This board opens from inside Telegram for now. Tap the pinned board link in your group. Browser login is coming in a later release."
+      >
+        {notices}
       </Screen>
     );
   }

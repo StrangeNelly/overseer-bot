@@ -38,6 +38,8 @@ const CONFIG: Config = {
   port: 3000,
   sessionSecret: SESSION_SECRET,
   miniAppUrl: null,
+  tgOauthClientId: null,
+  tgOauthClientSecret: null,
   devAuthUserId: null,
 };
 

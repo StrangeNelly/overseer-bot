@@ -112,6 +112,16 @@ export interface MeResponse {
 }
 
 /**
+ * GET /api/auth/telegram/available — whether this deployment has Telegram's
+ * OIDC browser login configured (TG_OAUTH_CLIENT_ID/SECRET, docs/decisions.md
+ * round 12). False turns the login wall back into plain "open it from Telegram"
+ * text; it is a feature flag, never an authorization answer.
+ */
+export interface TelegramLoginAvailability {
+  available: boolean;
+}
+
+/**
  * POST /api/g/:slug/handoff — a one-time, short-TTL link that opens the same
  * board in the system browser already signed in (docs/decisions.md round 7).
  * The url carries a secret: open it, never render or log it.

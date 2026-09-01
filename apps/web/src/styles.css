@@ -1765,6 +1765,20 @@ a {
   color: var(--dim);
 }
 
+/* "Log in with Telegram": the magenta bridge button, centred on the login wall. */
+.login-btn {
+  margin: 20px auto 0;
+  max-width: 280px;
+  padding: 0 20px;
+  text-decoration: none;
+}
+
+.screen-note {
+  margin: 12px 0 0;
+  font: 400 11px var(--font-mono);
+  color: var(--dimmer);
+}
+
 .retry-btn {
   margin-top: 16px;
   min-height: var(--tap);

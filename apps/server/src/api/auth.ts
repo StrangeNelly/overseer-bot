@@ -25,8 +25,13 @@ function hmac(key: string | Buffer, data: string): Buffer {
   return createHmac('sha256', key).update(data).digest();
 }
 
+/** Hex HMAC-SHA256 — the tag every signed-cookie payload here carries. */
+export function hmacHex(key: string, data: string): string {
+  return hmac(key, data).toString('hex');
+}
+
 /** Constant-time hex compare that tolerates (and rejects) length mismatches. */
-function hexEquals(a: string, b: string): boolean {
+export function hexEquals(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   const left = Buffer.from(a, 'hex');
   const right = Buffer.from(b, 'hex');

@@ -28,6 +28,14 @@ export interface Config {
    */
   miniAppUrl: string | null;
   /**
+   * Telegram Login Widget OIDC client credentials (BotFather -> your bot ->
+   * Login Widget). The Client ID doubles as the `aud` of every id_token.
+   * Browser "Log in with Telegram" is armed ONLY when BOTH are present — half a
+   * client cannot complete a code exchange, so half-configured means off.
+   */
+  tgOauthClientId: string | null;
+  tgOauthClientSecret: string | null;
+  /**
    * DEV ONLY: browse the board as this Telegram user id without initData (no
    * Telegram webview, no membership check). Non-null ONLY when ENABLE_DEV_AUTH
    * is exactly 'true' and NODE_ENV is not 'production', so this one field is
@@ -57,6 +65,8 @@ export function loadConfig(): Config {
     port: Number(process.env.PORT ?? 3000),
     sessionSecret: required('SESSION_SECRET'),
     miniAppUrl: process.env.MINI_APP_URL?.trim() || null,
+    tgOauthClientId: process.env.TG_OAUTH_CLIENT_ID?.trim() || null,
+    tgOauthClientSecret: process.env.TG_OAUTH_CLIENT_SECRET?.trim() || null,
     devAuthUserId: devAuthArmed ? optionalInt('DEV_AUTH_USER_ID') : null,
   };
 }

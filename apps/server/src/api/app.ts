@@ -10,6 +10,7 @@ import { createAuthRoutes, devAuthEnabled } from './auth.js';
 import { createBoardRoutes } from './board.js';
 import { createHandoffRoutes } from './handoff.js';
 import { requireMember, type ApiEnv } from './membership.js';
+import { createOauthRoutes } from './oauth.js';
 import { createRangeRoutes } from './range.js';
 import { createSleeperRoutes } from './sleepers.js';
 import { createSseRoutes } from './sse.js';
@@ -79,6 +80,10 @@ export function createApi(db: Db, botApi: Api, config: Config): Hono<ApiEnv> {
   // /auth/handoff — outside /api (so the 404 branch below can't claim it) and
   // registered here, ahead of the static/SPA handlers, so it is matched first.
   app.route('/', createHandoffRoutes(db, config));
+  // Browser "Log in with Telegram" (OIDC, docs/decisions.md round 12). Both
+  // redirect legs are PUBLIC GETs on /auth/telegram/* — outside /api and, like
+  // the handoff redeem, registered here so the SPA fallback cannot claim them.
+  app.route('/', createOauthRoutes<ApiEnv>(config));
 
   // Built SPA. /api/* must never fall through to a static file or the shell —
   // an unmatched API path is a 404, not an HTML page.

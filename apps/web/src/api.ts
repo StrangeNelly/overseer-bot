@@ -6,6 +6,7 @@ import type {
   RangeBoardResponse,
   RangeDurationHours,
   SleepersResponse,
+  TelegramLoginAvailability,
 } from '@groupie/shared';
 
 /** Any non-2xx response, or a request that never reached the server (status 0). */
@@ -81,6 +82,19 @@ export function authTelegram(initData: string): Promise<void> {
 /** Dev-only shortcut session. 404 in prod — that is the signal to show the login screen. */
 export function authDev(): Promise<void> {
   return request<void>('/api/auth/dev');
+}
+
+/**
+ * Is browser "Log in with Telegram" configured on this deployment? Purely a
+ * feature flag for the login wall — the real gate is the OIDC round trip.
+ */
+export function fetchTelegramLoginAvailable(): Promise<TelegramLoginAvailability> {
+  return request<TelegramLoginAvailability>('/api/auth/telegram/available');
+}
+
+/** Where the "Log in with Telegram" button sends the browser (a full navigation). */
+export function telegramLoginUrl(slug: string): string {
+  return `/auth/telegram/start?slug=${encodeURIComponent(slug)}`;
 }
 
 export function fetchMe(): Promise<MeResponse> {
