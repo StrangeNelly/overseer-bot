@@ -4,14 +4,20 @@ import { num, type MarketSnapshot } from './types.js';
 const BASE = 'https://api.geckoterminal.com/api/v2';
 
 /**
- * GeckoTerminal free tier: 30 calls/min, keyless. Budget to 25/min for
- * headroom; callers await a slot before each request.
+ * GeckoTerminal free tier: 30 calls/min, keyless. Budget to 20/min AND pace
+ * every grant at least 2s apart: their limiter demonstrably punishes bursts,
+ * not just the per-minute total — on 2026-09-02, scans drew 429s mid-listing
+ * at a 25/min window even with per-page gaps, because concurrent poll traffic
+ * stacked grants into the same instant. Even spacing caps the instantaneous
+ * rate at 30/min while the window keeps the average at 20.
  */
 const WINDOW_MS = 60_000;
-const MAX_PER_WINDOW = 25;
+const MAX_PER_WINDOW = 20;
+const MIN_GAP_MS = 2_000;
 const COOLDOWN_MS = 30_000;
 const stamps: number[] = [];
 let cooldownUntil = 0;
+let lastGrantMs = 0;
 
 async function acquireSlot(): Promise<void> {
   for (;;) {
@@ -20,9 +26,17 @@ async function acquireSlot(): Promise<void> {
       await new Promise((r) => setTimeout(r, cooldownUntil - now));
       continue;
     }
+    // Single-threaded: no await between this check and the grant below, so
+    // two concurrent waiters cannot both pass the same gap.
+    const sinceLast = now - lastGrantMs;
+    if (sinceLast < MIN_GAP_MS) {
+      await new Promise((r) => setTimeout(r, MIN_GAP_MS - sinceLast));
+      continue;
+    }
     while (stamps.length > 0 && now - stamps[0]! > WINDOW_MS) stamps.shift();
     if (stamps.length < MAX_PER_WINDOW) {
       stamps.push(now);
+      lastGrantMs = now;
       return;
     }
     const waitMs = WINDOW_MS - (now - stamps[0]!) + 100;
