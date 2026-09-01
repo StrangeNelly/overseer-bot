@@ -19,6 +19,11 @@ Running record of decisions made with the owner. Newest at the bottom.
 
 - COV link label in Phanes: unidentified; dropped as non-blocking.
 
+## 2026-09-02 — Rug auto-removal + peak-volume capacity (round 5)
+
+- **Rug rule (owner):** a token whose mcap sits below $8K continuously for 6+ hours is a rug — automatically removed from the board. Implemented as system auto-bin (binnedBy null = auto), with the token marked dead (reason `rug_floor`) if not already: repost still un-bins and re-evaluates (renewed-attention rule keeps working), and a later storage purge job can hard-delete long-binned tokens. Continuity judged like Ranging: max mcap over the 6h window under the floor, with data-span + coverage requirements so a token we barely watched can't be auto-condemned.
+- **Peak volume (owner):** 50-100 CAs/day at peak. Budgets hold (DS trivial; GT degrades curve polling toward ~90s under heavy simultaneous curve load — acceptable). SSE-driven board refetch debounce raised (2s → 6s) to keep client/DB load sane at that card count. Watch item: Supabase free-tier storage at sustained peak — rug auto-removal is the main relief valve.
+
 ## 2026-09-02 — Watchlist alerts, webapp priority, design philosophy (round 4)
 
 - **Watchlist alerts (owner spec):** a per-group watchlist of coins the bot actively follows; alerts post INTO the Telegram group chat. This is a deliberate, opt-in exception to the near-silent-bot rule — alerts fire only for explicitly watched coins.
