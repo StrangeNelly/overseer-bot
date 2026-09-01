@@ -1297,6 +1297,19 @@ a {
   color: var(--dimmer);
 }
 
+/* Header-sized bridge for the expanded-in-Telegram layouts (App head-right). */
+.bridge-btn-compact {
+  min-height: 26px;
+  padding: 0 10px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  box-shadow: 0 0 10px rgba(255, 61, 190, 0.35);
+}
+
+.bridge-btn-compact:disabled {
+  opacity: 0.6;
+}
+
 /* ---------- ranging ---------- */
 
 .range-controls {

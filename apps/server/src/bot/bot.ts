@@ -349,7 +349,7 @@ async function handleGroupieCommand(
       const boardUrl = config.miniAppUrl
         ? `${config.miniAppUrl}?startapp=${group.slug}`
         : `${config.webAppUrl}/g/${group.slug}`;
-      await ctx.reply(`Groupie board: ${boardUrl}`, {
+      await ctx.reply(`Overseer board: ${boardUrl}`, {
         link_preview_options: { is_disabled: true },
       });
       return false;

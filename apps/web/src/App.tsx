@@ -725,6 +725,18 @@ export default function App() {
               {`data as of ${fmtAge(new Date(Date.now() - pulse.asOfMs).toISOString())} ago`}
             </span>
           ) : null}
+          {inTelegram ? (
+            // Expanded-in-Telegram still needs the browser bridge: the
+            // half-sheet's big button only exists in the 'mini' layout.
+            <button
+              type="button"
+              className="bridge-btn bridge-btn-compact"
+              onClick={() => void onFullBoard()}
+              disabled={handoffPending}
+            >
+              {handoffPending ? 'opening…' : 'full ↗'}
+            </button>
+          ) : null}
           <WindowSwitcher value={boardWindow} onChange={onWindowChange} />
         </div>
       </header>
