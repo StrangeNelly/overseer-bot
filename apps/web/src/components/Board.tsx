@@ -1,10 +1,11 @@
 import { useMemo } from 'react';
+import type { ReactNode } from 'react';
 import type { BoardCard, BoardResponse } from '@groupie/shared';
-import { SectionTabs, SECTIONS } from './SectionTabs';
-import type { SectionKey } from './SectionTabs';
+import { SectionTabs, BOARD_SECTIONS } from './SectionTabs';
+import type { BoardSectionKey, SectionKey } from './SectionTabs';
 import { TokenCard } from './TokenCard';
 
-const EMPTY_LINES: Record<SectionKey, string> = {
+const EMPTY_LINES: Record<BoardSectionKey, string> = {
   fresh: 'No calls in this window. Try a longer one.',
   runners: 'Nothing is running yet in this window.',
   retraced: 'Nothing has pulled back off a peak here.',
@@ -21,6 +22,10 @@ interface BoardProps {
   hiddenCallIds: ReadonlySet<number>;
   binningId: number | null;
   onBin: (card: BoardCard) => void;
+  /** Ranging tab body (its own controls + list); it has its own endpoint. */
+  ranging: ReactNode;
+  /** null until the ranging board has loaded once. */
+  rangingCount: number | null;
 }
 
 export function Board({
@@ -31,10 +36,12 @@ export function Board({
   hiddenCallIds,
   binningId,
   onBin,
+  ranging,
+  rangingCount,
 }: BoardProps) {
   const visible = useMemo(() => {
-    const out = {} as Record<SectionKey, BoardCard[]>;
-    for (const { key } of SECTIONS) {
+    const out = {} as Record<BoardSectionKey, BoardCard[]>;
+    for (const { key } of BOARD_SECTIONS) {
       const cards = board.sections[key] ?? [];
       out[key] = hiddenCallIds.size === 0 ? cards : cards.filter((c) => !hiddenCallIds.has(c.callId));
     }
@@ -42,32 +49,55 @@ export function Board({
   }, [board, hiddenCallIds]);
 
   const counts = useMemo(() => {
-    const out = {} as Record<SectionKey, number>;
-    for (const { key } of SECTIONS) out[key] = visible[key].length;
+    const out = { ranging: rangingCount } as Record<SectionKey, number | null>;
+    for (const { key } of BOARD_SECTIONS) out[key] = visible[key].length;
     return out;
-  }, [visible]);
-
-  const cards = visible[section];
+  }, [visible, rangingCount]);
 
   return (
     <>
       <SectionTabs value={section} counts={counts} onChange={onSection} />
-      {cards.length === 0 ? (
-        <p className="empty">{EMPTY_LINES[section]}</p>
+      {section === 'ranging' ? (
+        ranging
       ) : (
-        <div className="cards">
-          {cards.map((card) => (
-            <TokenCard
-              key={card.callId}
-              card={card}
-              section={section}
-              now={now}
-              onBin={section === 'died' ? onBin : undefined}
-              binning={binningId === card.callId}
-            />
-          ))}
-        </div>
+        <BoardList
+          cards={visible[section]}
+          section={section}
+          now={now}
+          binningId={binningId}
+          onBin={onBin}
+        />
       )}
     </>
+  );
+}
+
+function BoardList({
+  cards,
+  section,
+  now,
+  binningId,
+  onBin,
+}: {
+  cards: BoardCard[];
+  section: BoardSectionKey;
+  now: number;
+  binningId: number | null;
+  onBin: (card: BoardCard) => void;
+}) {
+  if (cards.length === 0) return <p className="empty">{EMPTY_LINES[section]}</p>;
+  return (
+    <div className="cards">
+      {cards.map((card) => (
+        <TokenCard
+          key={card.callId}
+          card={card}
+          section={section}
+          now={now}
+          onBin={section === 'died' ? onBin : undefined}
+          binning={binningId === card.callId}
+        />
+      ))}
+    </div>
   );
 }

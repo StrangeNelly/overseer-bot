@@ -25,11 +25,16 @@ const { db, client } = createDb(config.databaseUrl);
 const bot = createBot(config, db);
 const api = createApi(db, bot.api, config);
 
+// WEB_ONLY=1: serve API + SPA against the live DB without starting the bot or
+// the poller — for local dev while the deployed instance owns Telegram polling
+// (two pollers 409-fight) and the snapshot writes.
+const webOnly = process.env.WEB_ONLY === '1';
+
 const server = serve({ fetch: api.fetch, port: config.port }, (info) => {
-  console.log(`api listening on :${info.port}`);
+  console.log(`api listening on :${info.port}${webOnly ? ' (WEB_ONLY: no bot, no poller)' : ''}`);
 });
 
-const stopPoller = startPoller(db);
+const stopPoller = webOnly ? () => {} : startPoller(db);
 
 function closeServer(): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()));
@@ -38,22 +43,24 @@ function closeServer(): Promise<void> {
 // Long polling: only the update types we act on. A rejected start (401 bad
 // token, 409 second instance) must kill the process, not leave a healthy-
 // looking API with a dead bot.
-bot
-  .start({
-    allowed_updates: ['message', 'my_chat_member'],
-    onStart: (me) => console.log(`bot @${me.username} polling`),
-  })
-  .catch(async (err) => {
-    console.error('bot polling failed:', err);
-    await closeServer();
-    await client.end().catch(() => {});
-    process.exit(1);
-  });
+if (!webOnly) {
+  bot
+    .start({
+      allowed_updates: ['message', 'my_chat_member'],
+      onStart: (me) => console.log(`bot @${me.username} polling`),
+    })
+    .catch(async (err) => {
+      console.error('bot polling failed:', err);
+      await closeServer();
+      await client.end().catch(() => {});
+      process.exit(1);
+    });
+}
 
 async function shutdown() {
   console.log('shutting down...');
   stopPoller();
-  await bot.stop();
+  if (!webOnly) await bot.stop();
   await closeServer();
   await client.end().catch(() => {});
   process.exit(0);

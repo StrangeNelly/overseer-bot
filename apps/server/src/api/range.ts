@@ -15,8 +15,13 @@ import { computeInRange, qualifies, RANGE_BUCKET_MS, type McapBucket } from './r
 type CallRow = typeof calls.$inferSelect;
 type TokenRow = typeof tokens.$inferSelect;
 
-/** The longest filter is 48h, so nothing older can change a verdict. */
-const LOOKBACK_HOURS = Math.max(...RANGE_DURATION_HOURS);
+/**
+ * The longest filter is 48h, so nothing older can change a verdict — plus an
+ * hour of margin. Bucket starts are floored to 5 minutes, so a window of
+ * exactly 48h leaves the 48h filter landing either side of its own boundary by
+ * chance; the margin makes it reliably reachable.
+ */
+const LOOKBACK_HOURS = Math.max(...RANGE_DURATION_HOURS) + 1;
 
 const DEFAULT_LO_USD = 50_000;
 const DEFAULT_HI_USD = 100_000;

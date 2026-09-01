@@ -1,15 +1,36 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import type { BoardCard, BoardResponse, BoardWindow } from '@groupie/shared';
-import { ApiError, authDev, authTelegram, binCall, eventsUrl, fetchBoard, fetchMe } from './api';
+import type {
+  BoardCard,
+  BoardResponse,
+  BoardWindow,
+  RangeBoardResponse,
+  RangeDurationHours,
+} from '@groupie/shared';
+import { RANGE_DURATION_HOURS, RANGE_PRESETS } from '@groupie/shared';
+import {
+  ApiError,
+  authDev,
+  authTelegram,
+  binCall,
+  eventsUrl,
+  fetchBoard,
+  fetchMe,
+  fetchRange,
+} from './api';
 import { Board } from './components/Board';
+import { DEFAULT_CONTROLS, Ranging, resolveBand } from './components/Ranging';
+import type { RangeBand, RangeControls } from './components/Ranging';
 import type { SectionKey } from './components/SectionTabs';
 import { WINDOWS, WindowSwitcher } from './components/WindowSwitcher';
 import { shortAddress } from './format';
 import { tgInitData, tgReady, tgStartParam } from './telegram';
 
 const WINDOW_STORAGE_KEY = 'groupie.window';
+const RANGE_STORAGE_KEY = 'groupie.range';
 const DEFAULT_WINDOW: BoardWindow = '24h';
+/** Typing a custom band fires on every keystroke; wait for the pause. */
+const RANGE_DEBOUNCE_MS = 400;
 /** Collapse bursts of live events into one refetch. */
 const REFETCH_DEBOUNCE_MS = 2000;
 /** Don't refetch twice when a tab switch fires both focus and visibilitychange. */
@@ -29,6 +50,12 @@ type BootState =
   | { kind: 'blocked'; title: string; message: string; retry: boolean };
 
 type LiveState = 'idle' | 'open' | 'reconnecting';
+
+/** What the ranging endpoint was last asked for — the unit a refetch repeats. */
+interface RangeQuery {
+  band: RangeBand;
+  hours: RangeDurationHours;
+}
 
 function describe(err: unknown): string {
   if (err instanceof ApiError) return err.message;
@@ -53,6 +80,47 @@ function loadWindow(): BoardWindow {
 function saveWindow(value: BoardWindow): void {
   try {
     window.localStorage.setItem(WINDOW_STORAGE_KEY, value);
+  } catch {
+    // Persisting the preference is best-effort.
+  }
+}
+
+function isRangeHours(value: unknown): value is RangeDurationHours {
+  return typeof value === 'number' && (RANGE_DURATION_HOURS as readonly number[]).includes(value);
+}
+
+/** Every field is re-validated: the stored blob is user-editable and can predate a preset change. */
+function loadRangeControls(): RangeControls {
+  try {
+    const raw = window.localStorage.getItem(RANGE_STORAGE_KEY);
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        const stored = parsed as Record<string, unknown>;
+        const index = stored.presetIndex;
+        const presetIndex =
+          typeof index === 'number' && Number.isInteger(index) && index >= 0 && index < RANGE_PRESETS.length
+            ? index
+            : index === null
+              ? null
+              : DEFAULT_CONTROLS.presetIndex;
+        return {
+          presetIndex,
+          customLoK: typeof stored.customLoK === 'string' ? stored.customLoK : '',
+          customHiK: typeof stored.customHiK === 'string' ? stored.customHiK : '',
+          hours: isRangeHours(stored.hours) ? stored.hours : DEFAULT_CONTROLS.hours,
+        };
+      }
+    }
+  } catch {
+    // Private mode, disabled storage, or a corrupt blob: fall back to the default.
+  }
+  return DEFAULT_CONTROLS;
+}
+
+function saveRangeControls(value: RangeControls): void {
+  try {
+    window.localStorage.setItem(RANGE_STORAGE_KEY, JSON.stringify(value));
   } catch {
     // Persisting the preference is best-effort.
   }
@@ -160,6 +228,10 @@ export default function App() {
   const [binningId, setBinningId] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const [rangeControls, setRangeControls] = useState<RangeControls>(loadRangeControls);
+  const [range, setRange] = useState<RangeBoardResponse | null>(null);
+  const [rangeError, setRangeError] = useState<string | null>(null);
+  const [rangeLoading, setRangeLoading] = useState(false);
 
   const slug = boot.kind === 'ready' ? boot.slug : null;
   const slugRef = useRef<string | null>(null);
@@ -167,6 +239,8 @@ export default function App() {
   const lastLoadRef = useRef(0);
   const loadSeqRef = useRef(0);
   const debounceRef = useRef<number | null>(null);
+  const rangeSeqRef = useRef(0);
+  const rangeQueryRef = useRef<RangeQuery | null>(null);
 
   // Bootstrap: slug -> auth -> /api/me.
   useEffect(() => {
@@ -237,6 +311,42 @@ export default function App() {
     void loadBoard();
   }, [slug, boardWindow, loadBoard]);
 
+  const loadRange = useCallback(async (query: RangeQuery, options: { silent?: boolean } = {}) => {
+    const currentSlug = slugRef.current;
+    if (!currentSlug) return;
+    // Latest-wins, exactly like the board: a slow answer for an abandoned band
+    // must not overwrite the one the user is looking at.
+    const seq = ++rangeSeqRef.current;
+    if (!options.silent) setRangeLoading(true);
+    try {
+      const data = await fetchRange(currentSlug, query.band.loUsd, query.band.hiUsd, query.hours);
+      if (seq !== rangeSeqRef.current) return;
+      setRange(data);
+      setRangeError(null);
+    } catch (err) {
+      if (seq !== rangeSeqRef.current) return;
+      setRangeError(describe(err));
+    } finally {
+      if (!options.silent && seq === rangeSeqRef.current) setRangeLoading(false);
+    }
+  }, []);
+
+  const rangeBand = useMemo(() => resolveBand(rangeControls), [rangeControls]);
+  const rangingActive = section === 'ranging';
+  const rangeHours = rangeControls.hours;
+  const customBand = rangeControls.presetIndex === null;
+
+  // Ranging is analytical, not live: it loads when its tab is open, when a
+  // control changes, and on tab focus — never off an SSE event.
+  useEffect(() => {
+    if (!slug || !rangingActive) return;
+    rangeQueryRef.current = rangeBand === null ? null : { band: rangeBand, hours: rangeHours };
+    if (rangeBand === null) return;
+    const query: RangeQuery = { band: rangeBand, hours: rangeHours };
+    const id = window.setTimeout(() => void loadRange(query), customBand ? RANGE_DEBOUNCE_MS : 0);
+    return () => window.clearTimeout(id);
+  }, [slug, rangingActive, rangeBand, rangeHours, customBand, loadRange]);
+
   const scheduleRefetch = useCallback(() => {
     if (debounceRef.current !== null) return;
     debounceRef.current = window.setTimeout(() => {
@@ -277,6 +387,8 @@ export default function App() {
       if (document.visibilityState === 'hidden') return;
       if (Date.now() - lastLoadRef.current < FOCUS_REFETCH_MIN_GAP_MS) return;
       void loadBoard({ silent: true });
+      const query = rangeQueryRef.current;
+      if (rangingActive && query) void loadRange(query, { silent: true });
     };
     window.addEventListener('focus', onFocus);
     document.addEventListener('visibilitychange', onFocus);
@@ -284,7 +396,7 @@ export default function App() {
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onFocus);
     };
-  }, [slug, loadBoard]);
+  }, [slug, loadBoard, loadRange, rangingActive]);
 
   // Keeps every "3h" on the board honest without a refetch.
   useEffect(() => {
@@ -296,6 +408,16 @@ export default function App() {
     setBoardWindow(next);
     saveWindow(next);
   }, []);
+
+  const onRangeControls = useCallback((next: RangeControls) => {
+    setRangeControls(next);
+    saveRangeControls(next);
+  }, []);
+
+  const onRangeRetry = useCallback(() => {
+    const query = rangeQueryRef.current;
+    if (query) void loadRange(query);
+  }, [loadRange]);
 
   const onBin = useCallback(
     async (card: BoardCard) => {
@@ -403,6 +525,19 @@ export default function App() {
             hiddenCallIds={hidden}
             binningId={binningId}
             onBin={onBin}
+            rangingCount={range === null ? null : range.cards.length}
+            ranging={
+              <Ranging
+                controls={rangeControls}
+                onControls={onRangeControls}
+                band={rangeBand}
+                data={range}
+                loading={rangeLoading}
+                error={rangeError}
+                onRetry={onRangeRetry}
+                now={now}
+              />
+            }
           />
         ) : boardError ? (
           <div className="screen">
