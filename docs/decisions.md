@@ -19,6 +19,15 @@ Running record of decisions made with the owner. Newest at the bottom.
 
 - COV link label in Phanes: unidentified; dropped as non-blocking.
 
+## 2026-09-02 — Design pass 2 implementation + watch everywhere (round 16)
+
+- **Design pass 2 handoff accepted** (`design/extracted/pass2/design_handoff_overseer_board/`, Round 3 artboards 3A–3G): opportunity-first desktop with zone system (FRESH rail · IN PLAY column: RUNNERS → RETRACED → REVIVING → ON WATCH · right rail DIED → RANGING summary → SLEEPERS summary), day-outcome strip in Pulse, retraced gauge, hero sparklines, band bars on Ranging/Sleepers rows, view headlines for Ranging/Sleepers, mobile zone chips + tone bands, bigger wordmark/group name. **3G license (watch-move ceremony on the board + `your slots n / 3`) is IN** — it serves the alerting goal directly.
+- **Owner rule: watch/unwatch on EVERY coin that shows up in the app**, and the watchlist is manageable both in the app and in Telegram. Overrides the handoff's "no WATCH on sleepers" note. Consequences:
+  - Sleepers rows get the watch pill. A sleeper is not a group call, so the web gains **watch by address** (`POST /api/g/:slug/watch {address}`), the exact semantics of `/overseer watch <ca>` (upsert token, then add the watch under the caller's slot, same cap, same orphan-row guard). Card-id watch stays for board cards.
+  - The board payload carries the group's **entire active watchlist** (`BoardResponse.watchlist`, including chat/Sleepers watches with no call), and ON WATCH renders from it — desktop zone AND a mobile tab — so every slot a member holds is visible and unwatchable from the app. This closes the round-15 review's "stranded slots" finding for good.
+  - Died rows, Ranging cards, Sleepers rows, spotlight cards, list rows, half-sheet rows: all carry WATCH / WATCHING / WATCHING·YOU. Dead coins may be watched (alerts resume automatically on revival).
+- Neutral-framing law unchanged: the board prints numbers ("NARCO +41% in 1h — on watch"), never "buy-opp"/"nuke" labels.
+
 ## 2026-09-02 — Watch button, declined toggle, design pass 2 (round 15)
 
 - **Watch button on the board (approved):** tap-to-watch on cards; watching = the existing Telegram alerts (nuke / buy-opp) for that coin. **Cap: each member may hold max 3 active watches per group** (enforced server-side by addedBy; friendly error when full; unwatching frees a slot). Bot commands stay as the power-user path and share the same cap.

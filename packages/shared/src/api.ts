@@ -146,6 +146,56 @@ export interface BoardResponse {
      */
     reviving: BoardCard[];
   };
+  /**
+   * The group's ENTIRE active alert watchlist (round 16) — every coin any
+   * member is watching, whether or not it has a call on this board: watches
+   * set from the chat by address (`/overseer watch <ca>`) and from Sleepers
+   * rows have no call at all. This is what the ON WATCH zone renders, and the
+   * only place a member can see and free every slot they hold. Ordered by
+   * addedAt desc; the client re-ranks (design pass 2: biggest 1h move first).
+   */
+  watchlist: WatchlistEntry[];
+}
+
+/**
+ * One active watch (round 16). Carries enough market data to render a row on
+ * its own; when `callId` is set, the same coin is also a BoardCard in
+ * `sections` and the client may join to it for the sparkline and call story.
+ */
+export interface WatchlistEntry {
+  tokenId: number;
+  address: string;
+  symbol: string | null;
+  imageUrl: string | null;
+  phase: TokenPhase;
+  mcapUsd: number | null;
+  liquidityUsd: number | null;
+  /** tokens.lastSnapshotAt — the honesty marker for the numbers above. */
+  dataAsOf: string | null;
+  /** Last 24h of mcap snapshots, downsampled like BoardCard.sparkline. */
+  sparkline: SparkPoint[];
+  /** The member holding the slot — a Telegram user id, matched against MeResponse.userId. */
+  addedBy: number;
+  /** Display name for the slot holder when we have one (group_members), else null. */
+  addedByName: string | null;
+  addedAt: string;
+  watchedByMe: boolean;
+  /** The group's non-binned call for this coin, if any — null for chat/Sleepers watches. */
+  callId: number | null;
+  twitterUrl: string | null;
+  websiteUrl: string | null;
+  links: TradingLinkRow;
+}
+
+/**
+ * Body of POST /api/g/:slug/watch — watch by ADDRESS (round 16), the same
+ * thing `/overseer watch <ca>` does: upserts the token if we have never seen
+ * it, then adds the group's watch under the caller's slot. This is the path
+ * for coins with no call on the board (Sleepers rows). 204 / 409 cap (body =
+ * watchCapMessage) / 400 on a malformed address.
+ */
+export interface WatchByAddressRequest {
+  address: string;
 }
 
 export interface MeResponse {
@@ -343,6 +393,14 @@ export interface SleeperEntry {
    */
   inBandHours: number;
   links: TradingLinkRow;
+  /**
+   * Round 16: the group's watch state for this coin, so a Sleepers row can
+   * carry the same WATCH / WATCHING·YOU pill as every other coin in the app.
+   * A sleeper is never one of the group's calls, but it can still be watched
+   * (by address) — exactly what `/overseer watch <ca>` has always allowed.
+   */
+  watched: boolean;
+  watchedByMe: boolean;
 }
 
 export interface SleeperBand {
