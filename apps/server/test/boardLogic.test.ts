@@ -51,6 +51,7 @@ function card(spec: CardSpec): BoardCard {
     diedAt: spec.diedAt ?? null,
     deathReason: null,
     dataAsOf: new Date().toISOString(),
+    watched: false,
     links: tradingLinks(address),
     sparkline: [],
   };
@@ -239,6 +240,7 @@ describe('toCard death info', () => {
       callRow({ status: 'died', diedAt: callDeath, deathReason: 'call_liquidity_collapse' }),
       tokenRow(),
       [],
+      false,
     );
     expect(result.diedAt).toBe(callDeath.toISOString());
     expect(result.deathReason).toBe('call_liquidity_collapse');
@@ -253,6 +255,7 @@ describe('toCard death info', () => {
         revivedAt: new Date(Date.now() - 30 * HOUR),
       }),
       [],
+      false,
     );
     expect(result.diedAt).toBe(callDeath.toISOString());
     expect(result.deathReason).toBe('call_liquidity_collapse');
@@ -264,6 +267,7 @@ describe('toCard death info', () => {
       callRow({ status: 'died', diedAt: callDeath }), // stamped, reason unknown
       tokenRow({ diedAt: new Date(Date.now() - 40 * HOUR), deathReason: 'curve_floor' }),
       [],
+      false,
     );
     expect(result.diedAt).toBe(callDeath.toISOString());
     expect(result.deathReason).toBeNull();
@@ -274,13 +278,14 @@ describe('toCard death info', () => {
       callRow({ status: 'died' }),
       tokenRow({ phase: 'dead', diedAt: callDeath, deathReason: 'liquidity_floor' }),
       [],
+      false,
     );
     expect(result.diedAt).toBe(callDeath.toISOString());
     expect(result.deathReason).toBe('liquidity_floor');
   });
 
   it('leaves a living call on a living token with no death info', () => {
-    const result = toCard(callRow(), tokenRow(), []);
+    const result = toCard(callRow(), tokenRow(), [], false);
     expect(result.diedAt).toBeNull();
     expect(result.deathReason).toBeNull();
   });
@@ -296,11 +301,13 @@ describe('toCard death info', () => {
         }),
         tokenRow({ id: 2, phase: 'dead', diedAt: new Date(Date.now() - 5 * HOUR) }),
         [],
+        false,
       ),
       toCard(
         callRow({ id: 30, status: 'died', diedAt: callDeath, deathReason: 'call_liquidity_collapse' }),
         tokenRow(),
         [],
+        false,
       ),
     ]);
     expect(ids(sections.died)).toEqual([30, 31]);

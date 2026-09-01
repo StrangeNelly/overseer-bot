@@ -153,6 +153,49 @@ export const groupMembers = pgTable(
   (t) => [primaryKey({ columns: [t.groupId, t.userId] })],
 );
 
+/**
+ * Per-group alert watchlist (docs/decisions.md round 4). A watch is the group's
+ * opt-in to bot messages about a coin, so it is group-scoped and survives
+ * un-watching as an inactive row (history of who added what).
+ */
+export const watches = pgTable(
+  'watches',
+  {
+    id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
+    groupId: integer('group_id')
+      .notNull()
+      .references(() => groups.id),
+    tokenId: integer('token_id')
+      .notNull()
+      .references(() => tokens.id),
+    addedBy: bigint('added_by', { mode: 'number' }).notNull(),
+    addedAt: timestamp('added_at', { withTimezone: true }).notNull().defaultNow(),
+    active: boolean('active').notNull().default(true),
+  },
+  (t) => [uniqueIndex('watches_group_token_uq').on(t.groupId, t.tokenId)],
+);
+
+export const alerts = pgTable(
+  'alerts',
+  {
+    id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
+    groupId: integer('group_id')
+      .notNull()
+      .references(() => groups.id),
+    tokenId: integer('token_id')
+      .notNull()
+      .references(() => tokens.id),
+    type: text('type', { enum: ['nuke', 'buy_opp'] }).notNull(),
+    firedAt: timestamp('fired_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Market cap at fire time; details carries the peak/drop that triggered it. */
+    mcapUsd: doublePrecision('mcap_usd'),
+    details: jsonb('details'),
+  },
+  // Every fired row is also the cooldown record: the poller asks "did this
+  // (group, token, type) fire recently?" on every tick a condition holds.
+  (t) => [index('alerts_cooldown_idx').on(t.groupId, t.tokenId, t.type, t.firedAt)],
+);
+
 export const launchMonitors = pgTable(
   'launch_monitors',
   {

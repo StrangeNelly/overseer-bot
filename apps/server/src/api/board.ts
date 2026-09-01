@@ -1,6 +1,6 @@
 import { and, eq, gte, inArray, isNotNull, ne, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { calls, snapshots, tokens, type Db } from '@groupie/db';
+import { calls, snapshots, tokens, watches, type Db } from '@groupie/db';
 import {
   BOARD_WINDOWS,
   BOARD_WINDOW_HOURS,
@@ -51,7 +51,12 @@ function deathOf(call: CallRow, token: TokenRow): { at: Date | null; reason: str
 }
 
 /** Shared by the board and ranging routes (and the tests) — one card shape. */
-export function toCard(call: CallRow, token: TokenRow, sparkline: SparkPoint[]): BoardCard {
+export function toCard(
+  call: CallRow,
+  token: TokenRow,
+  sparkline: SparkPoint[],
+  watched: boolean,
+): BoardCard {
   // A zero/negative at-call mcap is a bad reading, not a 0x baseline.
   const base = call.mcapAtCall !== null && call.mcapAtCall > 0 ? call.mcapAtCall : null;
   const death = deathOf(call, token);
@@ -85,9 +90,33 @@ export function toCard(call: CallRow, token: TokenRow, sparkline: SparkPoint[]):
     diedAt: death.at?.toISOString() ?? null,
     deathReason: death.reason,
     dataAsOf: token.lastSnapshotAt?.toISOString() ?? null,
+    watched,
     links: tradingLinks(token.address),
     sparkline,
   };
+}
+
+/**
+ * The group's active watchlist, as a set of token ids — one query for a whole
+ * board (no per-card lookup). Shared with the ranging route.
+ */
+export async function loadWatchedTokenIds(
+  db: Db,
+  groupId: number,
+  tokenIds: number[],
+): Promise<Set<number>> {
+  if (tokenIds.length === 0) return new Set();
+  const rows = await db
+    .select({ tokenId: watches.tokenId })
+    .from(watches)
+    .where(
+      and(
+        eq(watches.groupId, groupId),
+        eq(watches.active, true),
+        inArray(watches.tokenId, tokenIds),
+      ),
+    );
+  return new Set(rows.map((r) => r.tokenId));
 }
 
 /** 24h / 30 points: one bucket per sparkline sample. */
@@ -186,8 +215,14 @@ export function createBoardRoutes(db: Db): Hono<ApiEnv> {
         ),
       );
 
-    const sparklines = await loadSparklines(db, [...new Set(rows.map((r) => r.token.id))]);
-    const cards = rows.map((r) => toCard(r.call, r.token, sparklines.get(r.token.id) ?? []));
+    const tokenIds = [...new Set(rows.map((r) => r.token.id))];
+    const [sparklines, watchedIds] = await Promise.all([
+      loadSparklines(db, tokenIds),
+      loadWatchedTokenIds(db, group.id, tokenIds),
+    ]);
+    const cards = rows.map((r) =>
+      toCard(r.call, r.token, sparklines.get(r.token.id) ?? [], watchedIds.has(r.token.id)),
+    );
 
     const body: BoardResponse = {
       group: { slug: group.slug, title: group.title },

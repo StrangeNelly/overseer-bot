@@ -14,7 +14,16 @@ export type GroupieEvent =
   | { type: 'call_revived'; tokenId: number; callId: number }
   // Binning is group-wide, so every other member's open board must drop the
   // card without waiting for an unrelated poll event.
-  | { type: 'call_binned'; tokenId: number; callId: number };
+  | { type: 'call_binned'; tokenId: number; callId: number }
+  // Already persisted in `alerts` and past its cooldown when this fires: the
+  // subscriber's only job is delivering `message` to the group's chat.
+  | {
+      type: 'alert_fired';
+      groupId: number;
+      tokenId: number;
+      alertType: 'nuke' | 'buy_opp';
+      message: string;
+    };
 
 const emitter = new EventEmitter();
 emitter.setMaxListeners(100);

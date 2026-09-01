@@ -89,6 +89,9 @@ export function createSseRoutes(db: Db): Hono<ApiEnv> {
 
       unsubscribe = subscribe((event: GroupieEvent) => {
         if (closed) return;
+        // Group-scoped events (alert_fired) carry the group they belong to;
+        // another group's alert text is none of this stream's business.
+        if ('groupId' in event && event.groupId !== group.id) return;
         enqueue(async () => {
           // Force a fresh lookup (and re-cache) for this group only: these
           // events carry no group id, so writing a positive here would mark the

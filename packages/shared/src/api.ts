@@ -59,6 +59,8 @@ export interface BoardCard {
   deathReason: string | null;
   /** tokens.lastSnapshotAt — when the market numbers were last real. */
   dataAsOf: string | null;
+  /** on the group's alert watchlist */
+  watched: boolean;
   links: TradingLinkRow;
   /** Last 24h of mcap snapshots, downsampled to <= 30 points, oldest first. */
   sparkline: SparkPoint[];

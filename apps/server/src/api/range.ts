@@ -8,7 +8,7 @@ import {
   type RangeDurationHours,
   type RangeInfo,
 } from '@groupie/shared';
-import { loadSparklines, toCard } from './board.js';
+import { loadSparklines, loadWatchedTokenIds, toCard } from './board.js';
 import type { ApiEnv } from './membership.js';
 import { computeInRange, qualifies, RANGE_BUCKET_MS, type McapBucket } from './rangeLogic.js';
 
@@ -158,10 +158,19 @@ export function createRangeRoutes(db: Db): Hono<ApiEnv> {
       matches.push({ call: row.call, token: row.token, range });
     }
 
-    const sparklines = await loadSparklines(db, matches.map((m) => m.token.id));
+    const matchedTokenIds = matches.map((m) => m.token.id);
+    const [sparklines, watchedIds] = await Promise.all([
+      loadSparklines(db, matchedTokenIds),
+      loadWatchedTokenIds(db, group.id, matchedTokenIds),
+    ]);
     const cards: RangeCard[] = matches
       .map((m) => ({
-        ...toCard(m.call, m.token, sparklines.get(m.token.id) ?? []),
+        ...toCard(
+          m.call,
+          m.token,
+          sparklines.get(m.token.id) ?? [],
+          watchedIds.has(m.token.id),
+        ),
         range: m.range,
       }))
       .sort((a, b) => b.range.inRangeHours - a.range.inRangeHours);

@@ -62,16 +62,21 @@ export async function ingestMessage(db: Db, input: IngestInput): Promise<IngestR
   return result;
 }
 
-async function upsertToken(tx: DbLike, address: string) {
+/**
+ * Find-or-create the token row for an address. Exported because a watch is the
+ * other way a token enters the system (`/groupie watch <ca>` on a coin nobody
+ * has called yet) and must go through exactly this path.
+ */
+export async function upsertToken(tx: DbLike, address: string) {
   const inserted = await tx
     .insert(tokens)
     .values({ chainId: ROBINHOOD_CHAIN_ID, address })
     .onConflictDoNothing()
-    .returning({ id: tokens.id });
+    .returning({ id: tokens.id, symbol: tokens.symbol });
   if (inserted[0]) return inserted[0];
 
   const existing = await tx
-    .select({ id: tokens.id })
+    .select({ id: tokens.id, symbol: tokens.symbol })
     .from(tokens)
     .where(and(eq(tokens.chainId, ROBINHOOD_CHAIN_ID), eq(tokens.address, address)));
   if (!existing[0]) throw new Error(`token upsert failed for ${address}`);

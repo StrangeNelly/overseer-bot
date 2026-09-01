@@ -12,6 +12,7 @@ net.setDefaultAutoSelectFamily(false);
 import { serve } from '@hono/node-server';
 import { createDb } from '@groupie/db';
 import { createApi } from './api/app.js';
+import { startAlertDelivery } from './bot/alertDelivery.js';
 import { createBot } from './bot/bot.js';
 import { loadConfig } from './config.js';
 import { startPoller } from './poller/scheduler.js';
@@ -35,6 +36,9 @@ const server = serve({ fetch: api.fetch, port: config.port }, (info) => {
 });
 
 const stopPoller = webOnly ? () => {} : startPoller(db);
+// Watchlist alerts post into Telegram, so WEB_ONLY (no bot, no poller) has
+// nothing to deliver and no bot to deliver with.
+const stopAlertDelivery = webOnly ? () => {} : startAlertDelivery(db, bot.api);
 
 function closeServer(): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()));
@@ -60,6 +64,7 @@ if (!webOnly) {
 async function shutdown() {
   console.log('shutting down...');
   stopPoller();
+  stopAlertDelivery();
   if (!webOnly) await bot.stop();
   await closeServer();
   await client.end().catch(() => {});

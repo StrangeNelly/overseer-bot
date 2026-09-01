@@ -1,11 +1,12 @@
 import { and, eq, inArray, isNull, max, ne, sql } from 'drizzle-orm';
-import { calls, snapshots, tokens, type Db } from '@groupie/db';
+import { calls, snapshots, tokens, watches, type Db } from '@groupie/db';
 import { IDLE_AFTER_HOURS, POLL_TIERS, SNAPSHOT_RETENTION, THRESHOLDS } from '@groupie/shared';
 import { publish } from '../events.js';
 import * as ds from '../market/dexscreener.js';
 import * as gt from '../market/geckoterminal.js';
 import { mcapAtTimestamp, resolveToken } from '../market/resolve.js';
 import type { MarketSnapshot } from '../market/types.js';
+import { runAlertPass } from './alerts.js';
 import { callLiquidityDeath, classifyTokenDeath, isRevived } from './death.js';
 
 const TICK_MS = 15_000;
@@ -33,6 +34,8 @@ interface Candidate {
   token: TokenRow;
   lastActivityMs: number;
   reviveRequested: boolean;
+  /** On some group's alert watchlist — alerts are only as fresh as the data. */
+  watched: boolean;
 }
 
 function isoNow(): string {
@@ -44,12 +47,20 @@ function ageHours(token: TokenRow): number {
   return (Date.now() - born.getTime()) / 3_600_000;
 }
 
+/**
+ * The join to calls is a LEFT join, so a watched token that was never called
+ * (`/groupie watch <ca>` on a coin nobody posted) is still a candidate; its
+ * activity clock falls back to first_seen_at.
+ */
 async function loadCandidates(db: Db): Promise<Candidate[]> {
   const rows = await db
     .select({
       token: tokens,
       lastActivityEpoch: sql<string | null>`extract(epoch from max(${calls.lastMentionAt}))`,
       reviveRequested: sql<boolean | null>`bool_or(${calls.reviveRequested})`,
+      // A correlated EXISTS, not a second join: joining watches as well would
+      // multiply rows (calls x watches) under the same group-by.
+      watched: sql<boolean>`exists (select 1 from ${watches} where ${watches.tokenId} = ${tokens.id} and ${watches.active})`,
     })
     .from(tokens)
     .leftJoin(calls, eq(calls.tokenId, tokens.id))
@@ -60,6 +71,7 @@ async function loadCandidates(db: Db): Promise<Candidate[]> {
       ? Number(r.lastActivityEpoch) * 1000
       : r.token.firstSeenAt.getTime(),
     reviveRequested: r.reviveRequested ?? false,
+    watched: r.watched === true,
   }));
 }
 
@@ -69,8 +81,11 @@ function isDue(c: Candidate, nowMs: number): boolean {
     return c.reviveRequested || nowMs - last >= POLL_TIERS.deadSeconds * 1000;
   }
   const quietHours = (nowMs - c.lastActivityMs) / 3_600_000;
-  const seconds =
-    quietHours < 24
+  // A watch is a standing request for minute-scale alerts, so a watched token
+  // stays on the fresh tier however quiet the chat is about it.
+  const seconds = c.watched
+    ? POLL_TIERS.freshSeconds
+    : quietHours < 24
       ? POLL_TIERS.freshSeconds
       : quietHours >= IDLE_AFTER_HOURS
         ? POLL_TIERS.idleSeconds
@@ -491,10 +506,17 @@ export async function runTick(db: Db): Promise<void> {
   const nowMs = Date.now();
   const due = (await loadCandidates(db)).filter((c) => isDue(c, nowMs));
 
+  // Resolution and curve polls are the budget-capped tiers; a watched token is
+  // the one we owe minute-scale alerts, so it takes those slots first.
+  const watchedFirst = (a: Candidate, b: Candidate) => Number(b.watched) - Number(a.watched);
   const unresolved = due
     .filter((c) => c.token.phase === 'unresolved')
+    .sort(watchedFirst)
     .slice(0, MAX_RESOLUTIONS_PER_TICK);
-  const curve = due.filter((c) => c.token.phase === 'curve').slice(0, MAX_CURVE_POLLS_PER_TICK);
+  const curve = due
+    .filter((c) => c.token.phase === 'curve')
+    .sort(watchedFirst)
+    .slice(0, MAX_CURVE_POLLS_PER_TICK);
   const graduated = due.filter((c) => c.token.phase === 'graduated');
   // Dead work is the least urgent; drain the backlog oldest-first over ticks
   // rather than letting it monopolize the GT budget in one.
@@ -516,6 +538,14 @@ export async function runTick(db: Db): Promise<void> {
   }
   for (const c of dead) await isolate(db, [c.token], () => pollDead(db, c.token, TICK_POLL));
 
+  // Judged on the data this tick just wrote. Never let it abort the tick: a
+  // failed alert pass must not cost us the prune (or the next tick's cadence).
+  try {
+    await runAlertPass(db);
+  } catch (err) {
+    console.error('alert pass failed:', err);
+  }
+
   await pruneSnapshots(db);
 }
 
@@ -523,10 +553,18 @@ export async function runTick(db: Db): Promise<void> {
 export async function pollTokenNow(db: Db, tokenId: number): Promise<void> {
   const token = (await db.select().from(tokens).where(eq(tokens.id, tokenId)))[0];
   if (!token) return;
-  if (token.phase === 'unresolved') return pollUnresolved(db, token, IMMEDIATE_POLL);
-  if (token.phase === 'curve') return pollCurve(db, token, IMMEDIATE_POLL);
-  if (token.phase === 'graduated') return pollGraduatedBatch(db, [token], IMMEDIATE_POLL);
-  return pollDead(db, token, IMMEDIATE_POLL);
+  if (token.phase === 'unresolved') await pollUnresolved(db, token, IMMEDIATE_POLL);
+  else if (token.phase === 'curve') await pollCurve(db, token, IMMEDIATE_POLL);
+  else if (token.phase === 'graduated') await pollGraduatedBatch(db, [token], IMMEDIATE_POLL);
+  else await pollDead(db, token, IMMEDIATE_POLL);
+
+  // Fresh data for one token: re-judge it now rather than waiting up to a tick.
+  // runAlertPass is a no-op for a token nobody watches (one indexed lookup).
+  try {
+    await runAlertPass(db, [tokenId]);
+  } catch (err) {
+    console.error(`alert pass failed for token ${tokenId}:`, err);
+  }
 }
 
 export function startPoller(db: Db): () => void {

@@ -54,6 +54,29 @@ export const POLL_TIERS = {
   deadSeconds: 86_400,
 } as const;
 
+/**
+ * Watchlist alert defaults (docs/decisions.md round 4). Per-group overrides live
+ * in groups.settings.alerts as a partial of this shape and are merged over these.
+ */
+export const ALERT_DEFAULTS = {
+  /** Fired when the drop over nukeWindowMin exceeds this. */
+  nukeDropPct: 40,
+  nukeWindowMin: 15,
+  /** Fired when the retrace from the peak exceeds this. */
+  buyRetracePct: 30,
+  /** The peak is searched within this lookback. */
+  buyPeakWindowHours: 24,
+  /** The peak must be at least this old: a slow bleed, not a nuke. */
+  buyMinDeclineHours: 1,
+  /** Per (token, type). */
+  cooldownMin: 60,
+} as const;
+
+export const ALERT_TYPES = ['nuke', 'buy_opp'] as const;
+export type AlertType = (typeof ALERT_TYPES)[number];
+
+export type AlertSettings = { -readonly [K in keyof typeof ALERT_DEFAULTS]: number };
+
 /** No mention for this long demotes a living token to the idle tier. */
 export const IDLE_AFTER_HOURS = 7 * 24;
 

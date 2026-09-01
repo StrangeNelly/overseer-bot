@@ -1,12 +1,35 @@
 import { randomBytes } from 'node:crypto';
 import { Bot, type Context } from 'grammy';
 import type { Message } from 'grammy/types';
-import { eq } from 'drizzle-orm';
-import { calls, groupMembers, groups, launchMonitors, type Db } from '@groupie/db';
+import { and, eq, sql } from 'drizzle-orm';
+import {
+  alerts,
+  calls,
+  groupMembers,
+  groups,
+  launchMonitors,
+  tokens,
+  watches,
+  type Db,
+} from '@groupie/db';
+import {
+  extractEvmAddresses,
+  ROBINHOOD_CHAIN_ID,
+  type AlertSettings,
+} from '@groupie/shared';
 import { publish } from '../events.js';
+import {
+  alertSettingsOf,
+  clampAlertSetting,
+  fmtUsd,
+  shortAddress,
+  tokenLabel,
+} from '../poller/alertLogic.js';
 import { pollTokenNow } from '../poller/scheduler.js';
 import type { Config } from '../config.js';
-import { ingestMessage } from './ingest.js';
+import { ingestMessage, upsertToken } from './ingest.js';
+
+type GroupRow = typeof groups.$inferSelect;
 
 function isGroupChat(ctx: Context): boolean {
   const type = ctx.chat?.type;
@@ -116,11 +139,222 @@ async function migrateGroup(db: Db, oldChatId: number, newChatId: number) {
         .update(launchMonitors)
         .set({ groupId: oldRow.id })
         .where(eq(launchMonitors.groupId, stub.id));
+      // Watches and alerts reference the stub too; leaving them would make the
+      // delete below fail on the foreign key.
+      await tx.update(watches).set({ groupId: oldRow.id }).where(eq(watches.groupId, stub.id));
+      await tx.update(alerts).set({ groupId: oldRow.id }).where(eq(alerts.groupId, stub.id));
       await tx.delete(groups).where(eq(groups.id, stub.id));
     }
     await tx.update(groups).set({ chatId: newChatId }).where(eq(groups.id, oldRow.id));
   });
   console.log(`group chat migrated ${oldChatId} -> ${newChatId}`);
+}
+
+/* -------------------------------------------------- /groupie subcommands */
+
+/** Telegram caps a message at 4096 chars; a long watchlist is truncated. */
+const WATCHLIST_MAX_LINES = 50;
+
+/** Whole numbers only: these are chat commands, not a precision instrument. */
+function parseWholeNumber(raw: string | undefined): number | null {
+  if (raw === undefined) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? Math.round(value) : null;
+}
+
+function alertsSummary(s: AlertSettings): string {
+  return (
+    `Alerts: nuke >${s.nukeDropPct}% in ${s.nukeWindowMin}m · ` +
+    `buy-opp ≥${s.buyRetracePct}% retrace from a ${s.buyPeakWindowHours}h high ` +
+    `at least ${s.buyMinDeclineHours}h old · cooldown ${s.cooldownMin}m per coin. ` +
+    `Tune: /groupie set nuke <pct> <minutes> · /groupie set buyopp <pct> <maxHours>`
+  );
+}
+
+/** The address a watch/unwatch is about, or null when the argument is junk. */
+function commandAddress(args: string[]): string | null {
+  return extractEvmAddresses(args.join(' '))[0] ?? null;
+}
+
+async function handleWatch(
+  db: Db,
+  ctx: Context,
+  group: GroupRow,
+  args: string[],
+  userId: number,
+): Promise<void> {
+  const address = commandAddress(args);
+  if (!address) {
+    await ctx.reply('Usage: /groupie watch <contract address>');
+    return;
+  }
+  const token = await upsertToken(db, address);
+  await db
+    .insert(watches)
+    .values({ groupId: group.id, tokenId: token.id, addedBy: userId })
+    .onConflictDoUpdate({
+      target: [watches.groupId, watches.tokenId],
+      // SET expressions see the OLD row: credit and clock only move when the
+      // watch was off, so re-watching an active coin changes nothing.
+      set: {
+        active: true,
+        addedBy: sql`case when ${watches.active} then ${watches.addedBy} else ${userId} end`,
+        addedAt: sql`case when ${watches.active} then ${watches.addedAt} else now() end`,
+      },
+    });
+
+  const s = alertSettingsOf(group.settings);
+  await ctx.reply(
+    `Watching ${tokenLabel(token.symbol, address)} — ` +
+      `nuke >${s.nukeDropPct}%/${s.nukeWindowMin}m, ` +
+      `buy-opp ≥${s.buyRetracePct}% retrace over ${s.buyMinDeclineHours}-${s.buyPeakWindowHours}h. ` +
+      `/groupie alerts to tune.`,
+  );
+
+  // A coin nobody called has never been polled: resolve it now so the alert
+  // engine has a symbol and a price series to work from.
+  pollTokenNow(db, token.id).catch((err) =>
+    console.error(`immediate poll failed for watched ${address}:`, err),
+  );
+}
+
+async function handleUnwatch(
+  db: Db,
+  ctx: Context,
+  group: GroupRow,
+  args: string[],
+): Promise<void> {
+  const address = commandAddress(args);
+  if (!address) {
+    await ctx.reply('Usage: /groupie unwatch <contract address>');
+    return;
+  }
+  const token = (
+    await db
+      .select({ id: tokens.id, symbol: tokens.symbol })
+      .from(tokens)
+      .where(and(eq(tokens.chainId, ROBINHOOD_CHAIN_ID), eq(tokens.address, address)))
+  )[0];
+  if (!token) {
+    await ctx.reply(`${shortAddress(address)} wasn't watched.`);
+    return;
+  }
+  const stopped = await db
+    .update(watches)
+    .set({ active: false })
+    .where(
+      and(
+        eq(watches.groupId, group.id),
+        eq(watches.tokenId, token.id),
+        eq(watches.active, true),
+      ),
+    )
+    .returning({ id: watches.id });
+  const label = tokenLabel(token.symbol, address);
+  await ctx.reply(stopped[0] ? `Stopped watching ${label}.` : `${label} wasn't watched.`);
+}
+
+async function handleWatchlist(db: Db, ctx: Context, group: GroupRow): Promise<void> {
+  const rows = await db
+    .select({ symbol: tokens.symbol, address: tokens.address, mcapUsd: tokens.mcapUsd })
+    .from(watches)
+    .innerJoin(tokens, eq(tokens.id, watches.tokenId))
+    .where(and(eq(watches.groupId, group.id), eq(watches.active, true)))
+    .orderBy(watches.addedAt);
+  if (rows.length === 0) {
+    await ctx.reply('Watchlist is empty. /groupie watch <ca> to follow a coin.');
+    return;
+  }
+  const lines = rows
+    .slice(0, WATCHLIST_MAX_LINES)
+    .map((r) => `${tokenLabel(r.symbol, r.address)} ${fmtUsd(r.mcapUsd)}`);
+  if (rows.length > WATCHLIST_MAX_LINES) {
+    lines.push(`+${rows.length - WATCHLIST_MAX_LINES} more`);
+  }
+  await ctx.reply(`Watching ${rows.length}:\n${lines.join('\n')}`);
+}
+
+const SET_USAGE =
+  'Usage: /groupie set nuke <pct 5-95> <minutes 5-60> · /groupie set buyopp <pct 5-95> <maxHours 1-48>';
+
+async function handleSet(db: Db, ctx: Context, group: GroupRow, args: string[]): Promise<void> {
+  const what = args[0]?.toLowerCase();
+  const pct = parseWholeNumber(args[1]);
+  const span = parseWholeNumber(args[2]);
+  let patch: Partial<AlertSettings>;
+  if (what === 'nuke' && pct !== null && span !== null) {
+    patch = {
+      nukeDropPct: clampAlertSetting('nukeDropPct', pct),
+      nukeWindowMin: clampAlertSetting('nukeWindowMin', span),
+    };
+  } else if (what === 'buyopp' && pct !== null && span !== null) {
+    patch = {
+      buyRetracePct: clampAlertSetting('buyRetracePct', pct),
+      buyPeakWindowHours: clampAlertSetting('buyPeakWindowHours', span),
+    };
+  } else {
+    await ctx.reply(SET_USAGE);
+    return;
+  }
+
+  // Merge into settings.alerts in SQL so a concurrent write to some OTHER
+  // settings key survives, and so a hand-edited non-object blob can't break the
+  // update. SET expressions see the OLD row, which is what is being merged.
+  const current = sql`case when jsonb_typeof(${groups.settings}) = 'object' then ${groups.settings} else '{}'::jsonb end`;
+  const currentAlerts = sql`case when jsonb_typeof(${groups.settings} -> 'alerts') = 'object' then ${groups.settings} -> 'alerts' else '{}'::jsonb end`;
+  const updated = await db
+    .update(groups)
+    .set({
+      settings: sql`jsonb_set(${current}, '{alerts}', ${currentAlerts} || ${JSON.stringify(patch)}::jsonb, true)`,
+    })
+    .where(eq(groups.id, group.id))
+    .returning({ settings: groups.settings });
+
+  await ctx.reply(alertsSummary(alertSettingsOf(updated[0]?.settings)));
+}
+
+/**
+ * Everything after `/groupie`. Returns true when the command consumed a
+ * contract address as an ARGUMENT — that address is a watchlist instruction,
+ * not a call, so the message must not fall through to call ingestion.
+ */
+async function handleGroupieCommand(
+  db: Db,
+  config: Config,
+  ctx: Context,
+  group: GroupRow,
+  rawArgs: string,
+  userId: number,
+): Promise<boolean> {
+  const args = rawArgs.trim().split(/\s+/).filter(Boolean);
+  switch (args[0]?.toLowerCase()) {
+    case 'watch':
+      await handleWatch(db, ctx, group, args.slice(1), userId);
+      return true;
+    case 'unwatch':
+      await handleUnwatch(db, ctx, group, args.slice(1));
+      return true;
+    case 'watchlist':
+      await handleWatchlist(db, ctx, group);
+      return false;
+    case 'alerts':
+      await ctx.reply(alertsSummary(alertSettingsOf(group.settings)));
+      return false;
+    case 'set':
+      await handleSet(db, ctx, group, args.slice(1));
+      return false;
+    default: {
+      // The t.me deep link opens the board inside Telegram; the plain URL is
+      // the fallback until the Mini App is registered in BotFather.
+      const boardUrl = config.miniAppUrl
+        ? `${config.miniAppUrl}?startapp=${group.slug}`
+        : `${config.webAppUrl}/g/${group.slug}`;
+      await ctx.reply(`Groupie board: ${boardUrl}`, {
+        link_preview_options: { is_disabled: true },
+      });
+      return false;
+    }
+  }
 }
 
 export function createBot(config: Config, db: Db): Bot {
@@ -147,21 +381,23 @@ export function createBot(config: Config, db: Db): Bot {
     }
   });
 
-  // The bot's one allowed reply: the board link. Falls through to the message
-  // handler so a CA pasted in the same message is still ingested.
+  // Member-initiated interaction: the board link, or a watchlist subcommand.
+  // Falls through to the message handler so a CA pasted in the same message is
+  // still ingested — unless a subcommand already consumed that address.
   bot.command('groupie', async (ctx, next) => {
+    let consumedAddress = false;
     if (isGroupChat(ctx) && ctx.from) {
       const group = await ensureGroup(db, ctx.chat.id, ctx.chat.title, { activate: true });
-      // The t.me deep link opens the board inside Telegram; the plain URL is
-      // the fallback until the Mini App is registered in BotFather.
-      const boardUrl = config.miniAppUrl
-        ? `${config.miniAppUrl}?startapp=${group.slug}`
-        : `${config.webAppUrl}/g/${group.slug}`;
-      await ctx.reply(`Groupie board: ${boardUrl}`, {
-        link_preview_options: { is_disabled: true },
-      });
+      consumedAddress = await handleGroupieCommand(
+        db,
+        config,
+        ctx,
+        group,
+        ctx.match,
+        ctx.from.id,
+      );
     }
-    await next();
+    if (!consumedAddress) await next();
   });
 
   // Everything else: silent ingestion.
