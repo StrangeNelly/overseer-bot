@@ -17,7 +17,7 @@ const MINUTE = 60_000;
 const HOUR = 3_600_000;
 
 const FLOOR = THRESHOLDS.rugFloorMcapUsd;
-const BAR = THRESHOLDS.rugReviveMcapUsd;
+const BAR = THRESHOLDS.revivalMcapUsd;
 /** Well under the floor: an ordinary dead-flat reading. */
 const FLAT = 3_000;
 /** Comfortably over the revival bar. */

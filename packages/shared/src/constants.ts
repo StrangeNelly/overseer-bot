@@ -28,8 +28,18 @@ export const THRESHOLDS = {
   rugHideHours: 1,
   /** Round 6: probation this long without a revival is the permanent rug. */
   rugProbationHours: 24,
-  /** Round 6: a hidden token back at/above this mcap is a revival candidate. */
-  rugReviveMcapUsd: 30_000,
+  /**
+   * Round 6: a hidden token back at/above this mcap is a revival candidate.
+   *
+   * Round 13 promoted it to THE revival bar, the only one in the codebase: a
+   * DEAD token's comeback (death.ts's isRevived) is judged against this exact
+   * number too, so probation's comeback and a corpse's comeback can never
+   * drift. Liquidity is not a revival signal anywhere any more — PONS fair
+   * launches lock LP permanently, so every graduated corpse keeps ~$5-6k of
+   * residual liquidity forever and the old $1k liquidity bar would have
+   * resurrected the dead on a ~25h loop (revive -> probation -> die -> revive).
+   */
+  revivalMcapUsd: 30_000,
   /** Round 6: ...and it must hold that, every reading, for this long. */
   rugReviveHoldHours: 3,
   /**
@@ -43,14 +53,29 @@ export const THRESHOLDS = {
   deadLiquidityUsd: 250,
   /** Call dies when liquidity falls below this fraction of liquidity-at-call. */
   liquidityDropDeathRatio: 0.05,
+  /**
+   * Round 11: a liquidity-based death (the $250 token floor AND the per-call
+   * 95% collapse) must hold for at least this long before it is believed.
+   *
+   * Live case OMNI: a 6-minute-old pool was called at 19:02:11 and declared
+   * dead three seconds later off a single liquidity=$0 first reading, while the
+   * chart traded happily to $132k — newborn-pool indexing lag, not a rug. A
+   * real drain stays drained, so confirmation costs nothing.
+   */
+  liquidityDeathMinMinutes: 10,
+  /** Round 11: ...and across at least this many readings — one lonely observation is not "sustained". */
+  liquidityDeathMinReadings: 3,
+  /**
+   * Round 11: no liquidity-based death at all this soon after the launch clock
+   * (token_created_at, else first_seen_at). Brand-new pools are exactly where
+   * the indexers lie. Mcap rules (rug probation floor/collapse, the 48h
+   * never-graduated rule) are NOT affected — they read a different signal.
+   */
+  newbornGraceMinutes: 30,
   /** Launchpad token that never graduates dies after this long. */
   ungraduatedDeathHours: 48,
   /** DexScreener pair below this liquidity is dust — not proof of a real pool. */
   dustLiquidityUsd: 1_000,
-  /** Dead token showing at least this much liquidity again = revived. */
-  reviveLiquidityUsd: 1_000,
-  /** Dead curve token back above this mcap = revived. */
-  reviveCurveMcapUsd: 16_000,
   /**
    * Round 10 (collapse rule): mcap at or below this fraction of peak-since-call
    * is a collapse, not a dip. Sell-off rugs park just ABOVE the absolute floor

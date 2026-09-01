@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { calls, snapshots, tokens, watches, type Db } from '@groupie/db';
 import {
   IDLE_AFTER_HOURS,
@@ -13,7 +13,12 @@ import * as gt from '../market/geckoterminal.js';
 import { mcapAtTimestamp, resolveToken } from '../market/resolve.js';
 import type { MarketSnapshot } from '../market/types.js';
 import { runAlertPass } from './alerts.js';
-import { callLiquidityDeath, classifyTokenDeath, isRevived } from './death.js';
+import {
+  callLiquidityDeath,
+  classifyTokenDeath,
+  isRevived,
+  type LiquidityReading,
+} from './death.js';
 import { markTokenDead } from './markDead.js';
 import { runProbationSweep } from './rugSweep.js';
 import { runSleeperScan } from './sleeperScan.js';
@@ -63,6 +68,120 @@ function isoNow(): string {
 function ageHours(token: TokenRow): number {
   const born = token.tokenCreatedAt ?? token.firstSeenAt;
   return (Date.now() - born.getTime()) / 3_600_000;
+}
+
+/**
+ * Round 11: how far back a liquidity death looks for its evidence.
+ *
+ * The rule itself only needs 10 unbroken minutes, but the window has to be
+ * sized to the SLOWEST living tier, not the fastest: an idle token polls hourly,
+ * so a 15-minute window would hold at most one of its readings and no idle coin
+ * could ever die of a drained pool again. So: one more reading than the rule
+ * demands, at the idle cadence — 4h today, and it follows the tier if that ever
+ * moves.
+ */
+const LIQUIDITY_WINDOW_MS =
+  (THRESHOLDS.liquidityDeathMinReadings + 1) * POLL_TIERS.idleSeconds * 1_000;
+
+/**
+ * ...and the row cap is what keeps that window cheap for the FAST tiers: a
+ * fresh token polls every 45 seconds, so 4h of it would be ~320 rows per token
+ * per batch. The newest 24 readings are ~18 minutes there — comfortably more
+ * than the 10 the rule can use — and the verdict only ever walks back from the
+ * newest reading, so older rows could not change an answer anyway.
+ */
+const LIQUIDITY_MAX_READINGS = sql.raw('24');
+
+// db.execute bypasses Drizzle's column decoders, so postgres-js hands these
+// back as strings (timestamptz, double precision) — coerce at the read site.
+type LiquidityRow = {
+  token_id: number | string;
+  at: Date | string;
+  liquidity_usd: number | string | null;
+} & Record<string, unknown>;
+
+/**
+ * Recent liquidity readings per token — the evidence behind every round-11
+ * liquidity verdict, in ONE statement for the whole batch (same shape as
+ * alerts.ts's loadSeries and rugSweep.ts's loadBuckets).
+ *
+ * Rows with no liquidity are left out rather than returned as holes: a poll
+ * that couldn't measure is not evidence either way, and death.ts's run walk
+ * treats a gap and an absent reading identically.
+ *
+ * Always read BEFORE applySnapshot writes this poll's row — the caller appends
+ * the live reading itself (liquiditySeries), so loading afterwards would count
+ * it twice.
+ */
+async function loadLiquidityReadings(
+  db: Db,
+  tokenIds: number[],
+  sinceMs: number,
+): Promise<Map<number, LiquidityReading[]>> {
+  const byToken = new Map<number, LiquidityReading[]>();
+  if (tokenIds.length === 0) return byToken;
+
+  const rows = await db.execute<LiquidityRow>(sql`
+    select token_id, at, liquidity_usd
+    from (
+      select ${snapshots.tokenId} as token_id,
+             ${snapshots.at} as at,
+             ${snapshots.liquidityUsd} as liquidity_usd,
+             row_number() over (
+               partition by ${snapshots.tokenId} order by ${snapshots.at} desc
+             ) as rn
+      from ${snapshots}
+      where ${and(
+        inArray(snapshots.tokenId, tokenIds),
+        gte(snapshots.at, new Date(sinceMs)),
+        isNotNull(snapshots.liquidityUsd),
+      )}
+    ) s
+    where rn <= ${LIQUIDITY_MAX_READINGS}
+    order by token_id, at
+  `);
+
+  for (const row of rows) {
+    if (row.liquidity_usd === null) continue;
+    const liquidityUsd = Number(row.liquidity_usd);
+    const atMs = new Date(row.at).getTime();
+    const tokenId = Number(row.token_id);
+    if (!Number.isFinite(liquidityUsd) || !Number.isFinite(atMs)) continue;
+    if (!Number.isFinite(tokenId)) continue;
+    const list = byToken.get(tokenId) ?? [];
+    list.push({ atMs, liquidityUsd });
+    byToken.set(tokenId, list);
+  }
+  return byToken;
+}
+
+/**
+ * The one-token form, for the poll paths that judge a single token. Phases that
+ * can never reach a liquidity verdict skip the query entirely: an unresolved
+ * token has no pair, and a curve pool's reserve is the curve's own float rather
+ * than a market anyone can trade out of.
+ */
+async function loadTokenLiquidity(
+  db: Db,
+  tokenId: number,
+  phase: TokenRow['phase'],
+): Promise<LiquidityReading[]> {
+  if (phase !== 'graduated') return [];
+  const byToken = await loadLiquidityReadings(db, [tokenId], Date.now() - LIQUIDITY_WINDOW_MS);
+  return byToken.get(tokenId) ?? [];
+}
+
+/**
+ * History plus the reading this poll just took. death.ts judges the LAST entry
+ * as "now", so a poll that produced no snapshot (or no liquidity key) appends a
+ * null and can never sustain a death on yesterday's numbers.
+ */
+function liquiditySeries(
+  history: LiquidityReading[],
+  snap: MarketSnapshot | null,
+  nowMs: number,
+): LiquidityReading[] {
+  return [...history, { atMs: nowMs, liquidityUsd: snap?.liquidityUsd ?? null }];
 }
 
 /**
@@ -158,12 +277,18 @@ async function fillCallBaselines(
   }
 }
 
-/** Write one poll result: snapshot row, cached market state, peaks, deaths. */
+/**
+ * Write one poll result: snapshot row, cached market state, peaks, deaths.
+ *
+ * `history` is the recent liquidity window loaded before this write (empty when
+ * the token cannot be judged on liquidity at all — see the poll paths).
+ */
 async function applySnapshot(
   db: Db,
   token: TokenRow,
   snap: MarketSnapshot,
   opts: PollOpts,
+  history: LiquidityReading[],
 ): Promise<void> {
   await db.insert(snapshots).values({
     tokenId: token.id,
@@ -200,13 +325,17 @@ async function applySnapshot(
   }
 
   // Per-call liquidity-collapse death (>95% down from call-time liquidity).
+  // Round 11: judged over the persistence window, not this one reading, and
+  // skipped entirely inside the newborn grace (callLiquidityDeath owns both).
+  const series = liquiditySeries(history, snap, Date.now());
+  const age = ageHours(token);
   if (snap.liquidityUsd !== null && token.phase === 'graduated') {
     const collapsed = await db
       .select({ id: calls.id, liquidityAtCall: calls.liquidityAtCall })
       .from(calls)
       .where(and(eq(calls.tokenId, token.id), eq(calls.status, 'active')));
     for (const call of collapsed) {
-      if (callLiquidityDeath(call.liquidityAtCall, snap.liquidityUsd)) {
+      if (callLiquidityDeath(call.liquidityAtCall, series, Date.now(), age)) {
         // The token is still alive, so only the call carries this death: stamp
         // it here or the board has no date/reason to show or sort by.
         await db
@@ -220,12 +349,18 @@ async function applySnapshot(
   // Reposts of a call that died on its own liquidity ask for a revive check;
   // the token itself is alive, so pollDead never sees these. Runs after the
   // death pass above so a still-collapsed call isn't flipped and re-killed.
-  await applyCallRevivals(db, token, snap);
+  await applyCallRevivals(db, token, snap, series, age);
 
   publish({ type: 'price_update', tokenId: token.id, mcapUsd: snap.mcapUsd });
 }
 
-async function applyCallRevivals(db: Db, token: TokenRow, snap: MarketSnapshot): Promise<void> {
+async function applyCallRevivals(
+  db: Db,
+  token: TokenRow,
+  snap: MarketSnapshot,
+  series: LiquidityReading[],
+  age: number,
+): Promise<void> {
   const requested = await db
     .select({ id: calls.id, status: calls.status, liquidityAtCall: calls.liquidityAtCall })
     .from(calls)
@@ -242,7 +377,9 @@ async function applyCallRevivals(db: Db, token: TokenRow, snap: MarketSnapshot):
   if (snap.liquidityUsd === null) return; // unknown is never evidence, either way
   for (const call of requested) {
     if (call.status !== 'died') continue;
-    if (callLiquidityDeath(call.liquidityAtCall, snap.liquidityUsd)) continue;
+    // Still collapsed on the same persistence rule that killed it — one healthy
+    // reading is enough to break the run, which is exactly the repost's point.
+    if (callLiquidityDeath(call.liquidityAtCall, series, Date.now(), age)) continue;
     // diedAt/deathReason stay as the call's last-death record (same convention
     // as tokens.died_at/death_reason); the next death overwrites them.
     await db.update(calls).set({ status: 'active' }).where(eq(calls.id, call.id));
@@ -251,14 +388,28 @@ async function applyCallRevivals(db: Db, token: TokenRow, snap: MarketSnapshot):
 }
 
 /**
- * Instant death from one reading. Retracing to the curve floor is deliberately
- * NOT here any more (docs/decisions.md round 6) — the rug sweep hides those,
- * with a comeback path — so this no longer needs the token's all-time peak.
- * Round 10's collapse rule is peak-relative and lives there for the same
- * reason: it is a claim about a sustained hour, not about one reading.
+ * Retracing to the curve floor is deliberately NOT here any more
+ * (docs/decisions.md round 6) — the rug sweep hides those, with a comeback path
+ * — so this no longer needs the token's all-time peak. Round 10's collapse rule
+ * is peak-relative and lives there for the same reason: it is a claim about a
+ * sustained hour, not about one reading.
+ *
+ * Since round 11 the liquidity floor is a sustained claim too: `history` plus
+ * this poll's reading is the evidence, and 48h-style age rules are the only
+ * verdicts one reading can still produce.
  */
-async function checkDeath(db: Db, token: TokenRow, snap: MarketSnapshot | null): Promise<void> {
-  const reason = classifyTokenDeath({ phase: token.phase, ageHours: ageHours(token) }, snap);
+async function checkDeath(
+  db: Db,
+  token: TokenRow,
+  snap: MarketSnapshot | null,
+  history: LiquidityReading[],
+): Promise<void> {
+  const nowMs = Date.now();
+  const reason = classifyTokenDeath(
+    { phase: token.phase, ageHours: ageHours(token) },
+    liquiditySeries(history, snap, nowMs),
+    nowMs,
+  );
   if (reason) await markTokenDead(db, token, reason);
 }
 
@@ -266,7 +417,8 @@ async function pollUnresolved(db: Db, token: TokenRow, opts: PollOpts): Promise<
   const resolved = await resolveToken(token.address);
   if (!resolved) {
     await db.update(tokens).set({ lastPolledAt: new Date() }).where(eq(tokens.id, token.id));
-    await checkDeath(db, token, null);
+    // An unresolved token has no liquidity verdict to reach — only the 48h rule.
+    await checkDeath(db, token, null, []);
     return;
   }
   await db
@@ -287,8 +439,11 @@ async function pollUnresolved(db: Db, token: TokenRow, opts: PollOpts): Promise<
     })
     .where(eq(tokens.id, token.id));
   const fresh = { ...token, ...resolved, phase: resolved.phase } as TokenRow;
-  await applySnapshot(db, fresh, resolved.snapshot, opts);
-  await checkDeath(db, fresh, resolved.snapshot);
+  // Normally a token's FIRST successful read, so the window is usually empty —
+  // which is precisely why OMNI (dead 3 seconds after the call) cannot repeat.
+  const history = await loadTokenLiquidity(db, token.id, resolved.phase);
+  await applySnapshot(db, fresh, resolved.snapshot, opts, history);
+  await checkDeath(db, fresh, resolved.snapshot, history);
   publish({ type: 'token_resolved', tokenId: token.id, symbol: resolved.symbol });
   console.log(
     `resolved ${resolved.symbol ?? token.address} (${resolved.phase}) mcap=$${Math.round(resolved.snapshot.mcapUsd ?? 0).toLocaleString()}`,
@@ -321,27 +476,51 @@ async function pollCurve(db: Db, token: TokenRow, opts: PollOpts): Promise<void>
     console.log(`token ${token.symbol ?? token.address} graduated`);
   }
   const snap = gt.gtSnapshot(pool);
-  await applySnapshot(db, token, snap, opts);
-  await checkDeath(db, token, snap);
+  // Loaded only when this poll just graduated the token — see loadTokenLiquidity.
+  const history = await loadTokenLiquidity(db, token.id, token.phase);
+  await applySnapshot(db, token, snap, opts, history);
+  await checkDeath(db, token, snap, history);
 }
 
 /**
  * DexScreener returns ONE best pair per token, and for a curve-phase or thinly
- * traded token that can be a parasitic dust pool with an absurd FDV. A drained
- * pool at the token's OWN address must still flow through — that is the death
- * signal — so only a different, dust-thin, wildly-repriced pair is rejected.
+ * traded token that can be a parasitic dust pool with an absurd FDV — or, since
+ * round 11, an empty shell of the real pool that the indexer has not caught up
+ * with. A drained pool at the token's OWN address must still flow through (that
+ * is the death signal), so every case below starts from a DIFFERENT, dust-thin
+ * pair address.
+ *
+ * Two ways to distrust it, either one enough:
+ *
+ * - the pair reprices the token absurdly (>20x the cached mcap): a parasite;
+ * - round 11: our cached liquidity was >= 10x what this pair reports. OMNI's
+ *   liquidity=$0 first reading is the shape — a best-pair switch to dust while
+ *   we already knew a healthier pool is indexer lag, not a rug, and the mcap
+ *   comparison never applied to it (the dust pair's mcap looked normal).
+ *
+ * Exported for tests.
  */
-function isSuspiciousPair(token: TokenRow, pair: ds.DsPair): boolean {
-  return (
-    pair.pairAddress !== token.poolAddress &&
-    (pair.liquidityUsd ?? 0) < THRESHOLDS.dustLiquidityUsd &&
-    token.mcapUsd !== null &&
-    (pair.mcapUsd ?? 0) > 20 * token.mcapUsd
-  );
+export function isSuspiciousPair(token: TokenRow, pair: ds.DsPair): boolean {
+  if (pair.pairAddress === token.poolAddress) return false;
+  const pairLiquidityUsd = pair.liquidityUsd ?? 0;
+  if (pairLiquidityUsd >= THRESHOLDS.dustLiquidityUsd) return false;
+  // Round 11. With a $0 reading any cached liquidity clears "10x healthier",
+  // which is the intended reading of the OMNI case: a foreign dust pair is
+  // never allowed to be the drain evidence.
+  if (token.liquidityUsd !== null && token.liquidityUsd >= 10 * pairLiquidityUsd) return true;
+  return token.mcapUsd !== null && (pair.mcapUsd ?? 0) > 20 * token.mcapUsd;
 }
 
 async function pollGraduatedBatch(db: Db, batch: TokenRow[], opts: PollOpts): Promise<void> {
   const pairs = await ds.getBestPairs(batch.map((t) => t.address));
+  // One statement for the whole batch, read BEFORE any snapshot row is written:
+  // every token here is graduated, so every one of them can reach a liquidity
+  // verdict and needs its window.
+  const history = await loadLiquidityReadings(
+    db,
+    batch.map((t) => t.id),
+    Date.now() - LIQUIDITY_WINDOW_MS,
+  );
   for (const token of batch) {
     const pair = pairs.get(token.address);
     if (!pair) {
@@ -367,8 +546,9 @@ async function pollGraduatedBatch(db: Db, batch: TokenRow[], opts: PollOpts): Pr
         .where(eq(tokens.id, token.id));
     }
     const snap = ds.dsSnapshot(pair);
-    await applySnapshot(db, token, snap, opts);
-    await checkDeath(db, token, snap);
+    const readings = history.get(token.id) ?? [];
+    await applySnapshot(db, token, snap, opts, readings);
+    await checkDeath(db, token, snap, readings);
   }
 }
 
@@ -441,7 +621,11 @@ async function pollDead(db: Db, token: TokenRow, opts: PollOpts): Promise<void> 
       publish({ type: 'token_revived', tokenId: token.id });
       console.log(`token ${token.symbol ?? token.address} REVIVED`);
     }
-    await applySnapshot(db, { ...token, phase } as TokenRow, snap, opts);
+    // A dead token writes no snapshots, so this window is all but always empty
+    // — loaded anyway so the revived token's first poll is judged like any
+    // other graduated poll rather than as a special case.
+    const history = await loadTokenLiquidity(db, token.id, phase);
+    await applySnapshot(db, { ...token, phase } as TokenRow, snap, opts, history);
   } else {
     // Still dead: no snapshot row and no peak tracking, but a call created
     // after the death still needs its at-call baseline.

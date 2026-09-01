@@ -240,8 +240,9 @@ async function runHidePass(db: Db, nowMs: number): Promise<number> {
 
 /**
  * Bring back everything on probation that climbed over the revival mcap and
- * held it. A dead token is skipped: liquidity_floor means a drained pool, and a
- * drained pool cannot revive on mcap (docs/decisions.md round 6).
+ * held it. A dead token is skipped here because its comeback belongs to the
+ * daily dead-poll (scheduler.ts's pollDead), not to probation — round 13 points
+ * both at the same $30k bar, so there is one answer either way.
  */
 async function runRevivePass(db: Db, hiddenTokens: TokenRow[], nowMs: number): Promise<number> {
   const candidates = hiddenTokens.filter((t) => t.phase !== 'dead');
@@ -274,7 +275,7 @@ async function runRevivePass(db: Db, hiddenTokens: TokenRow[], nowMs: number): P
     revived += 1;
     publish({ type: 'rug_revived', tokenId: token.id });
     console.log(
-      `rug probation: REVIVED ${label(token)} — held ${usd(THRESHOLDS.rugReviveMcapUsd)}+ for ${THRESHOLDS.rugReviveHoldHours}h`,
+      `rug probation: REVIVED ${label(token)} — held ${usd(THRESHOLDS.revivalMcapUsd)}+ for ${THRESHOLDS.rugReviveHoldHours}h`,
     );
   }
   return revived;

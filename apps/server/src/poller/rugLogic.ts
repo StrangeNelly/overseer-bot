@@ -186,8 +186,10 @@ export function shouldRevive(buckets: ReviveBucket[], nowMs: number): boolean {
 
   // At or above: the owner's rule is ">= $30k". An unmeasurable minimum is not
   // proof the token held, so it breaks the run like any dip would.
+  // THRESHOLDS.revivalMcapUsd is the single revival bar (round 13): death.ts's
+  // isRevived reads the same constant, so the two can never drift apart.
   const holds = (bucket: ReviveBucket): boolean =>
-    Number.isFinite(bucket.minMcapUsd) && bucket.minMcapUsd >= THRESHOLDS.rugReviveMcapUsd;
+    Number.isFinite(bucket.minMcapUsd) && bucket.minMcapUsd >= THRESHOLDS.revivalMcapUsd;
   if (!holds(newest)) return false;
 
   let startMs = newest.bucketStartMs;
