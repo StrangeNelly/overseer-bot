@@ -19,6 +19,12 @@ Running record of decisions made with the owner. Newest at the bottom.
 
 - COV link label in Phanes: unidentified; dropped as non-blocking.
 
+## 2026-09-02 — Collapse rugs + Retraced honesty (round 10)
+
+- Live case HDFI: sell-off rug to $8,249 ($249 above the $8K hide floor), LP down to 18.8% of call-time (above the 5% collapse line — LP survived because supply was dumped, not pulled), -99% from an $872K peak → showed as "Retraced 0.03x". Every rule individually correct; composition wrong for the dump-rug pattern.
+- **New probation trigger (collapse rule):** sustained 1h (same bucket-maxima/coverage/freshness discipline) at mcap <= 10% of peak-since-call AND mcap < $30K absolute → rug-hidden into the existing probation (30-min polls, $30K/3h revival, 24h expiry). The $30K ceiling keeps big bleeders (e.g. LIGMA $996K at 0.37x) visible — a loss is not a rug. The $8K absolute trigger stays.
+- **Retraced liveness clause** (restores round 1's "NOT dying" intent): retraced = peak >= 3x AND 40–85% off peak AND liquidity >= $1K dust. Beyond 85% off peak is collapse territory — probation's job, never a "dip". Volume is NOT a liveness signal (rug-day churn: HDFI printed $1.4M volume while dying).
+
 ## 2026-09-02 — "Sleepers" chain-wide discovery stream (round 9)
 
 - Owner idea: automate the DexScreener filter-browse loop. Every **3h**, scan ALL of Robinhood Chain (GeckoTerminal pools by 24h volume, ~200 deep) and surface the top **3** coins per band (same four bands as Ranging) that are sitting at a mcap without being rugs. **This is the first uncurated surface** — its own tab, clearly framed as chain-wide research leads, never mixed with the group's calls.
