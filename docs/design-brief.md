@@ -67,3 +67,13 @@ Real examples from production to use in mockups: HDFI called $256K → $609K (2.
 ## Non-negotiables
 
 Simple — the chat curates, the board displays; no filter forests. Neutral framing — retrace/range data yes, advice never. Dark-first. One system: compact, mobile, desktop must be recognizably the same product.
+
+---
+
+# Design pass 2 addendum (2026-09-02, owner feedback from live use)
+
+The Degen Neon system is live and working. This pass refines, it does not rebrand. Three directives:
+
+1. **Wayfinding.** The app never says where you are. The active view needs a clear headline — RANGING, SLEEPERS, the board sections on desktop — visible at a glance, in the existing type system (Space Grotesk display). The "« board" breadcrumb is not enough. Mobile tabs partially cover this; desktop full-views (ranging/sleepers) and any pushed view need explicit titles.
+2. **More visualisation.** Owner: "looks like a terminal now, which is fine, but I want more visualisation." The data should be SHOWN, not only listed — think: band bars everywhere ranges appear, mcap-position dots, section-level micro-charts (e.g. the day's call outcomes as a strip), bigger sparklines on spotlight cards, a visual died/alive ratio in Pulse. Stay inside the existing palette laws (green/red = P&L only; cyan = analysis; magenta = brand).
+3. **Link affordance audit.** Every card variant must offer the trade/research links — list rows have tap/hover pills, but desktop spotlight/hero cards (Retraced, Reviving, top Runner) shipped with none. (The functional fix ships in code before this pass; the design pass owns making the affordance consistent and discoverable everywhere, including the new website link.)
