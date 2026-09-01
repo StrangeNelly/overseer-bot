@@ -43,6 +43,13 @@
       "when": 1788280182477,
       "tag": "0005_bitter_blindfold",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788287923885,
+      "tag": "0006_friendly_doctor_doom",
+      "breakpoints": true
     }
   ]
 }

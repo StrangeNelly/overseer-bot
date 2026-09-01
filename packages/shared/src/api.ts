@@ -31,6 +31,12 @@ export interface BoardCard {
   symbol: string | null;
   name: string | null;
   imageUrl: string | null;
+  /**
+   * The token's X profile, from tokens.socials (docs/decisions.md round 9:
+   * every coin card gets a link to its X account where known). null when we
+   * have never seen one.
+   */
+  twitterUrl: string | null;
   phase: TokenPhase;
   callStatus: CallStatus;
   mcapUsd: number | null;
@@ -147,4 +153,58 @@ export interface RangeBoardResponse {
   generatedAt: string;
   /** Sorted by inRangeHours desc. */
   cards: RangeCard[];
+}
+
+/**
+ * Sleepers: the chain-wide discovery stream (docs/decisions.md round 9).
+ *
+ * These are NOT the group's calls. Every three hours the server scans all of
+ * Robinhood Chain by 24h volume and keeps the coins that are quietly trading
+ * hard for their size. Nothing here is tracked, polled, or alerted on — a coin
+ * only becomes tracked when a member posts it in chat.
+ *
+ * There is no history behind an entry (no sparkline) and no call baseline (no
+ * multiple): turnover is the number this surface exists to show.
+ */
+export interface SleeperEntry {
+  address: string;
+  symbol: string | null;
+  name: string | null;
+  imageUrl: string | null;
+  /** The default view only serves entries that have one. */
+  twitterUrl: string | null;
+  websiteUrl: string | null;
+  mcapUsd: number;
+  vol24Usd: number;
+  liquidityUsd: number;
+  txns24: number;
+  /** vol24Usd / mcapUsd — the ranking number, and the row's hero figure. */
+  turnover: number;
+  /** ISO; when the pool was created (the coin's age on this surface). */
+  poolCreatedAt: string | null;
+  /**
+   * How long this address has been listed by consecutive scans, from
+   * sleeper_seen.firstListedAt. The persistence marker: still qualifying is
+   * still interesting (round 9 — this replaces forced rotation).
+   */
+  onListSinceHours: number;
+  links: TradingLinkRow;
+}
+
+export interface SleeperBand {
+  loUsd: number;
+  hiUsd: number;
+  /** Up to SLEEPERS.servePerBand, ranked by turnover desc. May be empty. */
+  entries: SleeperEntry[];
+}
+
+/**
+ * GET /api/g/:slug/sleepers?all=0|1
+ * `all=1` drops the twitter-required default. Bands are always all four of
+ * RANGE_PRESETS, in ascending order, so an empty band can say so.
+ */
+export interface SleepersResponse {
+  /** ISO instant of the scan behind this payload; null before the first one. */
+  refreshedAt: string | null;
+  bands: SleeperBand[];
 }

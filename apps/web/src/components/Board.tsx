@@ -30,6 +30,10 @@ interface BoardProps {
   ranging: ReactNode;
   /** null until the ranging board has loaded once. */
   rangingCount: number | null;
+  /** Sleepers tab body — the chain-wide stream, also its own endpoint. */
+  sleepers: ReactNode;
+  /** null until the sleepers stream has loaded once. */
+  sleepersCount: number | null;
   /** Per-card state changes worth a ceremony this update. */
   ceremonies: ReadonlyMap<number, Ceremony>;
 }
@@ -59,6 +63,8 @@ export function Board({
   onBin,
   ranging,
   rangingCount,
+  sleepers,
+  sleepersCount,
   ceremonies,
 }: BoardProps) {
   const visible = useVisibleSections(board, hiddenCallIds);
@@ -68,10 +74,13 @@ export function Board({
   useEffect(() => setOpenId(null), [section]);
 
   const counts = useMemo(() => {
-    const out = { ranging: rangingCount } as Record<SectionKey, number | null>;
+    const out = { ranging: rangingCount, sleepers: sleepersCount } as Record<
+      SectionKey,
+      number | null
+    >;
     for (const { key } of BOARD_SECTIONS) out[key] = visible[key].length;
     return out;
-  }, [visible, rangingCount]);
+  }, [visible, rangingCount, sleepersCount]);
 
   const toggle = (callId: number) => setOpenId((prev) => (prev === callId ? null : callId));
 
@@ -80,6 +89,8 @@ export function Board({
       <SectionTabs value={section} counts={counts} onChange={onSection} />
       {section === 'ranging' ? (
         ranging
+      ) : section === 'sleepers' ? (
+        sleepers
       ) : section === 'reviving' ? (
         <RevivingList cards={visible.reviving} now={now} />
       ) : (

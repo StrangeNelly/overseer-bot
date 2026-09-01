@@ -5,6 +5,7 @@ import type {
   MeResponse,
   RangeBoardResponse,
   RangeDurationHours,
+  SleepersResponse,
 } from '@groupie/shared';
 
 /** Any non-2xx response, or a request that never reached the server (status 0). */
@@ -111,6 +112,18 @@ export function fetchRange(
     hours: String(hours),
   });
   return request<RangeBoardResponse>(`${groupPath(slug)}/range?${params.toString()}`, { signal });
+}
+
+/**
+ * Sleepers: the chain-wide discovery stream. `all` drops the twitter-required
+ * default. Snapshot data on a 3-hourly server scan — never on the live stream.
+ */
+export function fetchSleepers(
+  slug: string,
+  all: boolean,
+  signal?: AbortSignal,
+): Promise<SleepersResponse> {
+  return request<SleepersResponse>(`${groupPath(slug)}/sleepers?all=${all ? '1' : '0'}`, { signal });
 }
 
 export function binCall(slug: string, callId: number): Promise<void> {

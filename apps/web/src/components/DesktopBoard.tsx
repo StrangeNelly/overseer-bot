@@ -29,7 +29,9 @@ interface DesktopBoardProps {
   /** Cards that changed section on this update — the transit set. */
   moved: ReadonlySet<number>;
   rangeSummary: RangeSummary | null;
-  onOpenRanging: (section: SectionKey) => void;
+  /** Total sleeper entries, or null before the stream has loaded once. */
+  sleepersCount: number | null;
+  onOpenTab: (section: SectionKey) => void;
 }
 
 /**
@@ -87,7 +89,8 @@ export function DesktopBoard({
   ceremonies,
   moved,
   rangeSummary,
-  onOpenRanging,
+  sleepersCount,
+  onOpenTab,
 }: DesktopBoardProps) {
   const visible = useVisibleSections(board, hiddenCallIds);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -250,7 +253,7 @@ export function DesktopBoard({
           <div className="range-summary">
             <div className="sect-head">
               <span className="sect-title">RANGING</span>
-              <button type="button" className="link-btn" onClick={() => onOpenRanging('ranging')}>
+              <button type="button" className="link-btn" onClick={() => onOpenTab('ranging')}>
                 open tab ▸
               </button>
             </div>
@@ -271,6 +274,28 @@ export function DesktopBoard({
             ) : (
               <span className="summary-line">open the tab to scan for coilers</span>
             )}
+          </div>
+        </section>
+
+        {/*
+          Sleepers has no column of its own on purpose: the desktop board is
+          the GROUP's board, and the chain-wide stream is a door out of it, not
+          another section of it (docs/decisions.md round 9).
+        */}
+        <section className="desk-block">
+          <div className="range-summary">
+            <div className="sect-head">
+              <span className="sect-title">SLEEPERS</span>
+              <button type="button" className="link-btn" onClick={() => onOpenTab('sleepers')}>
+                open tab ▸
+              </button>
+            </div>
+            <span className="summary-line">
+              {sleepersCount === null
+                ? 'open the tab to scan the whole chain'
+                : `${sleepersCount} chain-wide leads across four bands`}
+            </span>
+            <span className="summary-line">not group calls — uncurated research</span>
           </div>
         </section>
       </div>

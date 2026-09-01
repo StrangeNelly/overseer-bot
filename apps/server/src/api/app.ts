@@ -11,6 +11,7 @@ import { createBoardRoutes } from './board.js';
 import { createHandoffRoutes } from './handoff.js';
 import { requireMember, type ApiEnv } from './membership.js';
 import { createRangeRoutes } from './range.js';
+import { createSleeperRoutes } from './sleepers.js';
 import { createSseRoutes } from './sse.js';
 
 /** serveStatic resolves `root` against the CWD, which is apps/server. */
@@ -71,6 +72,7 @@ export function createApi(db: Db, botApi: Api, config: Config): Hono<ApiEnv> {
   app.use('/api/g/:slug/*', requireMember(db, botApi, config));
   app.route('/', createBoardRoutes(db));
   app.route('/', createRangeRoutes(db));
+  app.route('/', createSleeperRoutes(db));
   app.route('/', createSseRoutes(db));
   // Mini App -> browser handoff. The mint sits under /api/g/:slug/* so it picks
   // up the csrf + requireMember middleware above; the redeem is a PUBLIC GET on

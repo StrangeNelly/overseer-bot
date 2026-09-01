@@ -6,6 +6,7 @@ import type {
   BoardWindow,
   RangeBoardResponse,
   RangeDurationHours,
+  SleepersResponse,
 } from '@groupie/shared';
 import { RANGE_DURATION_HOURS, RANGE_PRESETS } from '@groupie/shared';
 import {
@@ -18,6 +19,7 @@ import {
   fetchBoard,
   fetchMe,
   fetchRange,
+  fetchSleepers,
 } from './api';
 import { readCachedBoard, writeCachedBoard } from './cache';
 import { Board } from './components/Board';
@@ -28,6 +30,7 @@ import { Pulse } from './components/Pulse';
 import { DEFAULT_CONTROLS, Ranging, resolveBand } from './components/Ranging';
 import type { RangeBand, RangeControls } from './components/Ranging';
 import type { SectionKey } from './components/SectionTabs';
+import { Sleepers } from './components/Sleepers';
 import { GhostRows } from './components/Spotlight';
 import { WINDOWS, WindowSwitcher } from './components/WindowSwitcher';
 import { derivePulse, isStale } from './derive';
@@ -46,6 +49,7 @@ import {
 
 const WINDOW_STORAGE_KEY = 'groupie.window';
 const RANGE_STORAGE_KEY = 'groupie.range';
+const SLEEPERS_X_ONLY_STORAGE_KEY = 'groupie.sleepers.xOnly';
 const DEFAULT_WINDOW: BoardWindow = '24h';
 /** Typing a custom band fires on every keystroke; wait for the pause. */
 const RANGE_DEBOUNCE_MS = 400;
@@ -154,6 +158,23 @@ function loadRangeControls(): RangeControls {
 function saveRangeControls(value: RangeControls): void {
   try {
     window.localStorage.setItem(RANGE_STORAGE_KEY, JSON.stringify(value));
+  } catch {
+    // Persisting the preference is best-effort.
+  }
+}
+
+/** Twitter-required is the default view (docs/decisions.md round 9). */
+function loadSleepersXOnly(): boolean {
+  try {
+    return window.localStorage.getItem(SLEEPERS_X_ONLY_STORAGE_KEY) !== '0';
+  } catch {
+    return true;
+  }
+}
+
+function saveSleepersXOnly(value: boolean): void {
+  try {
+    window.localStorage.setItem(SLEEPERS_X_ONLY_STORAGE_KEY, value ? '1' : '0');
   } catch {
     // Persisting the preference is best-effort.
   }
@@ -346,6 +367,12 @@ export default function App() {
   const [range, setRange] = useState<RangeBoardResponse | null>(null);
   const [rangeError, setRangeError] = useState<string | null>(null);
   const [rangeLoading, setRangeLoading] = useState(false);
+  // Sleepers lives in memory only: it is a 3-hourly snapshot of the whole
+  // chain, not this group's board, so there is nothing to cache across reloads.
+  const [sleepersXOnly, setSleepersXOnly] = useState<boolean>(loadSleepersXOnly);
+  const [sleepers, setSleepers] = useState<SleepersResponse | null>(null);
+  const [sleepersError, setSleepersError] = useState<string | null>(null);
+  const [sleepersLoading, setSleepersLoading] = useState(false);
 
   const slug = boot.kind === 'ready' ? boot.slug : null;
   const slugRef = useRef<string | null>(null);
@@ -355,6 +382,9 @@ export default function App() {
   const debounceRef = useRef<number | null>(null);
   const rangeSeqRef = useRef(0);
   const rangeQueryRef = useRef<RangeQuery | null>(null);
+  const sleepersSeqRef = useRef(0);
+  const sleepersXOnlyRef = useRef(sleepersXOnly);
+  sleepersXOnlyRef.current = sleepersXOnly;
   /** True once the server has answered: the cache never outranks a real payload. */
   const paintedRef = useRef(false);
 
@@ -468,11 +498,32 @@ export default function App() {
     }
   }, []);
 
+  const loadSleepers = useCallback(async (xOnly: boolean, options: { silent?: boolean } = {}) => {
+    const currentSlug = slugRef.current;
+    if (!currentSlug) return;
+    // Latest-wins, exactly like the board and ranging: a slow answer for the
+    // filter the user just left must not overwrite the one on screen.
+    const seq = ++sleepersSeqRef.current;
+    if (!options.silent) setSleepersLoading(true);
+    try {
+      const data = await fetchSleepers(currentSlug, !xOnly);
+      if (seq !== sleepersSeqRef.current) return;
+      setSleepers(data);
+      setSleepersError(null);
+    } catch (err) {
+      if (seq !== sleepersSeqRef.current) return;
+      setSleepersError(describe(err));
+    } finally {
+      if (!options.silent && seq === sleepersSeqRef.current) setSleepersLoading(false);
+    }
+  }, []);
+
   /** Fixed for the life of the page: the launch payload only exists in the webview. */
   const inTelegram = useMemo(() => tgInitData() !== null, []);
   const layout = useLayoutMode(inTelegram);
   const rangeBand = useMemo(() => resolveBand(rangeControls), [rangeControls]);
   const rangingActive = section === 'ranging';
+  const sleepersActive = section === 'sleepers';
   const rangeHours = rangeControls.hours;
   const customBand = rangeControls.presetIndex === null;
 
@@ -486,6 +537,13 @@ export default function App() {
     const id = window.setTimeout(() => void loadRange(query), customBand ? RANGE_DEBOUNCE_MS : 0);
     return () => window.clearTimeout(id);
   }, [slug, rangingActive, rangeBand, rangeHours, customBand, loadRange]);
+
+  // Sleepers is a 3-hourly server snapshot, so it never rides the live stream:
+  // it loads when its tab opens, when the X-only toggle flips, and on focus.
+  useEffect(() => {
+    if (!slug || !sleepersActive) return;
+    void loadSleepers(sleepersXOnly);
+  }, [slug, sleepersActive, sleepersXOnly, loadSleepers]);
 
   const scheduleRefetch = useCallback(() => {
     if (debounceRef.current !== null) return;
@@ -529,6 +587,7 @@ export default function App() {
       void loadBoard({ silent: true });
       const query = rangeQueryRef.current;
       if (rangingActive && query) void loadRange(query, { silent: true });
+      if (sleepersActive) void loadSleepers(sleepersXOnlyRef.current, { silent: true });
     };
     window.addEventListener('focus', onFocus);
     document.addEventListener('visibilitychange', onFocus);
@@ -536,7 +595,7 @@ export default function App() {
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onFocus);
     };
-  }, [slug, loadBoard, loadRange, rangingActive]);
+  }, [slug, loadBoard, loadRange, loadSleepers, rangingActive, sleepersActive]);
 
   // Keeps every "3h" on the board honest without a refetch.
   useEffect(() => {
@@ -558,6 +617,15 @@ export default function App() {
     const query = rangeQueryRef.current;
     if (query) void loadRange(query);
   }, [loadRange]);
+
+  const onSleepersXOnly = useCallback((next: boolean) => {
+    setSleepersXOnly(next);
+    saveSleepersXOnly(next);
+  }, []);
+
+  const onSleepersRetry = useCallback(() => {
+    void loadSleepers(sleepersXOnlyRef.current);
+  }, [loadSleepers]);
 
   const onBin = useCallback(
     async (card: BoardCard) => {
@@ -639,6 +707,23 @@ export default function App() {
         : null,
     };
   }, [range]);
+  // Total entries actually shown, across every band — the SLPRS tab count.
+  const sleepersCount = useMemo(
+    () => (sleepers ? sleepers.bands.reduce((sum, band) => sum + band.entries.length, 0) : null),
+    [sleepers],
+  );
+  // One element, shared by the mobile tab body and the desktop panel.
+  const sleepersPanel = (
+    <Sleepers
+      data={sleepers}
+      loading={sleepersLoading}
+      error={sleepersError}
+      onRetry={onSleepersRetry}
+      xOnly={sleepersXOnly}
+      onXOnly={onSleepersXOnly}
+      now={now}
+    />
+  );
 
   if (boot.kind === 'loading') {
     return <Screen title="overseer" message="Opening the board…" />;
@@ -785,21 +870,25 @@ export default function App() {
 
         {board ? (
           desktop ? (
-            section === 'ranging' ? (
+            section === 'ranging' || section === 'sleepers' ? (
               <div className="desk-ranging">
                 <button type="button" className="link-btn back-btn" onClick={() => setSection('fresh')}>
                   ◂ board
                 </button>
-                <Ranging
-                  controls={rangeControls}
-                  onControls={onRangeControls}
-                  band={rangeBand}
-                  data={range}
-                  loading={rangeLoading}
-                  error={rangeError}
-                  onRetry={onRangeRetry}
-                  now={now}
-                />
+                {section === 'sleepers' ? (
+                  sleepersPanel
+                ) : (
+                  <Ranging
+                    controls={rangeControls}
+                    onControls={onRangeControls}
+                    band={rangeBand}
+                    data={range}
+                    loading={rangeLoading}
+                    error={rangeError}
+                    onRetry={onRangeRetry}
+                    now={now}
+                  />
+                )}
               </div>
             ) : (
               <DesktopBoard
@@ -811,7 +900,8 @@ export default function App() {
                 ceremonies={change.ceremonies}
                 moved={change.moved}
                 rangeSummary={rangeSummary}
-                onOpenRanging={setSection}
+                sleepersCount={sleepersCount}
+                onOpenTab={setSection}
               />
             )
           ) : (
@@ -837,6 +927,8 @@ export default function App() {
                   now={now}
                 />
               }
+              sleepersCount={sleepersCount}
+              sleepers={sleepersPanel}
             />
           )
         ) : boardError ? (

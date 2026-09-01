@@ -1525,6 +1525,116 @@ a {
   color: var(--dim);
 }
 
+/* ---------- sleepers (chain-wide discovery stream) ----------
+   The first uncurated surface. Cyan carries the analysis (turnover, the X
+   link, the active filter chip) exactly as it carries "in band" on Ranging;
+   magenta stays the brand and green/red stay P&L. */
+
+.slp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--sect-border);
+}
+
+/* The trust boundary, stated before anything else on the tab. */
+.slp-frame {
+  min-width: 0;
+  font: 400 9.5px var(--font-mono);
+  color: var(--dimmer);
+  line-height: 1.5;
+}
+
+.slp-sep {
+  margin: 0 5px;
+  color: var(--faint);
+}
+
+.slp-nowrap {
+  white-space: nowrap;
+}
+
+/* The X-only filter: a cyan chip, active by default. */
+.chip-x {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 3px 10px;
+}
+
+.chip-x.is-active {
+  background: var(--cyan);
+  border-color: var(--cyan);
+  color: var(--ink);
+  box-shadow: 0 0 10px rgba(35, 217, 255, 0.4);
+}
+
+.slp-bands {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 10px;
+}
+
+.slp-band-head {
+  margin: 0;
+  padding: 14px 14px 5px;
+  font: 600 9.5px var(--font-mono);
+  letter-spacing: 1.5px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.slp-band-empty {
+  margin: 0;
+  padding: 4px 14px 8px;
+  font: 400 10px var(--font-mono);
+  color: var(--dimmer);
+}
+
+.slp-rows {
+  display: flex;
+  flex-direction: column;
+}
+
+/* No call, so no P&L direction: the edge is the neutral hairline. */
+.row-slp {
+  border-left-color: var(--badge-border);
+}
+
+.row-slp:last-child {
+  border-bottom: 0;
+}
+
+/* Turnover is this tab's hero number — cyan, like Ranging's "in band". */
+.slp-turn {
+  font: 700 15px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+  color: var(--cyan);
+  text-shadow: var(--glow-cyan);
+}
+
+/* The X link rides the head line here, not the tap reveal. It has to opt back
+   out of the row's full-bleed tap target twice: `.row-head > *` switches
+   pointer events off for the identity column, and the absolutely-positioned
+   .row-hit would otherwise paint over a static sibling. */
+.pill-x {
+  position: relative;
+  z-index: 1;
+  pointer-events: auto;
+  min-height: 18px;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 8.5px;
+  letter-spacing: 0.6px;
+}
+
+.badge-onlist {
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------- skeleton ---------- */
 
 .ghosts {

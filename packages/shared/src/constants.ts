@@ -100,6 +100,58 @@ export type AlertSettings = { -readonly [K in keyof typeof ALERT_DEFAULTS]: numb
 /** No mention for this long demotes a living token to the idle tier. */
 export const IDLE_AFTER_HOURS = 7 * 24;
 
+/**
+ * "Sleepers" chain-wide discovery stream (docs/decisions.md round 9). Every
+ * scanIntervalHours the poller sweeps ALL of Robinhood Chain by 24h volume and
+ * keeps the coins that are quietly trading hard. These are RESEARCH LEADS, not
+ * group calls, and nothing here is tracked or polled afterwards.
+ */
+export const SLEEPERS = {
+  /** How often the chain-wide sweep runs. */
+  scanIntervalHours: 3,
+  /**
+   * GeckoTerminal serves 20 pools/page and caps the free tier at page 10, so
+   * this is the whole reachable depth: ~200 pools by 24h volume.
+   */
+  maxPages: 10,
+  /** Below this a "pool" is not a market anyone can trade out of. */
+  minLiquidityUsd: 10_000,
+  /** Younger than this is a launch, not a sleeper — it has no 24h to judge. */
+  minPoolAgeHours: 1,
+  /** Older than this is not "quietly trading hard", it is just old. */
+  maxPoolAgeDays: 10,
+  /** Fewer trades than this in 24h is one whale moving size, not activity. */
+  minTxns24: 20,
+  /**
+   * Kept per band by the scan. Deliberately more than the API serves: the
+   * "X only" toggle filters at read time and would otherwise run the band dry.
+   */
+  keepPerBand: 6,
+  /** Served per band by the API, after the per-group and twitter filters. */
+  servePerBand: 3,
+  /** An entry that has been listed this long earns the persistence marker. */
+  persistenceMarkerHours: 3,
+  /** sleeper_seen rows older than this are pruned. */
+  seenRetentionDays: 14,
+} as const;
+
+/**
+ * The tapering 24h-volume floor a coin must clear for its market cap
+ * (owner's spec, docs/decisions.md round 9): `170 * mcap ** 0.4114`.
+ *
+ * The exponent is what makes it a taper rather than a flat percentage — the
+ * two anchors it was fitted to:
+ *   - $20K mcap  -> ~$10K volume (~50% turnover)
+ *   - $1M  mcap  -> ~$50K volume (~5% turnover)
+ *
+ * Returns Infinity for a non-finite or non-positive mcap, so a bad reading can
+ * never pass the floor by accident.
+ */
+export function requiredVolumeUsd(mcapUsd: number): number {
+  if (!Number.isFinite(mcapUsd) || mcapUsd <= 0) return Number.POSITIVE_INFINITY;
+  return 170 * mcapUsd ** 0.4114;
+}
+
 /** Snapshot age tiers (docs/plan.md: snapshots are pruned by age tiers). */
 export const SNAPSHOT_RETENTION = {
   /** Older than this: thinned to one row per bucket per token. */

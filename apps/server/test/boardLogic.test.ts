@@ -31,6 +31,7 @@ function card(spec: CardSpec): BoardCard {
     symbol: `T${spec.callId}`,
     name: null,
     imageUrl: null,
+    twitterUrl: null,
     phase: 'graduated',
     callStatus: spec.callStatus ?? 'active',
     mcapUsd,

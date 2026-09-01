@@ -5,6 +5,7 @@ import {
   BOARD_WINDOWS,
   BOARD_WINDOW_HOURS,
   tradingLinks,
+  twitterUrlFrom,
   type BoardCard,
   type BoardResponse,
   type BoardWindow,
@@ -72,6 +73,9 @@ export function toCard(
     symbol: token.symbol,
     name: token.name,
     imageUrl: token.imageUrl,
+    // tokens.socials is untyped jsonb (DexScreener-shaped when we have it), so
+    // the URL is proved rather than assumed (docs/decisions.md round 9).
+    twitterUrl: twitterUrlFrom(token.socials),
     phase: token.phase,
     callStatus: call.status,
     mcapUsd: token.mcapUsd,

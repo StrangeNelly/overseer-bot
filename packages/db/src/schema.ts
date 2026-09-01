@@ -234,6 +234,62 @@ export const handoffTokens = pgTable(
   (t) => [index('handoff_tokens_user_created_idx').on(t.userId, t.createdAt)],
 );
 
+/**
+ * Sleepers: the latest chain-wide scan (docs/decisions.md round 9).
+ *
+ * A snapshot stream, not a tracking table. Each scan inserts its own rows and
+ * then deletes every older scan_at — history is not needed, and these tokens
+ * are deliberately NOT in `tokens` (nothing here is tracked or polled; a coin
+ * only becomes tracked when someone posts it in chat).
+ *
+ * The scan's own floors guarantee the market columns, so they are NOT NULL:
+ * an entry only exists because its mcap landed in a band, its volume cleared
+ * the tapering requirement, its pool held liquidity and its age was known.
+ */
+export const sleeperEntries = pgTable(
+  'sleeper_entries',
+  {
+    id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
+    scanAt: timestamp('scan_at', { withTimezone: true }).notNull(),
+    /** The RANGE_PRESETS band this entry was bucketed into. */
+    bandLoUsd: doublePrecision('band_lo_usd').notNull(),
+    bandHiUsd: doublePrecision('band_hi_usd').notNull(),
+    /** 1-based, by turnover desc within the band. */
+    rank: integer('rank').notNull(),
+    address: text('address').notNull(), // stored lowercase
+    symbol: text('symbol'),
+    name: text('name'),
+    imageUrl: text('image_url'),
+    twitterUrl: text('twitter_url'),
+    websiteUrl: text('website_url'),
+    poolAddress: text('pool_address').notNull(),
+    mcapUsd: doublePrecision('mcap_usd').notNull(),
+    vol24Usd: doublePrecision('vol24_usd').notNull(),
+    liquidityUsd: doublePrecision('liquidity_usd').notNull(),
+    txns24: integer('txns24').notNull(),
+    /** vol24 / mcap — the ranking figure, stored so reads never recompute it. */
+    turnover: doublePrecision('turnover').notNull(),
+    poolCreatedAt: timestamp('pool_created_at', { withTimezone: true }),
+  },
+  // The read is always "the latest scan, band ascending, rank ascending".
+  (t) => [index('sleeper_entries_scan_idx').on(t.scanAt, t.bandLoUsd, t.rank)],
+);
+
+/**
+ * First/last time an address appeared in a scan. Feeds the persistence marker
+ * ("on list 9h") — round 9 chose persistence over forced rotation: a coin that
+ * still qualifies is still interesting. Pruned by last_listed_at.
+ */
+export const sleeperSeen = pgTable(
+  'sleeper_seen',
+  {
+    address: text('address').primaryKey(), // stored lowercase
+    firstListedAt: timestamp('first_listed_at', { withTimezone: true }).notNull().defaultNow(),
+    lastListedAt: timestamp('last_listed_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('sleeper_seen_last_listed_idx').on(t.lastListedAt)],
+);
+
 export const launchMonitors = pgTable(
   'launch_monitors',
   {

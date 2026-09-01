@@ -170,6 +170,75 @@ export async function getMinuteClose(poolAddress: string, at: Date): Promise<num
   return pickCandleClose(body?.data?.attributes?.ohlcv_list ?? [], atSec);
 }
 
+/**
+ * One row of the chain-wide pool listing. Deliberately flat and nullable: the
+ * Sleepers scan is the only caller, and it does its own floor checks.
+ */
+export interface GtPoolListing {
+  poolAddress: string;
+  /** Base token address, lowercase, network prefix stripped. */
+  baseTokenAddress: string;
+  /** The pool's own name, e.g. "SABLE / WETH 1%" — a symbol fallback. */
+  poolName: string | null;
+  mcapUsd: number | null;
+  liquidityUsd: number | null;
+  vol24Usd: number | null;
+  /** buys + sells over 24h; null when the block is missing entirely. */
+  txns24: number | null;
+  poolCreatedAt: Date | null;
+}
+
+/**
+ * One page of the network's pools, sorted by 24h volume desc (20 per page).
+ *
+ * Verified against a live response 2026-09-02: every money figure arrives as a
+ * STRING (`fdv_usd`, `market_cap_usd`, `volume_usd.h24`, `reserve_in_usd`),
+ * `transactions.h24.buys`/`sells` arrive as numbers, `market_cap_usd` is
+ * routinely null for small tokens (fdv is the usable value), and the base token
+ * sits in `relationships.base_token.data.id` as "robinhood_0x…".
+ *
+ * The free tier caps `page` at 10 and answers an 11th with a 401 + errors body;
+ * callers must stop at SLEEPERS.maxPages. An empty/missing `data` array returns
+ * [] so a caller can stop early.
+ */
+export async function getTopPools(page: number): Promise<GtPoolListing[]> {
+  const body = (await gtFetch(
+    `/networks/${ROBINHOOD_SLUG}/pools?sort=h24_volume_usd_desc&page=${page}`,
+  )) as { data?: JsonApiResource[] } | null;
+
+  const out: GtPoolListing[] = [];
+  for (const item of body?.data ?? []) {
+    const a = item.attributes ?? {};
+    const poolAddress =
+      typeof a.address === 'string' && a.address ? a.address.toLowerCase() : poolIdToAddress(item.id);
+    const baseRel = item.relationships?.base_token?.data;
+    const base = Array.isArray(baseRel) ? baseRel[0] : baseRel;
+    const baseTokenAddress = poolIdToAddress(base?.id);
+    if (!poolAddress || !baseTokenAddress) continue;
+
+    const txns = (a.transactions as Record<string, unknown> | undefined)?.h24 as
+      | Record<string, unknown>
+      | undefined;
+    const buys = num(txns?.buys);
+    const sells = num(txns?.sells);
+    const created = typeof a.pool_created_at === 'string' ? new Date(a.pool_created_at) : null;
+
+    out.push({
+      poolAddress,
+      baseTokenAddress,
+      poolName: typeof a.name === 'string' ? a.name : null,
+      // Same precedence as everywhere else in this client: fdv first, because
+      // market_cap_usd is null for most of the chain.
+      mcapUsd: num(a.fdv_usd) ?? num(a.market_cap_usd),
+      liquidityUsd: num(a.reserve_in_usd),
+      vol24Usd: num((a.volume_usd as Record<string, unknown> | undefined)?.h24),
+      txns24: buys === null && sells === null ? null : (buys ?? 0) + (sells ?? 0),
+      poolCreatedAt: created && !Number.isNaN(created.getTime()) ? created : null,
+    });
+  }
+  return out;
+}
+
 export function gtSnapshot(info: {
   priceUsd: number | null;
   fdvUsd: number | null;

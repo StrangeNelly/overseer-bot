@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { BoardCard } from '@groupie/shared';
+import { copyText } from '../clipboard';
 import {
   RUNNER_MULTIPLE,
   isDied,
@@ -133,24 +134,6 @@ function badgeFor(card: BoardCard, section: SectionKey, now: number): Badge | nu
   return null;
 }
 
-/** Copy without the async clipboard API, for webviews that withhold it. */
-function legacyCopy(text: string): boolean {
-  try {
-    const area = document.createElement('textarea');
-    area.value = text;
-    area.setAttribute('readonly', '');
-    area.style.position = 'fixed';
-    area.style.opacity = '0';
-    document.body.appendChild(area);
-    area.select();
-    const ok = document.execCommand('copy');
-    document.body.removeChild(area);
-    return ok;
-  } catch {
-    return false;
-  }
-}
-
 export function TokenCard({
   card,
   section,
@@ -221,18 +204,11 @@ export function TokenCard({
   }, [ceremony, animate]);
 
   const onCopy = useCallback(() => {
-    const done = () => {
+    void copyText(card.address).then((ok) => {
+      if (!ok) return;
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1_400);
-    };
-    const clipboard = navigator.clipboard;
-    if (clipboard && typeof clipboard.writeText === 'function') {
-      clipboard.writeText(card.address).then(done, () => {
-        if (legacyCopy(card.address)) done();
-      });
-      return;
-    }
-    if (legacyCopy(card.address)) done();
+    });
   }, [card.address]);
 
   const pills = (
@@ -249,6 +225,12 @@ export function TokenCard({
       <button type="button" className="pill pill-copy" onClick={onCopy}>
         {copied ? 'COPIED ✓' : 'COPY CA'}
       </button>
+      {/* The project's X account, where we have one (docs/decisions.md round 9). */}
+      {card.twitterUrl ? (
+        <a className="pill" href={card.twitterUrl} target="_blank" rel="noopener">
+          X
+        </a>
+      ) : null}
     </>
   );
 

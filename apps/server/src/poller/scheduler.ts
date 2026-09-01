@@ -1,6 +1,12 @@
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { calls, snapshots, tokens, watches, type Db } from '@groupie/db';
-import { IDLE_AFTER_HOURS, POLL_TIERS, SNAPSHOT_RETENTION, THRESHOLDS } from '@groupie/shared';
+import {
+  IDLE_AFTER_HOURS,
+  POLL_TIERS,
+  SLEEPERS,
+  SNAPSHOT_RETENTION,
+  THRESHOLDS,
+} from '@groupie/shared';
 import { publish } from '../events.js';
 import * as ds from '../market/dexscreener.js';
 import * as gt from '../market/geckoterminal.js';
@@ -10,6 +16,7 @@ import { runAlertPass } from './alerts.js';
 import { callLiquidityDeath, classifyTokenDeath, isRevived } from './death.js';
 import { markTokenDead } from './markDead.js';
 import { runProbationSweep } from './rugSweep.js';
+import { runSleeperScan } from './sleeperScan.js';
 
 const TICK_MS = 15_000;
 /** Caps per tick, sized to GeckoTerminal's 25-30/min budget. */
@@ -21,6 +28,8 @@ const MAX_OHLCV_FILLS_PER_TICK = 5;
 const PRUNE_INTERVAL_MS = 3_600_000;
 /** Every probation verdict covers hours of history; asking every tick would just re-ask it. */
 const RUG_SWEEP_INTERVAL_MS = 600_000;
+/** Sleepers is a 3-hourly chain-wide sweep (docs/decisions.md round 9). */
+const SLEEPER_SCAN_INTERVAL_MS = SLEEPERS.scanIntervalHours * 3_600_000;
 
 type TokenRow = typeof tokens.$inferSelect;
 
@@ -34,6 +43,10 @@ const IMMEDIATE_POLL: PollOpts = { budgeted: false };
 let ohlcvFills = 0;
 let lastPruneMs = 0;
 let lastRugSweepMs = 0;
+/** 0 = never run, so the first tick after boot scans (the board must not sit empty). */
+let lastSleeperScanMs = 0;
+/** The scan is detached, so it needs its own in-flight guard. */
+let sleeperScanRunning = false;
 
 interface Candidate {
   token: TokenRow;
@@ -475,6 +488,34 @@ async function sweepRugs(db: Db): Promise<void> {
 }
 
 /**
+ * Sleepers: the chain-wide discovery scan (docs/decisions.md round 9). Three
+ * hourly, isolated like the sweep and the prune — but DETACHED rather than
+ * awaited.
+ *
+ * The scan paces ~10 GeckoTerminal pages and backs off on a 429, so one run can
+ * take minutes; awaiting it here would hold `running` for that whole window and
+ * blind the 45-second fresh tier (and the nuke alert that rides on it) every
+ * three hours. Detached, its requests simply queue through the shared budgeter
+ * alongside the polls, which is exactly what the budgeter is for.
+ *
+ * Both guards matter: the interval stamp is taken BEFORE the run so a scan that
+ * throws waits out the full interval instead of retrying every 15-second tick,
+ * and the in-flight flag makes a scan that outlives its own interval impossible
+ * to double-start.
+ */
+function scanSleepers(db: Db): void {
+  if (sleeperScanRunning) return;
+  if (Date.now() - lastSleeperScanMs < SLEEPER_SCAN_INTERVAL_MS) return;
+  lastSleeperScanMs = Date.now();
+  sleeperScanRunning = true;
+  void runSleeperScan(db)
+    .catch((err) => console.error('sleeper scan failed:', err))
+    .finally(() => {
+      sleeperScanRunning = false;
+    });
+}
+
+/**
  * One unit of tick work. A thrown poll must not abort the rest of the tick, and
  * stamping lastPolledAt keeps a poisoned token on its tier cadence instead of
  * letting it re-fail at the head of every tick and starve everything behind it.
@@ -547,6 +588,8 @@ export async function runTick(db: Db): Promise<void> {
   }
 
   await sweepRugs(db);
+  // Deliberately not awaited — see scanSleepers.
+  scanSleepers(db);
   await pruneSnapshots(db);
 }
 

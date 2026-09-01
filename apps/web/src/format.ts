@@ -44,6 +44,22 @@ export function fmtMultiple(value: number | null | undefined): string {
   return `${value.toFixed(2)}x`;
 }
 
+/**
+ * Turnover (vol24 / mcap) as a percentage: `640%`, `10.2K%`, `4.5%`, `—`.
+ * Robinhood Chain routinely runs four-figure turnover, so the thousands are
+ * compacted rather than printing a seven-character hero number.
+ */
+export function fmtTurnover(turnover: number | null | undefined): string {
+  if (!isNum(turnover) || turnover < 0) return DASH;
+  const pct = turnover * 100;
+  if (pct >= 999.5e3) return `${compact(pct / 1e6)}M%`;
+  if (pct >= 999.5) return `${compact(pct / 1e3)}K%`;
+  if (pct >= 10) return `${Math.round(pct)}%`;
+  if (pct === 0) return '0%';
+  if (pct < 0.1) return '<0.1%';
+  return `${stripTrailingZero(pct.toFixed(1))}%`;
+}
+
 /** Green at or above 1x, red below, neutral when unknown. */
 export function multipleTone(value: number | null | undefined): 'up' | 'down' | 'flat' {
   if (!isNum(value)) return 'flat';
