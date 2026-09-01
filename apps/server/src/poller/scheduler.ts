@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, max, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { calls, snapshots, tokens, watches, type Db } from '@groupie/db';
 import { IDLE_AFTER_HOURS, POLL_TIERS, SNAPSHOT_RETENTION, THRESHOLDS } from '@groupie/shared';
 import { publish } from '../events.js';
@@ -9,7 +9,7 @@ import type { MarketSnapshot } from '../market/types.js';
 import { runAlertPass } from './alerts.js';
 import { callLiquidityDeath, classifyTokenDeath, isRevived } from './death.js';
 import { markTokenDead } from './markDead.js';
-import { runRugSweep } from './rugSweep.js';
+import { runProbationSweep } from './rugSweep.js';
 
 const TICK_MS = 15_000;
 /** Caps per tick, sized to GeckoTerminal's 25-30/min budget. */
@@ -19,7 +19,7 @@ const MAX_DEAD_POLLS_PER_TICK = 4;
 const MAX_OHLCV_FILLS_PER_TICK = 5;
 
 const PRUNE_INTERVAL_MS = 3_600_000;
-/** The rug verdict covers 6h of history; asking every tick would just re-ask it. */
+/** Every probation verdict covers hours of history; asking every tick would just re-ask it. */
 const RUG_SWEEP_INTERVAL_MS = 600_000;
 
 type TokenRow = typeof tokens.$inferSelect;
@@ -87,14 +87,20 @@ function isDue(c: Candidate, nowMs: number): boolean {
   }
   const quietHours = (nowMs - c.lastActivityMs) / 3_600_000;
   // A watch is a standing request for minute-scale alerts, so a watched token
-  // stays on the fresh tier however quiet the chat is about it.
+  // stays on the fresh tier however quiet the chat is about it — that beats
+  // probation too, since a watched rug is one the group asked to be told about.
+  // Probation itself overrides the activity tiers in both directions: a coin
+  // called minutes before it tanked must not keep 45-second polling while
+  // hidden, and one hidden months later must still be checked for a comeback.
   const seconds = c.watched
     ? POLL_TIERS.freshSeconds
-    : quietHours < 24
-      ? POLL_TIERS.freshSeconds
-      : quietHours >= IDLE_AFTER_HOURS
-        ? POLL_TIERS.idleSeconds
-        : POLL_TIERS.activeSeconds;
+    : c.token.rugHiddenAt !== null
+      ? POLL_TIERS.probationSeconds
+      : quietHours < 24
+        ? POLL_TIERS.freshSeconds
+        : quietHours >= IDLE_AFTER_HOURS
+          ? POLL_TIERS.idleSeconds
+          : POLL_TIERS.activeSeconds;
   return nowMs - last >= seconds * 1000;
 }
 
@@ -231,21 +237,13 @@ async function applyCallRevivals(db: Db, token: TokenRow, snap: MarketSnapshot):
   }
 }
 
+/**
+ * Instant death from one reading. Retracing to the curve floor is deliberately
+ * NOT here any more (docs/decisions.md round 6) — the rug sweep hides those,
+ * with a comeback path — so this no longer needs the token's all-time peak.
+ */
 async function checkDeath(db: Db, token: TokenRow, snap: MarketSnapshot | null): Promise<void> {
-  // The curve floor is a retrace rule, so it needs the highest mcap this token
-  // has ever shown; only that phase consults it.
-  let peakMcapUsd: number | null = null;
-  if (token.phase === 'curve') {
-    const rows = await db
-      .select({ peak: max(calls.peakMcapSinceCall) })
-      .from(calls)
-      .where(eq(calls.tokenId, token.id));
-    peakMcapUsd = rows[0]?.peak ?? null;
-  }
-  const reason = classifyTokenDeath(
-    { phase: token.phase, ageHours: ageHours(token), peakMcapUsd },
-    snap,
-  );
+  const reason = classifyTokenDeath({ phase: token.phase, ageHours: ageHours(token) }, snap);
   if (reason) await markTokenDead(db, token, reason);
 }
 
@@ -363,6 +361,8 @@ async function pollDead(db: Db, token: TokenRow, opts: PollOpts): Promise<void> 
   // 'rug_floor' can kill either phase, so it identifies neither on its own: a
   // token with no graduation on record was still on its curve, and a curve
   // pool is a GeckoTerminal read (its DexScreener "best pair" is dust at best).
+  // 'curve_floor' is no longer produced (round 6 retired it), but rows written
+  // before that still carry it and must still route to the curve read.
   const wasCurve =
     token.deathReason === 'curve_floor' ||
     token.deathReason === 'never_graduated' ||
@@ -460,16 +460,17 @@ async function pruneSnapshots(db: Db): Promise<void> {
 }
 
 /**
- * Rug auto-removal (docs/decisions.md round 5). At most every 10 minutes, and
- * isolated like the prune: a failed sweep must never cost us a tick.
+ * Rug probation (docs/decisions.md round 6): hide, revive, expire. At most
+ * every 10 minutes, and isolated like the prune — a failed sweep must never
+ * cost us a tick.
  */
 async function sweepRugs(db: Db): Promise<void> {
   if (Date.now() - lastRugSweepMs < RUG_SWEEP_INTERVAL_MS) return;
   lastRugSweepMs = Date.now();
   try {
-    await runRugSweep(db);
+    await runProbationSweep(db);
   } catch (err) {
-    console.error('rug sweep failed:', err);
+    console.error('rug probation sweep failed:', err);
   }
 }
 

@@ -12,6 +12,12 @@ export type GroupieEvent =
   | { type: 'token_died'; tokenId: number; reason: string }
   | { type: 'token_revived'; tokenId: number }
   | { type: 'call_revived'; tokenId: number; callId: number }
+  // Rug probation transitions (docs/decisions.md round 6). Both change what
+  // EVERY board shows — a hide removes the card from all sections, a revival
+  // puts it back with a spotlight — so, exactly like a bin, they must not wait
+  // for some unrelated poll event to reach open boards.
+  | { type: 'rug_hidden'; tokenId: number }
+  | { type: 'rug_revived'; tokenId: number }
   // Binning is group-wide, so every other member's open board must drop the
   // card without waiting for an unrelated poll event.
   | { type: 'call_binned'; tokenId: number; callId: number }

@@ -1,12 +1,16 @@
 import type { BoardResponse } from '@groupie/shared';
 
-/** The four sections that come straight off /board. */
+/** The sections that come straight off /board. */
 export type BoardSectionKey = keyof BoardResponse['sections'];
 /** Ranging is its own endpoint and its own controls, but the same tab strip. */
 export type SectionKey = BoardSectionKey | 'ranging';
 
+// Reviving sits SECOND, right after Fresh: the owner asked for a comeback
+// banner, and a coin that just clawed its way out of rug probation is the most
+// perishable thing on the board — it does not belong down by Died.
 export const BOARD_SECTIONS = [
   { key: 'fresh', label: 'Fresh' },
+  { key: 'reviving', label: 'Reviving' },
   { key: 'runners', label: 'Runners' },
   { key: 'retraced', label: 'Retraced' },
   { key: 'died', label: 'Died' },

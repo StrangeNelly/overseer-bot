@@ -39,17 +39,45 @@ function timeMs(iso: string | null): number | null {
   return Number.isNaN(ms) ? null : ms;
 }
 
+/** How long a survived rug probation wears the Reviving badge (round 6). */
+const REVIVING_WINDOW_MS = 24 * 3_600_000;
+
+/**
+ * Came back from rug probation recently enough to still be spotlighted
+ * (docs/decisions.md round 6). The stamp is never cleared on a timer — the
+ * window is applied here, so a stale badge simply stops mattering.
+ */
+function isReviving(card: BoardCard, nowMs: number): boolean {
+  const at = timeMs(card.revivingAt);
+  return at !== null && nowMs - at < REVIVING_WINDOW_MS;
+}
+
 /**
  * Split the window's cards into board sections (packages/shared/src/api.ts).
- * A card intentionally appears in BOTH fresh and runners/retraced: fresh is
- * "everything active with recent activity", the others are highlights of it.
+ * A card intentionally appears in BOTH fresh and runners/retraced/reviving:
+ * fresh is "everything active with recent activity", the others are highlights
+ * of it.
+ *
+ * Hidden tokens never get here at all — board.ts and range.ts filter them out
+ * in SQL (a token-level `rug_hidden_at is null` on the join), because probation
+ * has to hold for every section including died, which this function does not
+ * gate on `active`.
  */
-export function classifySections(cards: BoardCard[]): BoardResponse['sections'] {
+export function classifySections(
+  cards: BoardCard[],
+  nowMs: number = Date.now(),
+): BoardResponse['sections'] {
   const active = cards.filter((card) => card.callStatus === 'active');
   return {
     fresh: [...active].sort(byNumberDesc((card) => timeMs(card.lastMentionAt))),
     runners: active.filter(isRunner).sort(byNumberDesc((card) => card.multiple)),
     retraced: active.filter(isRetraced).sort(byNumberDesc((card) => card.retraceFromPeakPct)),
+    // Active only, like every other spotlight: a coin that came back and then
+    // died is answered by the Died section, and billing a corpse as "Reviving"
+    // would be a lie the badge cannot walk back.
+    reviving: active
+      .filter((card) => isReviving(card, nowMs))
+      .sort(byNumberDesc((card) => timeMs(card.revivingAt))),
     died: cards
       .filter((card) => card.callStatus === 'died')
       .sort(byNumberDesc((card) => timeMs(card.diedAt))),

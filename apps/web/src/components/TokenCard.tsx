@@ -16,6 +16,8 @@ import type { SectionKey } from './SectionTabs';
 
 /** Market numbers older than this get a visible "as of" hint. */
 const STALE_AFTER_MS = 5 * 60 * 1000;
+/** The comeback badge runs for 24h (docs/decisions.md round 6), same as the section. */
+const REVIVING_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 interface TokenCardProps {
   card: BoardCard;
@@ -78,6 +80,10 @@ export function TokenCard({ card, section, now, onBin, binning, range, band }: T
   const tone = multipleTone(card.multiple);
   const dataAge = ageMs(card.dataAsOf, now);
   const stale = dataAge !== null && dataAge > STALE_AFTER_MS;
+  // The server never clears a stale reviving_at (a later hide does), so the
+  // window lives on the read side — here and in classifySections.
+  const revivingAge = ageMs(card.revivingAt, now);
+  const reviving = revivingAge !== null && revivingAge < REVIVING_WINDOW_MS;
 
   return (
     <article className="card">
@@ -92,6 +98,11 @@ export function TokenCard({ card, section, now, onBin, binning, range, band }: T
               </span>
             ) : null}
             {card.revived ? <span className="badge badge-revived">REVIVED</span> : null}
+            {reviving ? (
+              <span className="badge badge-reviving" title={`Back from rug probation ${fullTime(card.revivingAt) ?? ''}`}>
+                REVIVING
+              </span>
+            ) : null}
             {section === 'died' ? (
               <span className="badge badge-died">
                 {card.deathReason ? `DIED ${card.deathReason}` : 'DIED'}

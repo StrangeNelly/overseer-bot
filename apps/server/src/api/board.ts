@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, isNotNull, ne, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { calls, snapshots, tokens, watches, type Db } from '@groupie/db';
 import {
@@ -91,6 +91,9 @@ export function toCard(
     deathReason: death.reason,
     dataAsOf: token.lastSnapshotAt?.toISOString() ?? null,
     watched,
+    // Raw, not windowed: classifySections owns the 24h badge window, so the
+    // two can never disagree about which cards are in the Reviving section.
+    revivingAt: token.revivingAt?.toISOString() ?? null,
     links: tradingLinks(token.address),
     sparkline,
   };
@@ -212,6 +215,10 @@ export function createBoardRoutes(db: Db): Hono<ApiEnv> {
           eq(calls.groupId, group.id),
           ne(calls.status, 'binned'),
           gte(calls.lastMentionAt, since),
+          // Rug probation hides the card from EVERY section, died included
+          // (docs/decisions.md round 6). Filtered here rather than in
+          // classifySections so no section can ever leak a hidden token.
+          isNull(tokens.rugHiddenAt),
         ),
       );
 

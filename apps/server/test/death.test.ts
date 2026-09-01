@@ -9,74 +9,72 @@ const snap = (over: Partial<{ priceUsd: number | null; mcapUsd: number | null; l
   ...over,
 });
 
+/**
+ * The armed curve floor is RETIRED (docs/decisions.md round 6): a curve token
+ * at the floor is now hidden into rug probation by the sweep, which gives it a
+ * comeback path, instead of being killed on one reading. So nothing about a
+ * curve token's mcap is death evidence here any more — only the 48h rule is.
+ */
 describe('classifyTokenDeath — curve phase', () => {
   it('a fresh launch below the floor is ALIVE (launches start ~$5k)', () => {
-    expect(
-      classifyTokenDeath({ phase: 'curve', ageHours: 0.1, peakMcapUsd: 4_000 }, snap({ mcapUsd: 4_000 })),
-    ).toBeNull();
-    expect(
-      classifyTokenDeath({ phase: 'curve', ageHours: 0.1, peakMcapUsd: null }, snap({ mcapUsd: 4_000 })),
-    ).toBeNull();
+    expect(classifyTokenDeath({ phase: 'curve', ageHours: 0.1 }, snap({ mcapUsd: 4_000 }))).toBeNull();
   });
-  it('dies once it RETRACED to the ~$8k curve floor from an armed peak', () => {
-    expect(
-      classifyTokenDeath({ phase: 'curve', ageHours: 1, peakMcapUsd: 30_000 }, snap({ mcapUsd: 7_000 })),
-    ).toBe('curve_floor');
-    expect(
-      classifyTokenDeath({ phase: 'curve', ageHours: 1, peakMcapUsd: 30_000 }, snap({ mcapUsd: 8_000 })),
-    ).toBe('curve_floor');
+  it('a token that RETRACED to the floor is alive here — probation owns it now', () => {
+    expect(classifyTokenDeath({ phase: 'curve', ageHours: 1 }, snap({ mcapUsd: 7_000 }))).toBeNull();
+    expect(classifyTokenDeath({ phase: 'curve', ageHours: 1 }, snap({ mcapUsd: 8_000 }))).toBeNull();
+    expect(classifyTokenDeath({ phase: 'curve', ageHours: 1 }, snap({ mcapUsd: 1 }))).toBeNull();
   });
-  it('a peak short of the arming mcap does not arm the floor', () => {
-    expect(
-      classifyTokenDeath({ phase: 'curve', ageHours: 1, peakMcapUsd: 8_500 }, snap({ mcapUsd: 7_000 })),
-    ).toBeNull();
+  it('stays alive at the floor indefinitely, right up to the 48h rule', () => {
+    expect(classifyTokenDeath({ phase: 'curve', ageHours: 47.9 }, snap({ mcapUsd: 500 }))).toBeNull();
   });
   it('lives above the floor', () => {
-    expect(
-      classifyTokenDeath({ phase: 'curve', ageHours: 1, peakMcapUsd: 30_000 }, snap({ mcapUsd: 25_000 })),
-    ).toBeNull();
+    expect(classifyTokenDeath({ phase: 'curve', ageHours: 1 }, snap({ mcapUsd: 25_000 }))).toBeNull();
   });
   it('unknown mcap is not death evidence', () => {
-    expect(classifyTokenDeath({ phase: 'curve', ageHours: 1, peakMcapUsd: 30_000 }, snap())).toBeNull();
-    expect(classifyTokenDeath({ phase: 'curve', ageHours: 1, peakMcapUsd: 30_000 }, null)).toBeNull();
+    expect(classifyTokenDeath({ phase: 'curve', ageHours: 1 }, snap())).toBeNull();
+    expect(classifyTokenDeath({ phase: 'curve', ageHours: 1 }, null)).toBeNull();
   });
   it('dies after 48h without graduating', () => {
-    expect(
-      classifyTokenDeath({ phase: 'curve', ageHours: 49, peakMcapUsd: 25_000 }, snap({ mcapUsd: 25_000 })),
-    ).toBe('never_graduated');
+    expect(classifyTokenDeath({ phase: 'curve', ageHours: 49 }, snap({ mcapUsd: 25_000 }))).toBe(
+      'never_graduated',
+    );
   });
 });
 
 describe('classifyTokenDeath — graduated phase', () => {
   it('dies below the $250 liquidity floor', () => {
     expect(
-      classifyTokenDeath({ phase: 'graduated', ageHours: 100, peakMcapUsd: null }, snap({ liquidityUsd: 0.12 })),
+      classifyTokenDeath({ phase: 'graduated', ageHours: 100 }, snap({ liquidityUsd: 0.12 })),
     ).toBe('liquidity_floor');
   });
   it('quiet but liquid is NOT dead', () => {
     expect(
       classifyTokenDeath(
-        { phase: 'graduated', ageHours: 700, peakMcapUsd: null },
+        { phase: 'graduated', ageHours: 700 },
         snap({ liquidityUsd: 7_753, vol24Usd: 0.15 }),
       ),
     ).toBeNull();
   });
   it('missing liquidity (unindexed/odd pair) is not death evidence', () => {
-    expect(classifyTokenDeath({ phase: 'graduated', ageHours: 100, peakMcapUsd: null }, snap())).toBeNull();
+    expect(classifyTokenDeath({ phase: 'graduated', ageHours: 100 }, snap())).toBeNull();
   });
   it('the 48h rule does not apply once graduated', () => {
     expect(
-      classifyTokenDeath({ phase: 'graduated', ageHours: 49, peakMcapUsd: null }, snap({ liquidityUsd: 50_000 })),
+      classifyTokenDeath({ phase: 'graduated', ageHours: 49 }, snap({ liquidityUsd: 50_000 })),
+    ).toBeNull();
+  });
+  it('a graduated token at the rug floor still needs a drained pool to die', () => {
+    // Round 6: mcap alone never kills. This one is a probation candidate.
+    expect(
+      classifyTokenDeath({ phase: 'graduated', ageHours: 10 }, snap({ mcapUsd: 900, liquidityUsd: 40_000 })),
     ).toBeNull();
   });
 });
 
 describe('classifyTokenDeath — unresolved', () => {
   it('never indexed anywhere for 48h = never launched = dead', () => {
-    expect(classifyTokenDeath({ phase: 'unresolved', ageHours: 49, peakMcapUsd: null }, null)).toBe(
-      'never_graduated',
-    );
-    expect(classifyTokenDeath({ phase: 'unresolved', ageHours: 2, peakMcapUsd: null }, null)).toBeNull();
+    expect(classifyTokenDeath({ phase: 'unresolved', ageHours: 49 }, null)).toBe('never_graduated');
+    expect(classifyTokenDeath({ phase: 'unresolved', ageHours: 2 }, null)).toBeNull();
   });
 });
 

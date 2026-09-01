@@ -51,6 +51,15 @@ export const tokens = pgTable(
     // Set when a dead token comes back; died_at/death_reason are kept as the
     // last-death record, so the board can show "revived" plus that history.
     revivedAt: timestamp('revived_at', { withTimezone: true }),
+    // Rug probation (docs/decisions.md round 6). Set when the token has been
+    // under the rug floor for an hour: the calls vanish from every board
+    // section, but nothing is dead or binned yet. Cleared by a revival, by a
+    // repost, or by the expiry that turns probation into the permanent rug.
+    rugHiddenAt: timestamp('rug_hidden_at', { withTimezone: true }),
+    // Set when probation ended in a comeback. Drives the Reviving section and
+    // its badge for 24h; deliberately NOT cleared when it goes stale (a later
+    // hide clears it) — the board filters by the window instead.
+    revivingAt: timestamp('reviving_at', { withTimezone: true }),
     // Latest polled market state, cached on the token (M2 poller fills these).
     priceUsd: doublePrecision('price_usd'),
     mcapUsd: doublePrecision('mcap_usd'),

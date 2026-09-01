@@ -13,21 +13,32 @@ export type TokenPhase = (typeof TOKEN_PHASES)[number];
 
 /**
  * v1 death/retrace thresholds (decisions.md). Owner's curve knowledge: PONS
- * launches ~$5k mcap; retracing to <= ~$8k means back at the curve floor.
- * Will move into per-group settings when multi-group lands.
+ * launches ~$5k mcap; retracing to ~$8k means back at the curve floor — which
+ * round 6 turned from an instant death into rug probation (hide, watch, revive
+ * or expire). Will move into per-group settings when multi-group lands.
  */
 export const THRESHOLDS = {
-  /** Curve-phase token at or below this mcap = dead. */
-  curveFloorMcapUsd: 8_000,
-  /**
-   * The curve floor is a RETRACE rule, so it only arms once the token has been
-   * observed above this mcap. Launches start ~$5k, i.e. below the floor.
-   */
-  curveFloorArmMcapUsd: 12_000,
-  /** Owner rule (decisions.md round 5): mcap below this is the rug floor. */
+  /** Owner rule (decisions.md round 6): mcap below this is the rug floor. */
   rugFloorMcapUsd: 8_000,
-  /** Owner rule (decisions.md round 5): this long unbroken under it = rug, auto-removed. */
-  rugFloorHours: 6,
+  /**
+   * Round 6: this long unbroken under the floor hides the token into probation.
+   * Round 5's 6h was too slow to clean the feed; the comeback path (below) is
+   * what makes an hour safe to act on.
+   */
+  rugHideHours: 1,
+  /** Round 6: probation this long without a revival is the permanent rug. */
+  rugProbationHours: 24,
+  /** Round 6: a hidden token back at/above this mcap is a revival candidate. */
+  rugReviveMcapUsd: 30_000,
+  /** Round 6: ...and it must hold that, every reading, for this long. */
+  rugReviveHoldHours: 3,
+  /**
+   * Round 6 item 5a: a re-mention of a token whose cached mcap is under this is
+   * INERT (members repost rugged CAs to point at the corpse, which is not
+   * renewed attention). Deliberately above the rug floor — hysteresis, so a
+   * token hovering at the floor doesn't flip behaviour on every poll.
+   */
+  inertRementionMcapUsd: 9_000,
   /** Graduated token whose best pair holds less than this = dead. */
   deadLiquidityUsd: 250,
   /** Call dies when liquidity falls below this fraction of liquidity-at-call. */
@@ -54,6 +65,11 @@ export const POLL_TIERS = {
   activeSeconds: 300,
   /** Alive but not mentioned for over a week. */
   idleSeconds: 3_600,
+  /**
+   * Hidden into rug probation (decisions.md round 6): quiet background watch
+   * for the revival window, cheap enough to run for 24h on every rug.
+   */
+  probationSeconds: 1_800,
   /** Confirmed dead: daily revival check. */
   deadSeconds: 86_400,
 } as const;

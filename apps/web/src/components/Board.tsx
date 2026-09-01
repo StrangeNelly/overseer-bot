@@ -7,6 +7,7 @@ import { TokenCard } from './TokenCard';
 
 const EMPTY_LINES: Record<BoardSectionKey, string> = {
   fresh: 'No calls in this window. Try a longer one.',
+  reviving: 'Nothing has come back from the dead lately.',
   runners: 'Nothing is running yet in this window.',
   retraced: 'Nothing has pulled back off a peak here.',
   died: 'Nothing has died in this window.',

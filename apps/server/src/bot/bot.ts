@@ -438,10 +438,12 @@ export function createBot(config: Config, db: Db): Bot {
     }
 
     // New calls need mcap-at-call captured NOW (launch coins move in seconds);
-    // reposts of died or binned calls asked for a revive re-poll. Fire and forget.
+    // reposts of died, binned or probation-hidden calls asked for a revive
+    // re-poll. An inert re-mention asked for nothing (docs/decisions.md round 6
+    // item 5a) — the coin is a corpse and someone pointed at it. Fire and forget.
     for (const entry of result.entries) {
       if (entry.isNew) publish({ type: 'new_call', tokenId: entry.tokenId, address: entry.address });
-      if (entry.isNew || entry.wasDied || entry.wasBinned) {
+      if (!entry.inert && (entry.isNew || entry.wasDied || entry.wasBinned || entry.wasHidden)) {
         pollTokenNow(db, entry.tokenId).catch((err) =>
           console.error(`immediate poll failed for ${entry.address}:`, err),
         );

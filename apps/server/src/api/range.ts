@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, isNotNull, ne, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { calls, snapshots, tokens, type Db } from '@groupie/db';
 import {
@@ -134,7 +134,14 @@ export function createRangeRoutes(db: Db): Hono<ApiEnv> {
       .from(calls)
       .innerJoin(tokens, eq(tokens.id, calls.tokenId))
       .where(
-        and(eq(calls.groupId, group.id), eq(calls.status, 'active'), ne(tokens.phase, 'dead')),
+        and(
+          eq(calls.groupId, group.id),
+          eq(calls.status, 'active'),
+          ne(tokens.phase, 'dead'),
+          // On rug probation: hidden from every board view, this one included
+          // (docs/decisions.md round 6). A coin under $8k is not accumulating.
+          isNull(tokens.rugHiddenAt),
+        ),
       );
 
     const nowMs = Date.now();

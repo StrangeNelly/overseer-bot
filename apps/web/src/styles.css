@@ -414,6 +414,13 @@ a {
   border-color: color-mix(in srgb, var(--up) 40%, var(--border-strong));
 }
 
+/* Survived rug probation (docs/decisions.md round 6). Same chip as REVIVED
+   until the design pass gives the comeback its own treatment. */
+.badge-reviving {
+  color: var(--up);
+  border-color: color-mix(in srgb, var(--up) 40%, var(--border-strong));
+}
+
 .badge-died {
   color: var(--dim);
   border-color: var(--border-strong);

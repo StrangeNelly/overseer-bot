@@ -14,6 +14,7 @@ interface CardSpec {
   peak?: number | null;
   lastMentionAt?: string;
   diedAt?: string | null;
+  revivingAt?: string | null;
 }
 
 /** Mirrors board.ts's derivation so section rules are tested on real inputs. */
@@ -52,6 +53,7 @@ function card(spec: CardSpec): BoardCard {
     deathReason: null,
     dataAsOf: new Date().toISOString(),
     watched: false,
+    revivingAt: spec.revivingAt ?? null,
     links: tradingLinks(address),
     sparkline: [],
   };
@@ -170,8 +172,77 @@ describe('classifySections', () => {
       fresh: [],
       runners: [],
       retraced: [],
+      reviving: [],
       died: [],
     });
+  });
+});
+
+/**
+ * The Reviving spotlight (docs/decisions.md round 6). Note what is NOT tested
+ * here: hidden tokens (rug_hidden_at set) never reach classifySections at all —
+ * board.ts and range.ts filter them out in SQL, so probation holds for every
+ * section including died.
+ */
+describe('classifySections — reviving', () => {
+  const NOW = Date.UTC(2026, 8, 2, 12, 0, 0);
+  const ago = (hours: number) => new Date(NOW - hours * HOUR).toISOString();
+
+  it('spotlights a card that came back from probation', () => {
+    const sections = classifySections([card({ callId: 40, revivingAt: ago(2) })], NOW);
+    expect(ids(sections.reviving)).toEqual([40]);
+  });
+
+  it('is a spotlight, not an exile: the card classifies normally as well', () => {
+    // A 5x that also just survived probation belongs in fresh AND runners AND
+    // reviving — the same dual membership fresh/runners already has.
+    const sections = classifySections(
+      [card({ callId: 41, mcapUsd: 500_000, peak: 520_000, revivingAt: ago(1) })],
+      NOW,
+    );
+    expect(ids(sections.reviving)).toEqual([41]);
+    expect(ids(sections.fresh)).toEqual([41]);
+    expect(ids(sections.runners)).toEqual([41]);
+  });
+
+  it('drops out of the section after 24h, without the stamp being cleared', () => {
+    const stale = card({ callId: 42, revivingAt: ago(24.5) });
+    const sections = classifySections([stale], NOW);
+    expect(sections.reviving).toEqual([]);
+    // Still fresh, and the stamp is still on the card: the window is applied on
+    // read, never by wiping the column.
+    expect(ids(sections.fresh)).toEqual([42]);
+    expect(stale.revivingAt).not.toBeNull();
+  });
+
+  it('holds the spotlight right up to the 24h boundary', () => {
+    expect(ids(classifySections([card({ callId: 43, revivingAt: ago(23.9) })], NOW).reviving)).toEqual([43]);
+    expect(classifySections([card({ callId: 44, revivingAt: ago(24) })], NOW).reviving).toEqual([]);
+  });
+
+  it('sorts by revivingAt desc', () => {
+    const sections = classifySections(
+      [
+        card({ callId: 45, revivingAt: ago(9) }),
+        card({ callId: 46, revivingAt: ago(1) }),
+        card({ callId: 47, revivingAt: ago(5) }),
+      ],
+      NOW,
+    );
+    expect(ids(sections.reviving)).toEqual([46, 47, 45]);
+  });
+
+  it('a card with no revival stamp is never in it', () => {
+    expect(classifySections([card({ callId: 48 })], NOW).reviving).toEqual([]);
+  });
+
+  it('a coin that came back and then died is answered by died, not reviving', () => {
+    const sections = classifySections(
+      [card({ callId: 49, callStatus: 'died', diedAt: ago(1), revivingAt: ago(3) })],
+      NOW,
+    );
+    expect(ids(sections.died)).toEqual([49]);
+    expect(sections.reviving).toEqual([]);
   });
 });
 
@@ -220,6 +291,8 @@ function tokenRow(overrides: Partial<TokenRow> = {}): TokenRow {
     diedAt: null,
     deathReason: null,
     revivedAt: null,
+    rugHiddenAt: null,
+    revivingAt: null,
     priceUsd: 0.01,
     mcapUsd: 200_000,
     liquidityUsd: 40_000,
@@ -288,6 +361,16 @@ describe('toCard death info', () => {
     const result = toCard(callRow(), tokenRow(), [], false);
     expect(result.diedAt).toBeNull();
     expect(result.deathReason).toBeNull();
+  });
+
+  it('carries the token\'s revival stamp onto the card, unwindowed', () => {
+    // Raw on purpose: classifySections owns the 24h window, so a stale stamp
+    // must still reach it rather than being silently dropped here.
+    const revivingAt = new Date(Date.now() - 40 * HOUR);
+    expect(toCard(callRow(), tokenRow({ revivingAt }), [], false).revivingAt).toBe(
+      revivingAt.toISOString(),
+    );
+    expect(toCard(callRow(), tokenRow(), [], false).revivingAt).toBeNull();
   });
 
   it('sorts a fresh per-call rug above an older token death', () => {
