@@ -14,7 +14,7 @@ One more deliverable: a **one-pager announcement graphic** for the Telegram chat
 
 1. **What it is, one line:** overseer watches every contract posted in this chat — nothing gets missed. Called mcap, peak, multiple: tracked from the second it's posted.
 2. **The board** (hero visual): a stylized mini-render of the board — Pulse strip ("15 calls today · best 2.4x"), a few token rows with sparklines and multiples, the section names visible (FRESH / RUNNERS / RETRACED / REVIVING / DIED / RANGING / SLEEPERS). Real-looking data, invented tickers fine.
-3. **Alerts into this chat:** watch a coin → 🚨-free, neutral framing: "NUKE >40% in 15min" and "BUY OPP ≥30% retrace" arrive as replies to the original call. Max 3 coins on watch per member. (Render the alert as a tiny Telegram-style reply bubble mock — imagery, not paragraph.)
+3. **Alerts into this chat:** watch a coin and "NUKE >40% in 15min" / "BUY OPP ≥30% retrace" alerts arrive as replies to the original call. Max 3 coins on watch per member. Render this as a tiny Telegram-style reply bubble mock — imagery, not a paragraph. The bubble may mirror the REAL alert format (those messages do lead with 🚨 / 🟢 in chat); everywhere outside that mock, the no-emoji law holds.
 4. **It cleans up after rugs:** coins that rug auto-hide, get a 24h second chance, and come back as REVIVING if they reclaim $30K — the feed stays honest without anyone lifting a finger.
 5. **Commands** (mono, compact, exactly these):
    - `/overseer` — open the board
