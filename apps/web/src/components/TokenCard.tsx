@@ -7,6 +7,7 @@ import {
   isReviving,
   isStale,
   isUnresolved,
+  moveOneHour,
   revivalDelta,
   statusEdge,
 } from '../derive';
@@ -21,14 +22,23 @@ import {
   multipleTone,
   shortAddress,
 } from '../format';
-import { canFlash, requestMotion, useReducedMotion } from '../motion';
+import { canFlash, requestMotion, useAlertBloom, useReducedMotion } from '../motion';
 import type { Ceremony } from '../motion';
-import { LinkPills } from './LinkPills';
+import { LinkPills, WatchPill } from './LinkPills';
 import type { WatchControl } from './LinkPills';
 import { Odometer } from './Odometer';
 import { Sparkline } from './Sparkline';
 import type { SparkTone } from './Sparkline';
 import type { SectionKey } from './SectionTabs';
+import { MoveChip } from './Zone';
+
+/** The zones whose rows carry the 1h-move chip (design pass 2, 3D rules). */
+const IN_PLAY_SECTIONS: ReadonlySet<SectionKey> = new Set<SectionKey>([
+  'runners',
+  'retraced',
+  'reviving',
+  'watch',
+]);
 
 /** Row heights from the handoff: half-sheet, mobile, desktop feed, top runner, died rail. */
 export type RowSize = 'mini' | 'row' | 'desk' | 'hero' | 'rail';
@@ -68,6 +78,14 @@ interface TokenCardProps {
   topRunner?: boolean;
   /** Half-sheet rows never animate (design: noise budget). */
   animate?: boolean;
+  /**
+   * ON WATCH rows lead their subline with whose slot the coin is sitting in
+   * ("your slot", "@member's slot") — the cap is per member, so the zone has to
+   * say which of the three are the reader's before it says anything else.
+   */
+  slotNote?: string;
+  /** 3G: this row was named by a watch-move announcement — one cyan bloom. */
+  alerted?: boolean;
 }
 
 function TokenAvatar({ card, unresolved }: { card: BoardCard; unresolved: boolean }) {
@@ -165,6 +183,8 @@ export function TokenCard({
   ceremony,
   topRunner = false,
   animate = true,
+  slotNote,
+  alerted = false,
 }: TokenCardProps) {
   const reduced = useReducedMotion();
   const title = card.symbol ? `$${card.symbol}` : shortAddress(card.address);
@@ -180,8 +200,15 @@ export function TokenCard({
   const [flash, setFlash] = useState<'up' | 'down' | null>(null);
   const [playing, setPlaying] = useState<Ceremony | null>(null);
   const [climbing, setClimbing] = useState(true);
+  /**
+   * The hover strip, tapped open. A touch device at desktop width has no hover
+   * at all, and a keyboard has none either — without this the WATCH pill (and
+   * on ON WATCH rows, the only way to free a slot) is unreachable.
+   */
+  const [tapped, setTapped] = useState(false);
   const prevMcap = useRef(card.mcapUsd);
   const prevMultiple = useRef(card.multiple);
+  const blooming = useAlertBloom(alerted);
 
   // Row update flash: tint toward the P&L colour, throttled 1 per row per 10s.
   useEffect(() => {
@@ -220,7 +247,7 @@ export function TokenCard({
     };
   }, [ceremony, animate]);
 
-  const pills = <LinkPills card={card} watch={watch} />;
+  const pills = <LinkPills target={card} watch={watch} />;
 
   // ---- the died rail (desktop right column) is its own, flatter anatomy.
   if (size === 'rail') {
@@ -231,25 +258,12 @@ export function TokenCard({
         <span className="rail-meta">
           {`${deathMcap(card)} · ${fmtAge(card.diedAt ?? card.calledAt, now)}`}
         </span>
-        {/* A watched corpse still holds someone's cap slot, and this rail is
-            the only place desktop shows it — without an unwatch here the slot
+        {/* A watched corpse still holds someone's cap slot, and this rail is the
+            only place desktop shows it — without an unwatch here the slot
             strands until the member finds the bot command (round 15 review).
-            Un-watched dead coins get nothing: the rail stays flat. */}
-        {watch && card.watched ? (
-          <button
-            type="button"
-            className="pill pill-watch is-on rail-watch"
-            title={
-              card.watchedByMe
-                ? 'Your watch — dead coins never alert. Tap to free the slot.'
-                : 'Watched (another member’s slot) — dead coins never alert. Tap to stop.'
-            }
-            disabled={watch.pending}
-            onClick={() => watch.onWatch(card, false)}
-          >
-            {watch.pending ? '…' : card.watchedByMe ? 'WATCHING·YOU' : 'WATCHING'}
-          </button>
-        ) : null}
+            Round 16 goes further: a dead coin can be watched too, because
+            alerts resume by themselves if it ever revives. */}
+        {watch ? <WatchPill target={card} watch={watch} className="rail-watch" /> : null}
         {onBin ? (
           <button type="button" className="bin-btn" disabled={binning} onClick={() => onBin(card)}>
             {binning ? 'binning' : 'bin'}
@@ -264,6 +278,9 @@ export function TokenCard({
   const revived = reviving ? revivalDelta(card) : null;
 
   const sub: ReactNode[] = [];
+  // ON WATCH leads with the slot, then who called it: the zone exists to make
+  // every held slot visible and freeable.
+  if (slotNote) sub.push(slotNote);
   if (card.callerName) sub.push(card.callerName);
   if (unresolved) {
     sub.push('awaiting first data');
@@ -283,7 +300,9 @@ export function TokenCard({
     );
   } else if (section === 'runners') {
     sub.push(`peak ${fmtUsd(card.peakMcapSinceCall)}`);
-  } else if (card.watched) {
+  } else if (section === 'watch' && card.liquidityUsd !== null) {
+    sub.push(`LP ${fmtUsd(card.liquidityUsd)}`);
+  } else if (card.watched && section !== 'watch') {
     sub.push('on watchlist');
   } else if (size === 'desk' && card.liquidityUsd !== null) {
     sub.push(`LP ${fmtUsd(card.liquidityUsd)}`);
@@ -305,8 +324,10 @@ export function TokenCard({
     runner ? 'is-runner' : '',
     topRunner && climbing ? 'is-breathing' : '',
     expanded ? 'is-open' : '',
+    links === 'hover' && tapped ? 'is-tapped' : '',
     flash && !reduced ? `is-flash-${flash}` : '',
     playing ? `is-${playing}` : '',
+    blooming ? 'is-alerted' : '',
   ]
     .filter(Boolean)
     .join(' ');
@@ -321,6 +342,14 @@ export function TokenCard({
             aria-expanded={expanded}
             aria-label={`Trading links for ${title}`}
             onClick={() => onToggle(card.callId)}
+          />
+        ) : links === 'hover' ? (
+          <button
+            type="button"
+            className="row-hit"
+            aria-expanded={tapped}
+            aria-label={`Trading links for ${title}`}
+            onClick={() => setTapped((prev) => !prev)}
           />
         ) : null}
 
@@ -345,6 +374,12 @@ export function TokenCard({
             ))}
           </div>
         </div>
+
+        {/* The 1h-move chip rides IN PLAY rows only — a Fresh row keeps the
+            spark alone, because chronology is not an opportunity claim. */}
+        {IN_PLAY_SECTIONS.has(section) && !died && !unresolved ? (
+          <MoveChip pct={moveOneHour(card.sparkline)} />
+        ) : null}
 
         {showSpark ? (
           <span className="row-spark">

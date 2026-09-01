@@ -1,20 +1,34 @@
-import { and, eq, gte, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { calls, snapshots, tokens, watches, type Db } from '@groupie/db';
+import { bodyLimit } from 'hono/body-limit';
+import { calls, mentions, snapshots, tokens, watches, type Db } from '@groupie/db';
 import {
   BOARD_WINDOWS,
   BOARD_WINDOW_HOURS,
+  extractEvmAddresses,
   tradingLinks,
   twitterUrlFrom,
+  WATCH_CAP_PER_MEMBER,
   watchCapMessage,
   websiteUrlFrom,
   type BoardCard,
   type BoardResponse,
   type BoardWindow,
+  type CallStatus,
   type SparkPoint,
+  type WatchlistEntry,
 } from '@groupie/shared';
+import { upsertToken } from '../bot/ingest.js';
 import { publish } from '../events.js';
-import { addWatch, findGroupToken, removeWatch } from '../watchlist.js';
+import { pollTokenNow } from '../poller/scheduler.js';
+import {
+  activeWatchCount,
+  addWatch,
+  findGroupToken,
+  findTokenByAddress,
+  isWatched,
+  removeWatch,
+} from '../watchlist.js';
 import type { ApiEnv } from './membership.js';
 import { classifySections, parseTzOffsetMin, startOfLocalDayMs } from './boardLogic.js';
 
@@ -144,6 +158,115 @@ export async function loadWatchedTokenIds(
   return new Map(rows.map((r) => [r.tokenId, r.addedBy]));
 }
 
+/**
+ * One row of the group's active watchlist: the token, who holds the slot, and
+ * the group's own non-binned call for it when there is one.
+ */
+export interface WatchlistRow {
+  token: TokenRow;
+  addedBy: number;
+  addedAt: Date;
+  callId: number | null;
+  /** Status of that call — what lets a row say "died" instead of "no call". */
+  callStatus: CallStatus | null;
+}
+
+/**
+ * The group's ENTIRE active watchlist (docs/decisions.md round 16), in one
+ * query — not filtered by the board window, and not filtered by rug probation
+ * either: this is the only surface where a member can see and free the slots
+ * they hold, so a watch that vanishes because its coin went quiet (or went
+ * under) is exactly the "stranded slot" round 15's review complained about.
+ *
+ * The left join is the group's own call for the coin, if any. `calls` is unique
+ * on (group, token), so it can never fan a watch out into two rows; watches set
+ * from the chat by address and from Sleepers have no call at all and answer
+ * null. Binned calls are excluded — a binned card is not on the board, so
+ * offering the client an id to join against would be a dangling reference.
+ */
+export async function loadWatchlistRows(db: Db, groupId: number): Promise<WatchlistRow[]> {
+  return db
+    .select({
+      token: tokens,
+      addedBy: watches.addedBy,
+      addedAt: watches.addedAt,
+      callId: calls.id,
+      callStatus: calls.status,
+    })
+    .from(watches)
+    .innerJoin(tokens, eq(tokens.id, watches.tokenId))
+    .leftJoin(
+      calls,
+      and(eq(calls.tokenId, watches.tokenId), eq(calls.groupId, groupId), ne(calls.status, 'binned')),
+    )
+    .where(and(eq(watches.groupId, groupId), eq(watches.active, true)))
+    .orderBy(desc(watches.addedAt));
+}
+
+/**
+ * A watchlist row as the contract shape. `names` is the slot holders' display
+ * names (loadSlotHolderNames); a member who has never posted in this group has
+ * none, and the row then says "another member's slot" rather than guessing.
+ */
+export function toWatchlistEntry(
+  row: WatchlistRow,
+  sparkline: SparkPoint[],
+  userId: number,
+  names: ReadonlyMap<number, string> = new Map(),
+): WatchlistEntry {
+  const token = row.token;
+  return {
+    tokenId: token.id,
+    address: token.address,
+    symbol: token.symbol,
+    imageUrl: token.imageUrl,
+    phase: token.phase,
+    // The two honesty fields the ON WATCH row explains itself with (round 16
+    // review): a watched coin missing from the sections is on probation, died,
+    // or simply older than the window — never "no call".
+    rugHiddenAt: token.rugHiddenAt?.toISOString() ?? null,
+    callStatus: row.callStatus,
+    mcapUsd: token.mcapUsd,
+    liquidityUsd: token.liquidityUsd,
+    dataAsOf: token.lastSnapshotAt?.toISOString() ?? null,
+    sparkline,
+    addedBy: row.addedBy,
+    addedByName: names.get(row.addedBy) ?? null,
+    addedAt: row.addedAt.toISOString(),
+    watchedByMe: row.addedBy === userId,
+    callId: row.callId,
+    twitterUrl: twitterUrlFrom(token.socials),
+    websiteUrl: websiteUrlFrom(token.socials),
+    links: tradingLinks(token.address),
+  };
+}
+
+/**
+ * The name each slot holder posts under, from their own most recent mention in
+ * THIS group (docs/decisions.md round 16 review). `watches.added_by`,
+ * `mentions.user_id` and `calls.caller_user_id` are all the same Telegram user
+ * id, so the latest mention a member wrote is the freshest display name we
+ * hold for them — keyed by member, never by coin.
+ *
+ * One batched query for the whole watchlist. A member who has never posted a
+ * call or a mention here is simply absent: the design would rather say
+ * "another member's slot" than attribute a slot to the wrong person.
+ */
+export async function loadSlotHolderNames(
+  db: Db,
+  groupId: number,
+  userIds: number[],
+): Promise<Map<number, string>> {
+  if (userIds.length === 0) return new Map();
+  const rows = await db
+    .selectDistinctOn([mentions.userId], { userId: mentions.userId, userName: mentions.userName })
+    .from(mentions)
+    .innerJoin(calls, eq(calls.id, mentions.callId))
+    .where(and(eq(calls.groupId, groupId), inArray(mentions.userId, userIds)))
+    .orderBy(mentions.userId, desc(mentions.at));
+  return new Map(rows.map((r) => [r.userId, r.userName]));
+}
+
 /** count(*) is a bigint, which postgres-js hands back as a string. */
 function countOf(rows: Array<{ n: string | number | null }>): number {
   const n = Number(rows[0]?.n ?? 0);
@@ -270,32 +393,44 @@ export function createBoardRoutes(db: Db): Hono<ApiEnv> {
     }
 
     const since = new Date(Date.now() - BOARD_WINDOW_HOURS[window] * 3_600_000);
-    const rows = await db
-      .select({ call: calls, token: tokens })
-      .from(calls)
-      .innerJoin(tokens, eq(tokens.id, calls.tokenId))
-      .where(
-        and(
-          eq(calls.groupId, group.id),
-          ne(calls.status, 'binned'),
-          gte(calls.lastMentionAt, since),
-          // Rug probation hides the card from EVERY section, died included
-          // (docs/decisions.md round 6). Filtered here rather than in
-          // classifySections so no section can ever leak a hidden token.
-          isNull(tokens.rugHiddenAt),
+    const [rows, watchRows] = await Promise.all([
+      db
+        .select({ call: calls, token: tokens })
+        .from(calls)
+        .innerJoin(tokens, eq(tokens.id, calls.tokenId))
+        .where(
+          and(
+            eq(calls.groupId, group.id),
+            ne(calls.status, 'binned'),
+            gte(calls.lastMentionAt, since),
+            // Rug probation hides the card from EVERY section, died included
+            // (docs/decisions.md round 6). Filtered here rather than in
+            // classifySections so no section can ever leak a hidden token.
+            isNull(tokens.rugHiddenAt),
+          ),
         ),
-      );
+      loadWatchlistRows(db, group.id),
+    ]);
 
-    const tokenIds = [...new Set(rows.map((r) => r.token.id))];
+    const cardTokenIds = [...new Set(rows.map((r) => r.token.id))];
+    // One sparkline query for cards AND watchlist rows: a watched coin with no
+    // call is not on the board, so its points would otherwise need a second
+    // round trip per entry.
+    const sparkTokenIds = [...new Set([...cardTokenIds, ...watchRows.map((w) => w.token.id)])];
+    // The group's active watches, straight off the rows we already have — the
+    // watchlist is every active row, so it answers "is the group watching this
+    // card" and "is the slot mine" without a second query.
+    const watchedIds = new Map(watchRows.map((w) => [w.token.id, w.addedBy]));
     // The client's own midnight: the server has no idea what day it is where
     // the member is, and a UTC day would report the wrong number for most of
     // the group's evening. An absent/junk offset falls back to UTC.
     const dayStartMs = startOfLocalDayMs(Date.now(), parseTzOffsetMin(c.req.query('tz')));
-    const [sparklines, watchedIds, todayCallCount, hiddenProbationCount] = await Promise.all([
-      loadSparklines(db, tokenIds),
-      loadWatchedTokenIds(db, group.id, tokenIds),
+    const slotHolderIds = [...new Set(watchRows.map((w) => w.addedBy))];
+    const [sparklines, todayCallCount, hiddenProbationCount, slotHolderNames] = await Promise.all([
+      loadSparklines(db, sparkTokenIds),
       loadTodayCallCount(db, group.id, dayStartMs),
       loadHiddenProbationCount(db, group.id),
+      loadSlotHolderNames(db, group.id, slotHolderIds),
     ]);
     const userId = c.get('userId');
     const cards = rows.map((r) =>
@@ -315,6 +450,9 @@ export function createBoardRoutes(db: Db): Hono<ApiEnv> {
       todayCallCount,
       hiddenProbationCount,
       sections: classifySections(cards),
+      watchlist: watchRows.map((w) =>
+        toWatchlistEntry(w, sparklines.get(w.token.id) ?? [], userId, slotHolderNames),
+      ),
     };
     return c.json(body);
   });
@@ -384,7 +522,86 @@ export function createBoardRoutes(db: Db): Hono<ApiEnv> {
     return c.body(null, 204);
   });
 
+  /**
+   * Watch by ADDRESS (docs/decisions.md round 16) — the web's version of
+   * `/overseer watch <ca>`, and the only path for a coin the group has never
+   * called (a Sleepers row). Same cap, same credit, same immediate poll; the
+   * member is the session's, never the body's.
+   */
+  app.post('/api/g/:slug/watch', bodyLimit({ maxSize: WATCH_BODY_MAX_BYTES }), async (c) => {
+    const group = c.get('group');
+    const body = (await c.req.json().catch(() => null)) as { address?: unknown } | null;
+    const address = parseAddress(body?.address);
+    if (address === null) return c.json({ error: ADDRESS_ERROR }, 400);
+
+    const userId = c.get('userId');
+    const known = await findTokenByAddress(db, address);
+    // A coin the GROUP already watches consumes no slot — addWatch answers
+    // ok/alreadyActive for exactly this state, and the card route 204s — so the
+    // cap must not refuse it here either (round 16 review). It also cannot
+    // orphan anything: the tokens row is already there.
+    if (known && (await isWatched(db, group.id, known.id))) return c.body(null, 204);
+    // Cheap pre-check BEFORE upsertToken, exactly like the bot's: a cap refusal
+    // must not leave behind an orphan tokens row — no call, no watch — that the
+    // poller would then chase at the fresh tier for a day (round 15 review).
+    // addWatch's advisory-locked check stays the authoritative gate.
+    if ((await activeWatchCount(db, group.id, userId)) >= WATCH_CAP_PER_MEMBER) {
+      return c.json({ error: watchCapMessage(WATCH_CAP_PER_MEMBER), cap: WATCH_CAP_PER_MEMBER }, 409);
+    }
+    const token = known ?? (await upsertToken(db, address));
+    const outcome = await addWatch(db, group.id, token.id, userId);
+    if (!outcome.ok) return c.json({ error: watchCapMessage(outcome.cap), cap: outcome.cap }, 409);
+
+    // A coin nobody called has never been polled: resolve it now so the alert
+    // engine (and the ON WATCH row) has a symbol and a price to work from.
+    pollTokenNow(db, token.id).catch((err) =>
+      console.error(`immediate poll failed for watched ${address}:`, err),
+    );
+    return c.body(null, 204);
+  });
+
+  /**
+   * Unwatch by address. Always 204: unwatching is idempotent, and a coin this
+   * group never watched must answer exactly like one that is not in `tokens` at
+   * all — the lookup is chain-wide (like the bot's unwatch), so anything else
+   * would turn the response into an existence oracle over every group's coins.
+   * A malformed address answers the same way, without touching the database.
+   */
+  app.delete('/api/g/:slug/watch/:address', async (c) => {
+    const group = c.get('group');
+    const address = parseAddress(c.req.param('address'));
+    if (address !== null) {
+      const token = await findTokenByAddress(db, address);
+      // Group-scoped inside removeWatch: another group's watch is untouchable.
+      if (token) await removeWatch(db, group.id, token.id);
+    }
+    return c.body(null, 204);
+  });
+
   return app;
+}
+
+const ADDRESS_ERROR = 'address must be a contract address (0x + 40 hex)';
+
+/**
+ * The whole expected body is one address — about 60 bytes. Anything past a
+ * kilobyte is refused (413) before Node buffers it, so a member's session
+ * cannot be used to make the process hold an arbitrary amount of memory.
+ */
+const WATCH_BODY_MAX_BYTES = 1024;
+
+/**
+ * The address a watch action names, normalised the way ingest normalises the
+ * ones it reads out of chat: EIP-55 checked when mixed case, stored lowercase
+ * (packages/shared/src/extract.ts). Unlike the chat command this refuses an
+ * address buried in other text — a JSON field is not a sentence, and accepting
+ * junk around it would let two different bodies mean the same watch.
+ */
+export function parseAddress(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  const address = extractEvmAddresses(trimmed)[0];
+  return address !== undefined && address === trimmed.toLowerCase() ? address : null;
 }
 
 /** The columns these ids compare against are int4. */

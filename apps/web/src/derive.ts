@@ -4,7 +4,7 @@
  * server did not send.
  */
 
-import type { BoardCard, BoardResponse } from '@groupie/shared';
+import type { BoardCard, BoardResponse, SparkPoint, WatchlistEntry } from '@groupie/shared';
 import { ageMs } from './format';
 
 /** Market numbers older than this get a visible "as of" hint. */
@@ -54,14 +54,26 @@ export function statusEdge(card: BoardCard, now: number): StatusEdge {
  * reach back to the revival instant — better silent than made up.
  */
 export function revivalDelta(card: BoardCard): number | null {
+  const atRevival = mcapAtRevival(card);
+  if (atRevival === null) return null;
+  if (typeof card.mcapUsd !== 'number' || !Number.isFinite(card.mcapUsd)) return null;
+  return ((card.mcapUsd - atRevival) / atRevival) * 100;
+}
+
+/**
+ * The market cap the comeback started from, read off the sample nearest the
+ * revival instant. Approximate by construction — it is our own 5-minute trace,
+ * not a stored figure — which is why the card only prints it when the trace
+ * really covers the moment.
+ *
+ * The trace is downsampled to <=30 points over 24h, so "the first point after
+ * the revival" can easily BE the current reading, which would report a
+ * meaningless 0% delta. Nothing is claimed when that is the case.
+ */
+export function mcapAtRevival(card: BoardCard): number | null {
   const revivedAt = card.revivingAt === null ? null : Date.parse(card.revivingAt);
   if (revivedAt === null || Number.isNaN(revivedAt)) return null;
-  if (typeof card.mcapUsd !== 'number' || !Number.isFinite(card.mcapUsd)) return null;
 
-  // The trace is downsampled to <=30 points over 24h, so "the first point after
-  // the revival" can easily BE the current reading — which would report a
-  // meaningless 0%. Take the sample nearest the revival instant instead, and
-  // say nothing at all when that sample is the current one.
   const usable = card.sparkline.filter(
     (point) => typeof point.mcap === 'number' && Number.isFinite(point.mcap) && point.mcap > 0,
   );
@@ -72,9 +84,7 @@ export function revivalDelta(card: BoardCard): number | null {
     if (Math.abs(usable[i]!.t - revivedAt) < Math.abs(usable[nearest]!.t - revivedAt)) nearest = i;
   }
   if (nearest === usable.length - 1) return null;
-
-  const atRevival = usable[nearest]!.mcap;
-  return ((card.mcapUsd - atRevival) / atRevival) * 100;
+  return usable[nearest]!.mcap;
 }
 
 export interface PulseData {
@@ -90,6 +100,23 @@ export interface PulseData {
   bestReviving: { label: string; pct: number } | null;
   /** Age of the payload itself, in ms. */
   asOfMs: number | null;
+  /** Design pass 2: the day drawn as a ratio (the day-outcome strip). */
+  outcome: OutcomeCounts;
+}
+
+/**
+ * The day-outcome strip (design pass 2, "Derived data"). Four segments whose
+ * widths are proportional to the counts, all four counted over the SAME
+ * population the strip is labelled with — the calls made since local midnight:
+ * runners are today's alive cards at >= 3x, reviving and died are today's, and
+ * "active" is whatever is left of the group's day (the server's todayCallCount
+ * minus the three named outcomes, floored at 0).
+ */
+export interface OutcomeCounts {
+  runners: number;
+  active: number;
+  reviving: number;
+  died: number;
 }
 
 function label(card: BoardCard): string {
@@ -156,15 +183,220 @@ export function derivePulse(
   }
 
   const generated = Date.parse(board.generatedAt);
+  const died = (board.sections.died ?? []).filter((card) => !hidden.has(card.callId)).length;
+
+  // The strip is labelled TODAY'S N, so every segment counts the same day: a
+  // 30d window's 40 deaths are not part of a two-call day, and drawing them
+  // there made "active" floor at 0 and the bar dwarf its own label.
+  const todayIds = new Set(today.map((card) => card.callId));
+  const outcomeRunners = today.filter(
+    (card) =>
+      !isDied(card) &&
+      typeof card.multiple === 'number' &&
+      Number.isFinite(card.multiple) &&
+      card.multiple >= RUNNER_MULTIPLE,
+  ).length;
+  const outcomeReviving = reviving.filter((card) => todayIds.has(card.callId)).length;
+  const outcomeDied = today.filter((card) => isDied(card)).length;
+  const active = Math.max(
+    0,
+    board.todayCallCount - (outcomeRunners + outcomeReviving + outcomeDied),
+  );
 
   return {
     // The server counts the day; the payload only ever knew this window's slice
     // of it (cache.ts drops any blob that predates the field).
     calls: board.todayCallCount,
     best,
-    died: (board.sections.died ?? []).filter((card) => !hidden.has(card.callId)).length,
+    died,
     reviving: reviving.length,
     bestReviving,
     asOfMs: Number.isNaN(generated) ? null : Math.max(0, now - generated),
+    outcome: { runners: outcomeRunners, active, reviving: outcomeReviving, died: outcomeDied },
   };
+}
+
+// ---------------------------------------------------------------- pass 2 derivations
+
+const HOUR_MS = 60 * 60 * 1000;
+
+function usablePoints(points: SparkPoint[]): SparkPoint[] {
+  return points.filter(
+    (p) => typeof p.mcap === 'number' && Number.isFinite(p.mcap) && p.mcap > 0,
+  );
+}
+
+/**
+ * The 1h move chip (design pass 2): the nearest sample at least 60 minutes
+ * before the last sample, against the last sample. null — and therefore no chip
+ * at all — when the trace does not reach back an hour, which is the honest
+ * answer for a coin called twenty minutes ago.
+ */
+export function moveOneHour(points: SparkPoint[]): number | null {
+  const usable = usablePoints(points);
+  if (usable.length < 2) return null;
+  const last = usable[usable.length - 1]!;
+  for (let i = usable.length - 2; i >= 0; i--) {
+    const point = usable[i]!;
+    if (last.t - point.t >= HOUR_MS) {
+      return ((last.mcap - point.mcap) / point.mcap) * 100;
+    }
+  }
+  return null;
+}
+
+/** LP as a whole percentage of market cap — printed, never judged. */
+export function lpRatioPct(value: {
+  liquidityUsd: number | null;
+  mcapUsd: number | null;
+}): number | null {
+  const { liquidityUsd, mcapUsd } = value;
+  if (liquidityUsd === null || mcapUsd === null || !(mcapUsd > 0)) return null;
+  return (liquidityUsd / mcapUsd) * 100;
+}
+
+/**
+ * Where "now" sits on the call -> peak dollar scale, 0..1. null when there is no
+ * span to place it on (no peak above the call price), which is exactly when the
+ * gauge has nothing to say.
+ */
+export function gaugePosition(card: BoardCard): number | null {
+  const { mcapUsd, mcapAtCall, peakMcapSinceCall } = card;
+  if (mcapUsd === null || mcapAtCall === null || peakMcapSinceCall === null) return null;
+  const span = peakMcapSinceCall - mcapAtCall;
+  if (!(span > 0)) return null;
+  return Math.min(1, Math.max(0, (mcapUsd - mcapAtCall) / span));
+}
+
+/** Position inside a band as 0..1 — the Sleepers/Ranging tick. */
+export function bandPosition(value: number | null, loUsd: number, hiUsd: number): number | null {
+  if (value === null || !Number.isFinite(value)) return null;
+  const span = hiUsd - loUsd;
+  if (!(span > 0)) return null;
+  return Math.min(1, Math.max(0, (value - loUsd) / span));
+}
+
+/** One ON WATCH row: the group's watch, plus the board card behind it if any. */
+export interface WatchRow {
+  entry: WatchlistEntry;
+  /** The matching board card, when this watch is also one of the group's calls. */
+  card: BoardCard | null;
+  /**
+   * The group HAS a non-binned call for this coin — which is not the same as
+   * having a card here: the sections are windowed and probation-filtered, the
+   * watchlist is neither. Only a false here earns the words "no call".
+   */
+  hasCall: boolean;
+  /** Read off whichever trace we have — the card's, else the entry's. */
+  move1h: number | null;
+}
+
+export interface InPlay {
+  runners: BoardCard[];
+  retraced: BoardCard[];
+  reviving: BoardCard[];
+  watch: WatchRow[];
+}
+
+type VisibleSections = Record<keyof BoardResponse['sections'], BoardCard[]>;
+
+/** Nulls always sort last, whichever direction the comparator runs. */
+function byDesc<T>(read: (value: T) => number | null) {
+  return (a: T, b: T): number => {
+    const left = read(a);
+    const right = read(b);
+    if (left === null && right === null) return 0;
+    if (left === null) return 1;
+    if (right === null) return -1;
+    return right - left;
+  };
+}
+
+/**
+ * The three IN PLAY rank rules, on their own so the mobile tabs can apply the
+ * same order to their own (unfiltered) lists — one zone, one ordering, whichever
+ * surface is drawing it.
+ *
+ * "Moving now first": a runner that is up 4x but flat for six hours is not the
+ * one a returning member wants at the top.
+ */
+export function rankRunners(cards: BoardCard[]): BoardCard[] {
+  return [...cards].sort(byDesc((card: BoardCard) => moveOneHour(card.sparkline)));
+}
+
+/** "Liquidity intact first" — the ratio is printed, never judged. */
+export function rankRetraced(cards: BoardCard[]): BoardCard[] {
+  return [...cards].sort(byDesc(lpRatioPct));
+}
+
+/** "Strongest comeback first." */
+export function rankReviving(cards: BoardCard[]): BoardCard[] {
+  return [...cards].sort(byDesc(revivalDelta));
+}
+
+/**
+ * The IN PLAY column (design pass 2, behaviour change 2). Ranked by the data,
+ * not by when a coin was called — and a coin appears in exactly ONE of the
+ * three P&L zones, with priority REVIVING > RUNNERS > RETRACED.
+ *
+ * ON WATCH is NOT part of that de-duplication (round 16 review): the zone is
+ * the slot inventory, the one place a member can see and free every slot they
+ * hold, so hiding a watched runner from it would make "your slots 3 / 3" sit
+ * over an empty list. The watch dot still marks the coin wherever else it sits.
+ *
+ * It renders from the group's whole watchlist, not from card.watched: a watch
+ * set in the chat, or from a Sleepers row, has no call on this board at all and
+ * would otherwise be invisible — and un-freeable.
+ */
+export function deriveInPlay(board: BoardResponse, visible: VisibleSections): InPlay {
+  const reviving = rankReviving(visible.reviving);
+  const taken = new Set<number>(reviving.map((card) => card.callId));
+
+  const runners = rankRunners(visible.runners.filter((card) => !taken.has(card.callId)));
+  for (const card of runners) taken.add(card.callId);
+
+  const retraced = rankRetraced(visible.retraced.filter((card) => !taken.has(card.callId)));
+  for (const card of retraced) taken.add(card.callId);
+
+  return { runners, retraced, reviving, watch: deriveWatchRows(board, visible) };
+}
+
+/**
+ * The ON WATCH rows: the group's ENTIRE active watchlist, joined to the board
+ * cards where this window happens to carry one. A watch whose call is outside
+ * the window, on rug probation, or dead keeps its `hasCall` and says so — only
+ * a watch with no call at all is a chat or Sleepers watch.
+ */
+export function deriveWatchRows(board: BoardResponse, visible: VisibleSections): WatchRow[] {
+  // Every card still on the board, so a watch with a call can borrow its
+  // sparkline, multiple and call story.
+  const byCallId = new Map<number, BoardCard>();
+  for (const cards of Object.values(visible)) {
+    for (const card of cards) if (!byCallId.has(card.callId)) byCallId.set(card.callId, card);
+  }
+
+  const rows: WatchRow[] = [];
+  for (const entry of board.watchlist ?? []) {
+    const hasCall = entry.callId !== null;
+    const card = entry.callId === null ? null : (byCallId.get(entry.callId) ?? null);
+    rows.push({ entry, card, hasCall, move1h: moveOneHour(card ? card.sparkline : entry.sparkline) });
+  }
+  // "Biggest 1h move first" — magnitude, so a nuke ranks with a runner.
+  rows.sort(byDesc((row: WatchRow) => (row.move1h === null ? null : Math.abs(row.move1h))));
+  return rows;
+}
+
+/** `your slots n / 3` — how many of the reader's own cap slots are spent. */
+export function mySlots(board: BoardResponse): number {
+  return (board.watchlist ?? []).filter((entry) => entry.watchedByMe).length;
+}
+
+/**
+ * How the ON WATCH subline names the slot holder. Every row in the zone is
+ * watched by definition, so "watched" said nothing: the question the cap makes
+ * a member ask is WHOSE slot this is.
+ */
+export function slotLabel(entry: WatchlistEntry): string {
+  if (entry.watchedByMe) return 'your slot';
+  return entry.addedByName ? `${entry.addedByName}’s slot` : 'another member’s slot';
 }

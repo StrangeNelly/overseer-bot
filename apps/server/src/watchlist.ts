@@ -1,6 +1,6 @@
 import { and, eq, sql } from 'drizzle-orm';
 import { calls, tokens, watches, type Db, type DbLike } from '@groupie/db';
-import { WATCH_CAP_PER_MEMBER } from '@groupie/shared';
+import { ROBINHOOD_CHAIN_ID, WATCH_CAP_PER_MEMBER } from '@groupie/shared';
 import { publish } from './events.js';
 
 /**
@@ -139,6 +139,25 @@ export async function isWatched(db: Db, groupId: number, tokenId: number): Promi
     )
     .limit(1);
   return rows.length > 0;
+}
+
+/**
+ * The token an ADDRESS names, whatever group called it — or nothing, when we
+ * have never seen the coin. Unscoped on purpose, and not the oracle
+ * findGroupToken guards against: naming a contract address proves the caller
+ * already knows the coin, which is why watching by address has always been
+ * allowed for coins nobody here ever called.
+ */
+export async function findTokenByAddress(
+  db: Db,
+  address: string,
+): Promise<{ id: number; symbol: string | null } | undefined> {
+  const rows = await db
+    .select({ id: tokens.id, symbol: tokens.symbol })
+    .from(tokens)
+    .where(and(eq(tokens.chainId, ROBINHOOD_CHAIN_ID), eq(tokens.address, address)))
+    .limit(1);
+  return rows[0];
 }
 
 /**

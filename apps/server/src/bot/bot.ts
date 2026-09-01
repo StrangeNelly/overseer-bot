@@ -20,7 +20,13 @@ import {
   type AlertSettings,
 } from '@groupie/shared';
 import { publish } from '../events.js';
-import { activeWatchCount, addWatch, removeWatch } from '../watchlist.js';
+import {
+  activeWatchCount,
+  addWatch,
+  findTokenByAddress,
+  isWatched,
+  removeWatch,
+} from '../watchlist.js';
 import {
   alertSettingsOf,
   clampAlertSetting,
@@ -187,7 +193,8 @@ function capReply(cap: number = WATCH_CAP_PER_MEMBER): string {
   );
 }
 
-async function handleWatch(
+/** Exported for tests: the cap rule has to read the same on all three surfaces. */
+export async function handleWatch(
   db: Db,
   ctx: Context,
   group: GroupRow,
@@ -199,16 +206,21 @@ async function handleWatch(
     await ctx.reply('Usage: /overseer watch <contract address>');
     return;
   }
+  const known = await findTokenByAddress(db, address);
+  // A coin the GROUP already watches consumes no slot (addWatch answers
+  // ok/alreadyActive), so the cap must not refuse it — round 16 review, and the
+  // same rule the board's two watch routes follow.
+  const alreadyWatched = known !== undefined && (await isWatched(db, group.id, known.id));
   // Cheap pre-check BEFORE upsertToken: a cap refusal must not leave behind an
   // orphan tokens row — no call, no watch — that the poller would then chase
   // at the fresh tier for a day (round 15 review). The advisory-locked check
   // inside addWatch stays the authoritative gate; a race slipping past this
   // one leaks at most a single row.
-  if ((await activeWatchCount(db, group.id, userId)) >= WATCH_CAP_PER_MEMBER) {
+  if (!alreadyWatched && (await activeWatchCount(db, group.id, userId)) >= WATCH_CAP_PER_MEMBER) {
     await ctx.reply(capReply());
     return;
   }
-  const token = await upsertToken(db, address);
+  const token = known ?? (await upsertToken(db, address));
   // One implementation for the chat command and the board button, cap included
   // (docs/decisions.md round 15) — see apps/server/src/watchlist.ts.
   const outcome = await addWatch(db, group.id, token.id, userId);

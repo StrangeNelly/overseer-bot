@@ -1,5 +1,5 @@
-import { useCallback, useState } from 'react';
-import type { BoardCard } from '@groupie/shared';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { TradingLinkRow } from '@groupie/shared';
 import { copyText } from '../clipboard';
 
 /**
@@ -17,17 +17,41 @@ import { copyText } from '../clipboard';
  * Telegram alerts on for this coin, exactly like `/overseer watch`. Cyan when
  * on — the analysis accent, never green/red (those are P&L) and never magenta
  * (that is the brand).
+ *
+ * Round 16 widened both halves. The component takes a plain LinkTarget rather
+ * than a BoardCard, because the owner's rule is that EVERY coin the app shows
+ * carries watch/unwatch — including the ones that are not the group's calls
+ * (Sleepers rows) and the ones with no call on this board (chat watches).
  */
 
+/** The scale-pop's own length (design pass 2: "WATCH toggle 150ms scale-pop"). */
+const POP_MS = 150;
+
+/** Anything with an address and a link row: a card, a watch, a sleeper. */
+export interface LinkTarget {
+  address: string;
+  symbol: string | null;
+  twitterUrl: string | null;
+  websiteUrl: string | null;
+  links: TradingLinkRow;
+}
+
+/**
+ * The watch pill's whole state, resolved by the surface. Self-contained on
+ * purpose: a Sleepers row has no BoardCard to hand this component, and the
+ * server owns the cap, so the pill only ever reports what the last payload said.
+ */
 export interface WatchControl {
-  /** Omit to render no watch pill at all (surfaces with no session action). */
-  onWatch: (card: BoardCard, next: boolean) => void;
-  /** This card's toggle is in flight. */
+  watched: boolean;
+  /** ...and the active watch is one of the reader's own three slots. */
+  watchedByMe: boolean;
+  /** This coin's toggle is in flight. */
   pending: boolean;
+  onToggle: (next: boolean) => void;
 }
 
 interface LinkPillsProps {
-  card: BoardCard;
+  target: LinkTarget;
   watch?: WatchControl;
 }
 
@@ -36,69 +60,108 @@ interface LinkPillsProps {
  * `.row-pills`, the desktop `.row-hoverlinks`, a spotlight card's `.card-links`)
  * and sizes them from it.
  */
-export function LinkPills({ card, watch }: LinkPillsProps) {
+export function LinkPills({ target, watch }: LinkPillsProps) {
   const [copied, setCopied] = useState(false);
 
   const onCopy = useCallback(() => {
-    void copyText(card.address).then((ok) => {
+    void copyText(target.address).then((ok) => {
       if (!ok) return;
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1_400);
     });
-  }, [card.address]);
-
-  const label = card.symbol ? `$${card.symbol}` : 'this coin';
+  }, [target.address]);
 
   return (
     <>
-      <a className="pill" href={card.links.axiom} target="_blank" rel="noopener">
+      <a className="pill" href={target.links.axiom} target="_blank" rel="noopener">
         AXIOM
       </a>
-      <a className="pill" href={card.links.gmgn} target="_blank" rel="noopener">
+      <a className="pill" href={target.links.gmgn} target="_blank" rel="noopener">
         GMGN
       </a>
-      <a className="pill" href={card.links.dexscreener} target="_blank" rel="noopener">
+      <a className="pill" href={target.links.dexscreener} target="_blank" rel="noopener">
         DEXS
       </a>
       <button type="button" className="pill pill-copy" onClick={onCopy}>
         {copied ? 'COPIED ✓' : 'COPY CA'}
       </button>
       {/* The project's X account, where we have one (docs/decisions.md round 9). */}
-      {card.twitterUrl ? (
-        <a className="pill" href={card.twitterUrl} target="_blank" rel="noopener">
+      {target.twitterUrl ? (
+        <a className="pill" href={target.twitterUrl} target="_blank" rel="noopener">
           X
         </a>
       ) : null}
       {/* ...and its website, where we have one (round 15). */}
-      {card.websiteUrl ? (
-        <a className="pill" href={card.websiteUrl} target="_blank" rel="noopener">
+      {target.websiteUrl ? (
+        <a className="pill" href={target.websiteUrl} target="_blank" rel="noopener">
           WEBSITE
         </a>
       ) : null}
-      {watch ? (
-        <button
-          type="button"
-          className={`pill pill-watch${card.watched ? ' is-on' : ''}`}
-          aria-pressed={card.watched}
-          aria-label={
-            card.watched ? `Stop watching ${label}` : `Watch ${label} for alerts in the chat`
-          }
-          title={
-            // The cap is per member (3 slots), so the pill has to say WHOSE
-            // slot this is — "unwatch one first" is only actionable when your
-            // own watches are tellable from everyone else's.
-            card.watchedByMe
-              ? 'Your watch — one of your 3 slots. Tap to stop.'
-              : card.watched
-                ? 'Alerts on for the whole group (another member’s slot) — tap to stop'
-                : 'Nuke / buy-opp alerts in the chat for this coin'
-          }
-          disabled={watch.pending}
-          onClick={() => watch.onWatch(card, !card.watched)}
-        >
-          {watch.pending ? '…' : card.watchedByMe ? 'WATCHING·YOU' : card.watched ? 'WATCHING' : 'WATCH'}
-        </button>
-      ) : null}
+      {watch ? <WatchPill target={target} watch={watch} /> : null}
     </>
+  );
+}
+
+/**
+ * The WATCH toggle on its own — pinned right in a links strip, but also usable
+ * where there is no strip (the died rail, a range card's reveal).
+ */
+export function WatchPill({
+  target,
+  watch,
+  className,
+}: {
+  target: LinkTarget;
+  watch: WatchControl;
+  className?: string;
+}) {
+  const label = target.symbol ? `$${target.symbol}` : 'this coin';
+  // The 150ms scale-pop answers a TOGGLE. Tied to the on-state it replayed on
+  // every hover reveal and on every first paint — motion carrying no news.
+  const [popping, setPopping] = useState(false);
+  const wasWatched = useRef(watch.watched);
+  useEffect(() => {
+    if (wasWatched.current === watch.watched) return;
+    wasWatched.current = watch.watched;
+    if (!watch.watched) return;
+    setPopping(true);
+    const id = window.setTimeout(() => setPopping(false), POP_MS);
+    return () => window.clearTimeout(id);
+  }, [watch.watched]);
+
+  return (
+    <button
+      type="button"
+      className={`pill pill-watch${watch.watched ? ' is-on' : ''}${popping ? ' is-just-toggled' : ''}${className ? ` ${className}` : ''}`}
+      aria-pressed={watch.watched}
+      aria-label={watch.watched ? `Stop watching ${label}` : `Watch ${label} for alerts in the chat`}
+      title={
+        // The cap is per member (3 slots), so the pill has to say WHOSE slot
+        // this is — "unwatch one first" is only actionable when your own
+        // watches are tellable from everyone else's. The off state describes
+        // what the alerts ARE: their internal names are verdicts the board
+        // never prints.
+        watch.watchedByMe
+          ? 'Your watch — one of your 3 slots. Tap to stop.'
+          : watch.watched
+            ? 'Alerts on for the whole group (another member’s slot) — tap to stop'
+            : 'Turn on the chat alerts for this coin (big moves, sharp drops)'
+      }
+      disabled={watch.pending}
+      onClick={() => watch.onToggle(!watch.watched)}
+    >
+      {watch.pending ? (
+        '…'
+      ) : watch.watched ? (
+        <>
+          <span className="pill-dot" aria-hidden="true">
+            ●
+          </span>
+          {watch.watchedByMe ? ' WATCHING · YOU' : ' WATCHING'}
+        </>
+      ) : (
+        'WATCH'
+      )}
+    </button>
   );
 }

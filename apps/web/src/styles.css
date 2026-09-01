@@ -407,59 +407,69 @@ a {
   animation: revalidate 1.1s ease-in-out infinite;
 }
 
-/* ---------- section tabs ---------- */
+/* ---------- zone chips (mobile tab strip, design pass 2 · 3F) ----------
+   The tab row became a strip of bordered boxes, each wearing the tone of the
+   zone it opens: the chip and the headline band it reveals are the same colour
+   idea, so a tap never has to be re-read. The strip scrolls under a fade. */
 
-.tabs {
+.zchips-wrap {
+  position: relative;
+}
+
+.zchips {
   display: flex;
-  gap: 0;
-  padding: 0 8px;
-  border-bottom: 1px solid var(--sect-border);
+  gap: 6px;
+  padding: 12px 14px 2px;
   overflow-x: auto;
   scrollbar-width: none;
 }
 
-.tabs::-webkit-scrollbar {
+.zchips::-webkit-scrollbar {
   display: none;
 }
 
-.tab {
+.zchips-fade {
+  position: absolute;
+  right: 0;
+  top: 12px;
+  bottom: 2px;
+  width: 36px;
+  pointer-events: none;
+  background: linear-gradient(90deg, rgba(11, 5, 20, 0), #0b0514);
+}
+
+.zchip {
   flex: 0 0 auto;
   display: inline-flex;
+  flex-direction: column;
   align-items: center;
-  gap: 5px;
-  min-height: 38px;
-  padding: 9px 8px 7px;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  background: transparent;
-  color: var(--dimmer);
-  font: 500 10px var(--font-mono);
-  letter-spacing: 0.5px;
+  gap: 2px;
+  padding: 7px 10px;
+  border: 1px solid var(--sect-border);
+  border-radius: 8px;
+  background: var(--zone-bg);
+  color: var(--dim);
+  font: 600 9.5px var(--font-mono);
+  letter-spacing: 1px;
   white-space: nowrap;
 }
 
-.tab.is-active {
-  color: var(--text);
-  font-weight: 600;
-  border-bottom-color: var(--magenta);
-}
-
-.tab-count {
+.zchip-count {
+  font: 600 10px var(--font-mono);
   color: var(--dimmer);
   font-variant-numeric: tabular-nums;
 }
 
-.tab.is-active .tab-count {
-  color: var(--dim);
+/* Active = the zone's tone at 45% on the border, 8% on the fill, with a glow. */
+.zchip.is-active {
+  color: var(--tone);
+  border-color: var(--tone-45);
+  background: var(--tone-08);
+  box-shadow: 0 0 12px var(--tone-15);
 }
 
-/* Reviving is the one cyan tab — cyan is the comeback state colour. */
-.tab-cyan .tab-count {
-  color: var(--cyan);
-}
-
-.tab-cyan.is-active {
-  border-bottom-color: var(--cyan);
+.zchip.is-active .zchip-count {
+  color: var(--tone);
 }
 
 /* ---------- rows ---------- */
@@ -875,11 +885,25 @@ a {
   background: var(--wash-magenta);
 }
 
-/* Desktop: hover swaps the sparkline for the pills — no reserved row, no shift. */
+/* Desktop: hover slides the pills OVER the shape and the numbers on a short
+   gradient — nothing reflows, and a 350px rail still fits six of them. */
 .row-hoverlinks {
   display: none;
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  max-width: 100%;
+  padding: 0 12px 0 28px;
+  background: linear-gradient(90deg, rgba(21, 12, 38, 0), var(--fill-2) 22px);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.row-hoverlinks::-webkit-scrollbar {
+  display: none;
 }
 
 .row-hoverlinks .pill {
@@ -888,11 +912,16 @@ a {
   font-size: 8.5px;
 }
 
-@media (hover: hover) and (pointer: fine) {
-  .row:hover .row-spark {
-    display: none;
-  }
+/* Hover is not the only way in: a touch device at desktop width has none, and
+   neither does a keyboard. The row's own hit button opens the strip (is-tapped)
+   and puts it in reach of Tab (focus-within), which is the only route to the
+   WATCH pill — and on ON WATCH rows, to freeing a slot. */
+.row.is-tapped .row-hoverlinks,
+.row:focus-within:not(.is-open) .row-hoverlinks {
+  display: flex;
+}
 
+@media (hover: hover) and (pointer: fine) {
   .row:hover .row-hoverlinks {
     display: flex;
   }
@@ -972,7 +1001,7 @@ a {
 }
 
 .spark-area {
-  fill: rgba(0, 255, 156, 0.07);
+  fill: rgba(0, 255, 156, 0.08);
 }
 
 .spark-down .spark-area {
@@ -991,41 +1020,6 @@ a {
   flex-direction: column;
   gap: 10px;
   padding: 12px 14px;
-}
-
-.sect-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  padding-bottom: 8px;
-}
-
-.sect-title {
-  font: 700 11px var(--font-mono);
-  letter-spacing: 2px;
-  color: var(--text);
-}
-
-.sect-count {
-  margin-left: 6px;
-  color: var(--dim);
-  font-variant-numeric: tabular-nums;
-}
-
-.sect-note {
-  font: 400 9.5px var(--font-mono);
-  color: var(--dimmer);
-  text-align: right;
-}
-
-.sect-cyan .sect-title {
-  color: var(--cyan);
-  text-shadow: 0 0 8px rgba(35, 217, 255, 0.4);
-}
-
-.sect-dim .sect-title {
-  color: var(--dim);
 }
 
 .hero-card,
@@ -1190,14 +1184,6 @@ a {
   padding: 0;
 }
 
-.desk-ranging {
-  padding: 12px 20px 24px;
-}
-
-.back-btn {
-  margin-bottom: 8px;
-}
-
 .rail {
   border: 1px solid var(--sect-border);
   border-radius: var(--radius);
@@ -1281,24 +1267,6 @@ a {
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
-}
-
-.mini-listhead {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 9px 14px 5px;
-}
-
-.mini-label {
-  font: 600 9.5px var(--font-mono);
-  letter-spacing: 1.5px;
-  color: var(--dim);
-}
-
-.mini-listhead .link-btn {
-  color: var(--dimmer);
-  font-size: 9.5px;
 }
 
 .mini-rows {
@@ -1853,6 +1821,1441 @@ a {
   font-weight: 600;
 }
 
+/* =================================================================
+   DESIGN PASS 2 (Round 3 · 3A–3G)
+   Not a rebrand: every token above stays. What changes is separation
+   (every section becomes a bounded ZONE), anchoring (a real header),
+   wayfinding (view headlines) and visualisation (outcome strip, gauge,
+   band bars, hero sparklines). Palette law unchanged: green/red are
+   P&L only, cyan is analysis/state, magenta is the brand.
+   ================================================================= */
+
+:root {
+  /* one step above the page — the zone panel */
+  --zone-bg: #0f0819;
+}
+
+/* ---------- zone tones ----------
+   One declaration per tone, shared by the zone panel, its header band and the
+   mobile chip that opens it. */
+
+.zone-fresh,
+.zchip-fresh {
+  --tone: var(--text);
+  --tone-03: rgba(242, 234, 251, 0.03);
+  --tone-08: rgba(242, 234, 251, 0.06);
+  --tone-15: rgba(242, 234, 251, 0.12);
+  --tone-28: var(--panel-border);
+  --tone-45: rgba(242, 234, 251, 0.45);
+  --tone-edge: var(--sect-border);
+  --tone-glow: none;
+}
+
+.zone-runners,
+.zchip-runners {
+  --tone: var(--up);
+  --tone-03: rgba(0, 255, 156, 0.05);
+  --tone-08: rgba(0, 255, 156, 0.08);
+  --tone-15: rgba(0, 255, 156, 0.15);
+  --tone-28: rgba(0, 255, 156, 0.28);
+  --tone-45: rgba(0, 255, 156, 0.45);
+  --tone-edge: rgba(0, 255, 156, 0.22);
+  --tone-glow: 0 0 10px rgba(0, 255, 156, 0.35);
+}
+
+.zone-retraced,
+.zchip-retraced {
+  --tone: var(--text-2);
+  --tone-03: rgba(201, 184, 224, 0.04);
+  --tone-08: rgba(201, 184, 224, 0.08);
+  --tone-15: rgba(201, 184, 224, 0.12);
+  --tone-28: var(--panel-border);
+  --tone-45: rgba(201, 184, 224, 0.45);
+  --tone-edge: var(--sect-border);
+  --tone-glow: none;
+}
+
+.zone-reviving,
+.zchip-reviving,
+.zone-watch,
+.zchip-watch,
+.zone-cyan,
+.zchip-cyan {
+  --tone: var(--cyan);
+  --tone-03: rgba(35, 217, 255, 0.03);
+  --tone-08: rgba(35, 217, 255, 0.08);
+  --tone-15: rgba(35, 217, 255, 0.15);
+  --tone-28: rgba(35, 217, 255, 0.3);
+  --tone-45: rgba(35, 217, 255, 0.45);
+  --tone-edge: var(--sect-border);
+  --tone-glow: 0 0 10px rgba(35, 217, 255, 0.4);
+}
+
+.zone-reviving {
+  --tone-03: rgba(35, 217, 255, 0.05);
+  --tone-edge: rgba(35, 217, 255, 0.3);
+}
+
+/* ON WATCH and the analytical summaries wear cyan without the glow: they are
+   states and analysis, not the comeback ceremony. */
+.zone-watch,
+.zone-cyan,
+.zchip-watch,
+.zchip-cyan {
+  --tone-glow: none;
+}
+
+.zone-died,
+.zchip-died {
+  --tone: var(--dim);
+  --tone-03: rgba(142, 123, 168, 0.04);
+  --tone-08: rgba(142, 123, 168, 0.08);
+  --tone-15: rgba(142, 123, 168, 0.12);
+  --tone-28: var(--panel-border);
+  --tone-45: rgba(142, 123, 168, 0.45);
+  --tone-edge: var(--sect-border);
+  --tone-glow: none;
+}
+
+/* ---------- the zone ---------- */
+
+.zone {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--zone-bg);
+  border: 1px solid var(--tone-edge);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.zone.is-glow {
+  box-shadow: 0 0 28px rgba(35, 217, 255, 0.06);
+}
+
+.zone-band {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  height: 44px;
+  padding: 0 16px;
+  background: var(--tone-03);
+  border-bottom: 1px solid var(--tone-28);
+  /* Mobile tab switch: the tint cross-fades rather than cutting (3F motion). */
+  transition: background-color 200ms ease;
+}
+
+/* A band that carries a control as well as its note (the mobile SLEEPERS tab). */
+.zone-head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.zone-id {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.zone-dot {
+  align-self: center;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: var(--glow-cyan-dot);
+}
+
+.zone-headline {
+  font: 700 17px var(--font-display);
+  letter-spacing: 1px;
+  color: var(--tone);
+  text-shadow: var(--tone-glow);
+  white-space: nowrap;
+}
+
+.zone-count {
+  font: 600 12px var(--font-mono);
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.zone-note {
+  font: 400 9.5px var(--font-mono);
+  color: var(--dimmer);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.zone-note strong {
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.zone-open {
+  flex: 0 0 auto;
+  border: 0;
+  padding: 4px 0;
+  background: transparent;
+  color: var(--cyan);
+  font: 600 9.5px var(--font-mono);
+}
+
+.zone-foot {
+  margin: 0;
+  padding: 8px 14px 10px;
+  border-top: 1px solid var(--hairline);
+  font: 400 9px var(--font-mono);
+  color: var(--dimmer);
+}
+
+.zone .empty {
+  padding: 18px 16px;
+}
+
+/* Two-column result grids (Ranging cards, Sleepers bands). */
+.zone-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 20px;
+  padding: 22px 14px 30px;
+}
+
+/* ---------- header anchor (3A / 3E / 3F) ---------- */
+
+.head-div {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 18px;
+  background: var(--panel-border);
+}
+
+.head-mini .head-div {
+  display: none;
+}
+
+.wordmark {
+  font-size: 22px;
+  letter-spacing: 0.5px;
+  text-shadow: 0 0 14px rgba(255, 61, 190, 0.6);
+}
+
+.group-title {
+  font-size: 16px;
+}
+
+.head-mini {
+  align-items: baseline;
+}
+
+.head-mini .head-left {
+  flex: 1 1 auto;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.head-mini .wordmark {
+  font-size: 20px;
+}
+
+.head-mini .group-title {
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.head-desk .wordmark {
+  font-size: 28px;
+  text-shadow: 0 0 18px rgba(255, 61, 190, 0.6);
+}
+
+.head-desk .group-title {
+  font-size: 24px;
+}
+
+.head-desk {
+  padding: 18px 28px;
+}
+
+.head-desk .head-div {
+  height: 24px;
+}
+
+.head-desk .head-left,
+.head-desk .head-right {
+  gap: 18px;
+}
+
+.head-desk .live {
+  font-size: 10px;
+  letter-spacing: 1.5px;
+}
+
+.head-desk .live-dot {
+  width: 7px;
+  height: 7px;
+}
+
+.head-desk .win {
+  padding: 6px 10px;
+  font-size: 11px;
+}
+
+.head-desk .win.is-active {
+  border-radius: 4px;
+}
+
+/* ---------- pulse: the day as a shape ---------- */
+
+.pulse-strip {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 9px 14px 10px;
+  overflow: visible;
+}
+
+.pulse-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  white-space: nowrap;
+}
+
+.pulse-row::-webkit-scrollbar {
+  display: none;
+}
+
+.pulse-day {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.pulse-day-tag {
+  display: none;
+  flex: 0 0 auto;
+  font: 600 9px var(--font-mono);
+  letter-spacing: 1.5px;
+  color: var(--dim);
+}
+
+.out-strip {
+  display: flex;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 60px;
+}
+
+.out-strip-5 {
+  height: 5px;
+}
+
+.out-strip-6 {
+  height: 6px;
+}
+
+.out-seg {
+  /* Widths ease when the ratio changes — the day changing shape, slowly. */
+  transition: flex-grow 400ms ease;
+}
+
+.out-seg:first-child {
+  border-radius: 3px 0 0 3px;
+}
+
+.out-seg:last-child {
+  border-radius: 0 3px 3px 0;
+}
+
+/* Green because ">= 3x" is a P&L fact; died is the badge border, never red. */
+.out-runners {
+  background: var(--up);
+  box-shadow: 0 0 8px rgba(0, 255, 156, 0.5);
+}
+
+.out-active {
+  background: var(--dimmer);
+}
+
+.out-reviving {
+  background: var(--cyan);
+  box-shadow: 0 0 6px rgba(35, 217, 255, 0.5);
+}
+
+.out-died {
+  background: var(--badge-border);
+}
+
+.out-legend {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+  font: 500 8.5px var(--font-mono);
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.out-leg b {
+  font-weight: 600;
+}
+
+.out-leg-runners {
+  color: var(--up);
+}
+
+.out-leg-reviving {
+  color: var(--cyan);
+}
+
+.out-leg-died {
+  color: var(--dimmer);
+}
+
+/* Mobile has room for the numbers, not the nouns — except "died", which is the
+   one word the count alone would not carry. */
+.out-leg-word {
+  display: none;
+}
+
+.out-leg-died .out-leg-word,
+.pulse-hero .out-leg-word {
+  display: inline;
+}
+
+.pulse-hero .out-legend {
+  gap: 10px;
+  font-size: 9.5px;
+}
+
+.pulse-hero .pulse-calls,
+.pulse-hero .pulse-best {
+  font-size: 26px;
+}
+
+.pulse-hero .pulse-tag {
+  font-family: var(--font-display);
+  font-size: 9.5px;
+  letter-spacing: 2px;
+}
+
+/* Desktop: one band — items left, the day-outcome block right. */
+.app-desk .pulse-strip {
+  flex-direction: row;
+  align-items: center;
+  gap: 14px;
+  padding: 13px 28px;
+  font-size: 13px;
+}
+
+.app-desk .pulse-row {
+  flex: 1 1 auto;
+}
+
+.app-desk .pulse-day {
+  flex: 0 0 auto;
+  margin-left: auto;
+  gap: 12px;
+}
+
+.app-desk .pulse-day-tag {
+  display: inline;
+}
+
+.app-desk .out-strip {
+  flex: 0 0 200px;
+  width: 200px;
+}
+
+.app-desk .out-legend {
+  gap: 10px;
+  font-size: 9px;
+}
+
+.app-desk .out-leg-word {
+  display: inline;
+}
+
+.app-desk .pulse-tag {
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 3px;
+}
+
+/* ---------- desktop composition (3A) ---------- */
+
+.desk {
+  gap: 24px;
+  padding: 26px 28px 32px;
+}
+
+.desk-col {
+  gap: 20px;
+}
+
+.desk-feed {
+  flex: 0 0 350px;
+}
+
+.desk-play {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.desk-rail {
+  flex: 0 0 330px;
+}
+
+.desk-view {
+  padding: 0 0 32px;
+}
+
+.inplay-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 2px 0;
+}
+
+.inplay-id {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+}
+
+.inplay-title {
+  font: 700 22px var(--font-display);
+  letter-spacing: 1px;
+  color: var(--magenta);
+  text-shadow: 0 0 14px rgba(255, 61, 190, 0.5);
+}
+
+.inplay-note {
+  font: 400 10px var(--font-mono);
+  color: var(--dim);
+}
+
+.inplay-note-right {
+  font-size: 9.5px;
+  color: var(--dimmer);
+  text-align: right;
+}
+
+/* Inside a zone the rows sit flush: the zone already owns the border. */
+.feed-flat {
+  border: 0;
+  border-radius: 0;
+}
+
+.feed-attached {
+  margin: 0;
+  border-top: 1px solid var(--hairline);
+}
+
+.spotlights-zone,
+.spotlights-tab {
+  padding: 12px;
+  gap: 12px;
+}
+
+.desk .rail {
+  border: 0;
+  border-radius: 0;
+  /* Died rows are dim, never red: the rail reads as finished business. */
+  opacity: 0.7;
+}
+
+/* ---------- 1h move, LP and retrace chips ---------- */
+
+.move-chip,
+.lp-chip,
+.retrace-chip {
+  flex: 0 0 auto;
+  display: inline-block;
+  padding: 2px 6px;
+  border: 1px solid var(--badge-border);
+  border-radius: 3px;
+  font: 600 9.5px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.row .move-chip {
+  font-size: 9px;
+  padding: 2px 5px;
+}
+
+.move-up {
+  color: var(--up);
+  border-color: rgba(0, 255, 156, 0.35);
+}
+
+.move-down {
+  color: var(--down);
+  border-color: rgba(255, 77, 109, 0.35);
+}
+
+.lp-chip {
+  color: var(--text-2);
+}
+
+.retrace-chip {
+  color: var(--down);
+  border-color: rgba(255, 77, 109, 0.35);
+}
+
+/* ---------- the gauge: call -> now -> peak ---------- */
+
+.gauge {
+  position: relative;
+  height: 6px;
+  margin-top: 2px;
+  border-radius: 3px;
+  background: var(--fill-2);
+  border: 1px solid var(--sect-border);
+}
+
+.gauge-up {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: rgba(0, 255, 156, 0.35);
+  border-radius: 3px 0 0 3px;
+  transition: width 300ms ease;
+}
+
+.gauge-down {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  background: rgba(255, 77, 109, 0.18);
+  border-radius: 0 3px 3px 0;
+  transition: left 300ms ease;
+}
+
+.gauge-tick {
+  position: absolute;
+  top: -4px;
+  width: 2px;
+  height: 12px;
+  border-radius: 1px;
+  background: var(--text);
+  box-shadow: 0 0 8px rgba(242, 234, 251, 0.8);
+  transition: left 300ms ease;
+}
+
+.gauge-peak {
+  position: absolute;
+  right: -3px;
+  top: -1px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--magenta);
+  box-shadow: 0 0 6px rgba(255, 61, 190, 0.7);
+}
+
+.gauge-call {
+  position: absolute;
+  left: -3px;
+  top: -1px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  border: 1px solid var(--dim);
+}
+
+/* ---------- band bars ---------- */
+
+.bandbar {
+  position: relative;
+  flex: 1 1 auto;
+  border-radius: 3px;
+  background: var(--fill-2);
+  border: 1px solid var(--sect-border);
+}
+
+.bandbar-sm {
+  height: 6px;
+}
+
+.bandbar-hero {
+  height: 10px;
+  border-radius: 5px;
+  margin-top: 4px;
+}
+
+.bandbar-held {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(35, 217, 255, 0.28);
+  /* The held range only ever widens — a range that narrows is a new streak. */
+  transition:
+    left 300ms ease,
+    right 300ms ease;
+}
+
+.bandbar-tick {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 10px;
+  border-radius: 1px;
+  background: var(--cyan);
+  box-shadow: 0 0 8px var(--cyan);
+  transition: left 300ms ease;
+}
+
+.bandbar-hero .bandbar-tick {
+  top: -5px;
+  height: 18px;
+  box-shadow: 0 0 10px var(--cyan);
+}
+
+/* ---------- spotlight cards (3D) ---------- */
+
+.hero-card {
+  padding: 16px 18px 12px;
+  gap: 10px;
+  border: 0;
+  border-radius: 0;
+  box-shadow: inset 0 0 60px rgba(0, 255, 156, 0.035);
+}
+
+.story-card {
+  padding: 14px 18px 12px;
+  gap: 8px;
+  border: 0;
+  border-radius: 0;
+}
+
+.revive-card {
+  padding: 14px 18px 12px;
+  gap: 8px;
+  border: 0;
+  border-radius: 0;
+  box-shadow: inset 0 0 50px rgba(35, 217, 255, 0.04);
+}
+
+.revive-card.is-featured {
+  box-shadow: inset 0 0 50px rgba(35, 217, 255, 0.05);
+}
+
+.hero-top {
+  gap: 10px;
+}
+
+.hero-sym {
+  font-size: 16px;
+}
+
+/* 3A: the retraced/reviving story cards sit one step down from the hero. */
+.story-sym {
+  font-size: 14px;
+}
+
+.hero-mult {
+  font-size: 34px;
+  line-height: 1;
+}
+
+.story-mult {
+  font-size: 24px;
+  line-height: 1;
+}
+
+.revive-delta {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 24px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.revive-delta-unit {
+  font: 500 10px var(--font-mono);
+  color: var(--dim);
+  text-shadow: none;
+}
+
+/* The label row under a hero spark: the three numbers the trace is drawn
+   against, named rather than guessed at. */
+.spot-labels {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  flex-wrap: wrap;
+  font: 400 10px var(--font-mono);
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.spot-labels-spread {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.spot-base {
+  color: var(--faint);
+}
+
+.spot-peak {
+  color: var(--magenta);
+}
+
+.spot-revival {
+  color: var(--cyan);
+}
+
+.spot-faint {
+  color: var(--dimmer);
+}
+
+.spot-now {
+  color: var(--text-2);
+}
+
+.spot-down {
+  color: var(--down);
+}
+
+.spot-ends {
+  margin-left: auto;
+  color: var(--dimmer);
+}
+
+/* The runner hero pushes "now" to the right edge; retraced spreads three ways. */
+.hero-card .spot-labels > .spot-now {
+  margin-left: auto;
+}
+
+/* ---------- links strip: 20px, always on, WATCH pinned right (3D) ---------- */
+
+.card-links {
+  margin-top: 0;
+  padding-top: 10px;
+  gap: 6px;
+  border-top: 1px solid var(--fill-1);
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.card-links::-webkit-scrollbar {
+  display: none;
+}
+
+.card-links .pill {
+  min-height: 20px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  font-size: 8.5px;
+  letter-spacing: 0.5px;
+  opacity: 0.8;
+  transition: opacity 150ms ease;
+}
+
+.hero-card:hover .card-links .pill,
+.story-card:hover .card-links .pill,
+.revive-card:hover .card-links .pill,
+.card-links .pill:focus-visible {
+  opacity: 1;
+}
+
+.card-links .pill-watch {
+  margin-left: auto;
+  opacity: 1;
+}
+
+.pill-watch.is-on {
+  background: rgba(35, 217, 255, 0.12);
+  border-color: var(--cyan);
+  color: var(--cyan);
+  box-shadow: 0 0 8px rgba(35, 217, 255, 0.3);
+  transition: transform 150ms ease;
+}
+
+/* ---------- ON WATCH rows ---------- */
+
+.edge-none {
+  border-left-color: var(--badge-border);
+}
+
+.watch-nocall {
+  font: 600 10px var(--font-mono);
+  color: var(--dim);
+  letter-spacing: 0.5px;
+}
+
+/* A watched coin that died still holds a slot. Dim, never red — the died law. */
+.watch-died {
+  color: var(--dimmer);
+}
+
+/* The on-state's leading dot, the same motif the ON WATCH band wears. */
+.pill-dot {
+  font-size: 7px;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+/* ---------- died rail ---------- */
+
+.rail-watch {
+  flex: 0 0 auto;
+  min-height: 20px;
+  padding: 2px 6px;
+  font-size: 8.5px;
+  box-shadow: none;
+}
+
+/* ---------- view headers (3B / 3C wayfinding) ---------- */
+
+.view {
+  display: flex;
+  flex-direction: column;
+}
+
+.view-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 14px 0;
+}
+
+.view-id {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.view-crumb {
+  align-self: flex-start;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--cyan);
+  font: 500 10px var(--font-mono);
+}
+
+.view-line {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.view-title {
+  margin: 0;
+  font: 700 22px var(--font-display);
+  letter-spacing: 1px;
+  color: var(--text);
+}
+
+.view-sub {
+  font: 400 10px var(--font-mono);
+  color: var(--dim);
+}
+
+.view-hero {
+  color: var(--cyan);
+}
+
+.view-hard {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.view-note {
+  font: 400 9.5px var(--font-mono);
+  color: var(--dimmer);
+  text-align: right;
+}
+
+.view-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.app-desk .view-head {
+  padding: 22px 28px 0;
+}
+
+.app-desk .view-title {
+  font-size: 30px;
+}
+
+.app-desk .view-sub {
+  font-size: 11px;
+}
+
+/* Mobile hides the long right-hand note: the headline carries the frame. */
+.view-right .view-note {
+  display: none;
+}
+
+.app-desk .view-right .view-note {
+  display: inline;
+}
+
+/* ---------- control panels (3B / 3C) ---------- */
+
+.ctl-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 14px 14px 0;
+  padding: 12px 14px;
+  background: var(--zone-bg);
+  border: 1px solid var(--sect-border);
+  border-radius: 12px;
+}
+
+.ctl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ctl-label {
+  flex: 0 0 auto;
+  width: 84px;
+  font: 600 9px var(--font-mono);
+  letter-spacing: 1.5px;
+  color: var(--dim);
+}
+
+.ctl-note {
+  flex: 1 1 auto;
+  margin-left: auto;
+  font: 400 9.5px var(--font-mono);
+  color: var(--dimmer);
+  text-align: right;
+  display: none;
+}
+
+.app-desk .ctl-panel {
+  margin: 18px 28px 0;
+  padding: 14px 18px;
+}
+
+.app-desk .ctl-row {
+  flex-wrap: nowrap;
+}
+
+.app-desk .ctl-note {
+  display: block;
+}
+
+/* Chips at view size: square-ish, 11px, filled when active. */
+.app-desk .chip {
+  min-height: 0;
+  padding: 6px 12px;
+  border-radius: 5px;
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+/* ...and a filled chip keeps its dark ink: this rule sits after the base
+   `.chip.is-active` at the same specificity, so without it the active band and
+   duration chips print lavender text on a magenta/cyan fill. */
+.app-desk .chip.is-active {
+  color: var(--ink);
+}
+
+.app-desk .chip-hours {
+  border-color: var(--badge-border-cyan);
+}
+
+.app-desk .chip:disabled {
+  color: var(--faint);
+  border-style: dashed;
+  border-color: var(--badge-border);
+  opacity: 1;
+}
+
+.chip.is-active {
+  transition: none;
+}
+
+/* ---------- ranging cards (3B) ---------- */
+
+.range-grid {
+  padding: 18px 14px 30px;
+}
+
+.app-desk .zone-grid {
+  grid-template-columns: 1fr 1fr;
+  padding: 22px 28px 30px;
+}
+
+.range-row {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 18px;
+  background: var(--zone-bg);
+  border: 1px solid var(--sect-border);
+  border-radius: 12px;
+}
+
+.range-top {
+  gap: 10px;
+}
+
+.range-sym {
+  font-size: 14px;
+}
+
+.range-hero {
+  font-size: 28px;
+  line-height: 1;
+}
+
+.range-since {
+  font: 400 9px var(--font-mono);
+  color: var(--dimmer);
+}
+
+.band-labels {
+  font-size: 9.5px;
+}
+
+/* The reveal: pills take the meta line's place, so the card never reflows. */
+.range-links {
+  display: none;
+  align-items: center;
+  gap: 5px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.range-links::-webkit-scrollbar {
+  display: none;
+}
+
+.range-links .pill {
+  position: relative;
+  z-index: 1;
+  min-height: 20px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 8.5px;
+}
+
+.range-hit {
+  position: absolute;
+  inset: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+}
+
+/* The hit stays under the pills while the card is open (they carry z-index 1):
+   hiding it left a tapped-open card with no way back, and dropped the focused
+   button out from under a keyboard user. */
+.range-row.is-open .range-meta,
+.range-row:focus-within .range-meta {
+  display: none;
+}
+
+.range-row.is-open .range-links,
+.range-row:focus-within .range-links {
+  display: flex;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .range-row:hover .range-meta {
+    display: none;
+  }
+
+  .range-row:hover .range-links {
+    display: flex;
+  }
+}
+
+/* ---------- sleepers (3C) ---------- */
+
+.slp-grid {
+  padding: 18px 14px 6px;
+}
+
+.app-desk .slp-grid {
+  padding: 22px 28px 14px;
+}
+
+.zone-slp .zone-band {
+  height: 40px;
+}
+
+/* The fifth band exists only at 2w+, and its border says so. */
+.zone-slp.is-glow {
+  border-color: rgba(35, 217, 255, 0.25);
+}
+
+.zone-headline-band {
+  font-size: 15px;
+  letter-spacing: 1px;
+}
+
+.slp-bar {
+  flex: 0 0 auto;
+  width: 72px;
+}
+
+.row-num-slp {
+  width: 80px;
+}
+
+.slp-band-empty {
+  margin: 0;
+  padding: 14px 16px;
+  font: 400 10px var(--font-mono);
+  color: var(--dimmer);
+}
+
+.slp-footnote {
+  padding: 10px 14px 24px;
+  line-height: 1.5;
+}
+
+.app-desk .slp-footnote {
+  padding: 0 28px 26px;
+  font-size: 9.5px;
+}
+
+/* The rail's per-band count strip. */
+.slp-strip {
+  display: flex;
+  gap: 2px;
+  height: 8px;
+  margin: 10px 14px 0;
+}
+
+.slp-seg {
+  border-radius: 0;
+  background: rgba(35, 217, 255, 0.3);
+  transition: flex-grow 400ms ease;
+}
+
+.slp-seg:first-child {
+  border-radius: 4px 0 0 4px;
+}
+
+.slp-seg:last-child {
+  border-radius: 0 4px 4px 0;
+}
+
+.slp-seg-0 {
+  background: rgba(35, 217, 255, 0.55);
+}
+
+.slp-seg-1 {
+  background: rgba(35, 217, 255, 0.42);
+}
+
+.slp-seg-2 {
+  background: rgba(35, 217, 255, 0.3);
+}
+
+.slp-seg-3 {
+  background: rgba(35, 217, 255, 0.2);
+}
+
+.slp-seg-4 {
+  background: rgba(35, 217, 255, 0.12);
+}
+
+.slp-legend {
+  display: flex;
+  margin: 6px 14px 0;
+  font: 400 8.5px var(--font-mono);
+  color: var(--dimmer);
+  font-variant-numeric: tabular-nums;
+}
+
+.slp-legend strong {
+  color: var(--dim);
+  font-weight: 600;
+}
+
+.slp-legend > span:last-child {
+  text-align: right;
+}
+
+/* ---------- rail summaries ---------- */
+
+.summary-line {
+  margin: 0;
+  padding: 12px 16px 6px;
+  font: 400 10px var(--font-mono);
+  color: var(--text-2);
+}
+
+.summary-line strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.rng-rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.rng-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 36px;
+  padding: 0 16px;
+}
+
+.rng-sym {
+  flex: 0 0 52px;
+  width: 52px;
+  font: 600 11px var(--font-mono);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rng-hours {
+  flex: 0 0 34px;
+  width: 34px;
+  text-align: right;
+  font: 700 12px var(--font-display);
+  color: var(--cyan);
+  font-variant-numeric: tabular-nums;
+}
+
+.rng-ends {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 16px 10px 78px;
+  font: 400 8.5px var(--font-mono);
+  color: var(--dimmer);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- mini half-sheet (3E) ---------- */
+
+.mini-band {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 36px;
+  padding: 0 14px;
+  background: rgba(242, 234, 251, 0.03);
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.mini-band-id {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.mini-band-headline {
+  font: 700 14px var(--font-display);
+  letter-spacing: 1px;
+  color: var(--text);
+}
+
+.mini-band-count {
+  font: 600 11px var(--font-mono);
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.mini-band-link {
+  border: 0;
+  padding: 4px 0;
+  background: transparent;
+  color: var(--cyan);
+  font: 500 9.5px var(--font-mono);
+}
+
+/* ---------- mobile tab zones (3F) ---------- */
+
+.zone-tab {
+  margin: 14px 14px 18px;
+}
+
+.zone-tab .zone-band {
+  height: 46px;
+}
+
+.zone-tab .zone-headline {
+  font-size: 20px;
+}
+
+.zone-tab .zone-note {
+  font-size: 9px;
+}
+
+.zone-tab .footnote {
+  padding: 8px 14px 12px;
+}
+
+/* Mobile spotlight (3D): 30px multiple, 48px spark, and a 44px link band whose
+   pills are thumb-sized and scroll sideways past six. */
+.zone-tab .hero-mult {
+  font-size: 30px;
+}
+
+.zone-tab .spark-hero {
+  height: 48px;
+}
+
+.zone-tab .card-links {
+  height: 44px;
+  gap: 6px;
+  align-items: center;
+}
+
+.zone-tab .card-links .pill {
+  min-height: 30px;
+  padding: 7px 9px;
+  border-radius: 5px;
+  font-size: 9.5px;
+  opacity: 1;
+}
+
+/* Ranging and Sleepers are full views, not zones: their bodies sit flush. */
+.range-grid,
+.slp-grid {
+  grid-template-columns: 1fr;
+}
+
 /* ================= MOTION =================
    Ceremony is rationed: three state changes, one breathing card, throttled
    row flashes. Everything here is CSS or WAAPI — no animation library. */
@@ -2111,8 +3514,127 @@ a {
   }
 }
 
+/* The hollow revival dot: the comeback's instant, marked on the trace. */
+.spark-revival {
+  stroke: var(--cyan);
+  stroke-width: 1.5;
+}
+
+/* 3G — a watched coin's move crosses the alert threshold: the row blooms cyan
+   once and sorts to the top of ON WATCH. The one-per-coin-per-10-minutes cap,
+   the re-arm band and the noise budget all live in motion.ts. */
+.is-alerted {
+  animation: watch-bloom 600ms ease-out;
+}
+
+@keyframes watch-bloom {
+  from {
+    background-color: rgba(35, 217, 255, 0.07);
+  }
+
+  to {
+    background-color: transparent;
+  }
+}
+
+/* The WATCH toggle answers with a scale-pop, not a spinner — on the TOGGLE, not
+   on the on-state: tied to `.is-on` it replayed on every hover reveal and every
+   first paint, motion with no news in it. */
+.pill-watch.is-just-toggled {
+  animation: watch-pop 150ms ease-out;
+}
+
+@keyframes watch-pop {
+  from {
+    transform: scale(0.9);
+  }
+
+  to {
+    transform: scale(1);
+  }
+}
+
+/* The segment that GREW flashes once, at 6% of its own colour — a halo rather
+   than a repaint, so the bar's own colours are never restated. */
+.out-seg,
+.slp-seg {
+  position: relative;
+}
+
+.out-seg.is-grew::after,
+.slp-seg.is-grew::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 3px;
+  background: var(--seg-flash, transparent);
+  animation: seg-flash 400ms ease-out both;
+  pointer-events: none;
+}
+
+@keyframes seg-flash {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
+.out-runners {
+  --seg-flash: rgba(0, 255, 156, 0.06);
+}
+
+.out-active {
+  --seg-flash: rgba(110, 92, 140, 0.06);
+}
+
+.out-reviving,
+.slp-seg {
+  --seg-flash: rgba(35, 217, 255, 0.06);
+}
+
+.out-died {
+  --seg-flash: rgba(51, 32, 77, 0.06);
+}
+
+/* Sleepers' only motion: the band grid cross-fades when a chip changes. */
+.slp-grid {
+  animation: slp-fade 200ms ease-out;
+}
+
+@keyframes slp-fade {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+/* Mobile tab switch: the band tint cross-fades and the body slides 12px. */
+.zone-tab {
+  animation: tab-in 200ms ease-out;
+}
+
+@keyframes tab-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 /* Reduced motion: no flashes, blooms or rolls — direction arrows carry the
-   change instead, and every glow freezes at its static value. */
+   change instead, and every glow freezes at its static value. Pass 2's
+   additions fall under the same blanket: the FLIP slide is skipped in JS, the
+   strip and tick transitions are cut here. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -2128,6 +3650,30 @@ a {
 
   .is-tenx::after {
     display: none;
+  }
+
+  /* ...and the strip flashes are cut outright rather than left as a tint. */
+  .out-seg.is-grew::after,
+  .slp-seg.is-grew::after {
+    display: none;
+  }
+
+  /* 3G still has to mark the row the announcement named: a static cyan edge
+     for as long as the line holds, in place of the bloom. */
+  .is-alerted {
+    border-left-color: var(--cyan);
+  }
+
+  /* Ticks and segment widths land where they are, instantly. */
+  .out-seg,
+  .slp-seg,
+  .bandbar-held,
+  .bandbar-tick,
+  .gauge-up,
+  .gauge-down,
+  .gauge-tick,
+  .card-links .pill {
+    transition: none !important;
   }
 }
 

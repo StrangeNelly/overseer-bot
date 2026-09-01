@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import type { RangeBoardResponse, RangeCard, RangeDurationHours } from '@groupie/shared';
 import {
   RANGE_DURATION_HOURS,
@@ -6,6 +6,7 @@ import {
   fmtDurationHours,
   rangeHoursAllowed,
 } from '@groupie/shared';
+import { bandPosition } from '../derive';
 import {
   avatarHue,
   fmtAge,
@@ -15,6 +16,10 @@ import {
   parseMoney,
   shortAddress,
 } from '../format';
+import type { WatchProps } from '../watch';
+import { watchForCard } from '../watch';
+import { LinkPills } from './LinkPills';
+import { BandBar } from './Zone';
 
 /** Mirrors the server's floor (lo >= $1,000) and ceiling (hi <= $1B). */
 const MIN_USD = 1_000;
@@ -93,6 +98,8 @@ interface RangingProps {
   onRetry: () => void;
   /** Shared clock, ticked once a minute by App. */
   now: number;
+  /** Round 16: every coin the app shows carries watch/unwatch, this one too. */
+  watch: WatchProps;
 }
 
 /**
@@ -125,8 +132,11 @@ export function Ranging({
   error,
   onRetry,
   now,
+  watch,
 }: RangingProps) {
   const custom = controls.presetIndex === null;
+  // One open link row at a time, exactly like the board's rows.
+  const [openAddress, setOpenAddress] = useState<string | null>(null);
   // The band decides which durations exist (30m/1h are a small-cap instrument,
   // enforced server-side); a null band is mid-typing, so nothing is disabled yet.
   const allows = (hours: RangeDurationHours) => band === null || rangeHoursAllowed(hours, band.hiUsd);
@@ -142,27 +152,31 @@ export function Ranging({
 
   return (
     <>
-      <div className="range-controls">
-        <div className="chips" role="group" aria-label="Market cap band">
-          {RANGE_PRESETS.map((preset, index) => (
+      <div className="ctl-panel">
+        <div className="ctl-row">
+          <span className="ctl-label">BAND</span>
+          <div className="chips" role="group" aria-label="Market cap band">
+            {RANGE_PRESETS.map((preset, index) => (
+              <button
+                key={preset.label}
+                type="button"
+                className={`chip${controls.presetIndex === index ? ' is-active' : ''}`}
+                aria-pressed={controls.presetIndex === index}
+                onClick={() => onControls({ ...controls, presetIndex: index })}
+              >
+                {preset.label}
+              </button>
+            ))}
             <button
-              key={preset.label}
               type="button"
-              className={`chip${controls.presetIndex === index ? ' is-active' : ''}`}
-              aria-pressed={controls.presetIndex === index}
-              onClick={() => onControls({ ...controls, presetIndex: index })}
+              className={`chip${custom ? ' is-active' : ''}`}
+              aria-pressed={custom}
+              onClick={() => onControls({ ...controls, presetIndex: null })}
             >
-              {preset.label}
+              CUSTOM
             </button>
-          ))}
-          <button
-            type="button"
-            className={`chip${custom ? ' is-active' : ''}`}
-            aria-pressed={custom}
-            onClick={() => onControls({ ...controls, presetIndex: null })}
-          >
-            CUSTOM
-          </button>
+          </div>
+          <span className="ctl-note">custom: LOW / HIGH with a K/M suffix and a dollar echo</span>
         </div>
 
         {custom ? (
@@ -205,24 +219,27 @@ export function Ranging({
           </div>
         ) : null}
 
-        <div className="chips chips-hours" role="group" aria-label="Minimum time in range">
-          <span className="chips-label">HELD FOR ≥</span>
-          {RANGE_DURATION_HOURS.map((hours) => {
-            const enabled = allows(hours);
-            return (
-              <button
-                key={hours}
-                type="button"
-                className={`chip chip-hours${controls.hours === hours ? ' is-active' : ''}`}
-                aria-pressed={controls.hours === hours}
-                disabled={!enabled}
-                title={enabled ? undefined : 'Only for bands up to $500K'}
-                onClick={() => onControls({ ...controls, hours })}
-              >
-                {fmtDurationHours(hours)}
-              </button>
-            );
-          })}
+        <div className="ctl-row">
+          <span className="ctl-label">HELD FOR ≥</span>
+          <div className="chips chips-hours" role="group" aria-label="Minimum time in range">
+            {RANGE_DURATION_HOURS.map((hours) => {
+              const enabled = allows(hours);
+              return (
+                <button
+                  key={hours}
+                  type="button"
+                  className={`chip chip-hours${controls.hours === hours ? ' is-active' : ''}`}
+                  aria-pressed={controls.hours === hours}
+                  disabled={!enabled}
+                  title={enabled ? undefined : 'Only for bands up to $500K'}
+                  onClick={() => onControls({ ...controls, hours })}
+                >
+                  {fmtDurationHours(hours)}
+                </button>
+              );
+            })}
+          </div>
+          <span className="ctl-note">30m and 1h are small-cap instruments — bands up to $500K</span>
         </div>
       </div>
 
@@ -246,7 +263,14 @@ export function Ranging({
               </button>
             </p>
           ) : null}
-          <RangeList data={data} loading={loading} now={now} />
+          <RangeList
+            data={data}
+            loading={loading}
+            now={now}
+            watch={watch}
+            openAddress={openAddress}
+            onToggle={(address) => setOpenAddress((prev) => (prev === address ? null : address))}
+          />
         </>
       )}
     </>
@@ -257,10 +281,16 @@ function RangeList({
   data,
   loading,
   now,
+  watch,
+  openAddress,
+  onToggle,
 }: {
   data: RangeBoardResponse | null;
   loading: boolean;
   now: number;
+  watch: WatchProps;
+  openAddress: string | null;
+  onToggle: (address: string) => void;
 }) {
   if (!data) return <p className="empty">{loading ? 'Looking for coilers…' : 'Nothing here yet.'}</p>;
   if (data.cards.length === 0) {
@@ -272,9 +302,18 @@ function RangeList({
     );
   }
   return (
-    <div className="range-list">
+    <div className="zone-grid range-grid">
       {data.cards.map((card) => (
-        <RangeRow key={card.callId} card={card} loUsd={data.loUsd} hiUsd={data.hiUsd} now={now} />
+        <RangeRow
+          key={card.callId}
+          card={card}
+          loUsd={data.loUsd}
+          hiUsd={data.hiUsd}
+          now={now}
+          watch={watch}
+          expanded={openAddress === card.address}
+          onToggle={onToggle}
+        />
       ))}
     </div>
   );
@@ -291,46 +330,84 @@ function fullTime(iso: string | null): string | undefined {
   }
 }
 
+/** "Tue 09:12" — when the streak started, short enough for a 9px footnote. */
+function sinceLabel(iso: string): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '—';
+  try {
+    return new Date(t).toLocaleString(undefined, {
+      weekday: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return '—';
+  }
+}
+
 /**
- * One coiler: the queried band as a dark track, the range it actually held as a
- * translucent cyan fill, and the live mcap as a glowing tick. Time in band is
- * this tab's hero number.
+ * One coiler (design pass 2, 3B): the queried band as a 10px dark track, the
+ * range it actually held as a translucent cyan fill, and the live mcap as a
+ * glowing tick. Time in band is this view's hero number — and the card carries
+ * links now, which range cards never had: hover (desktop) or tap (mobile)
+ * replaces the meta line with the pills, WATCH included.
  */
 function RangeRow({
   card,
   loUsd,
   hiUsd,
   now,
+  watch,
+  expanded,
+  onToggle,
 }: {
   card: RangeCard;
   loUsd: number;
   hiUsd: number;
   now: number;
+  watch: WatchProps;
+  expanded: boolean;
+  onToggle: (address: string) => void;
 }) {
   const title = card.symbol ? `$${card.symbol}` : shortAddress(card.address);
-  const span = hiUsd - loUsd;
-  const pct = (value: number) =>
-    span <= 0 ? 0 : Math.min(100, Math.max(0, ((value - loUsd) / span) * 100));
+  const pct = (value: number) => (bandPosition(value, loUsd, hiUsd) ?? 0) * 100;
   const left = pct(card.range.observedLowUsd);
   const right = pct(card.range.observedHighUsd);
-  const tick = card.mcapUsd === null ? null : pct(card.mcapUsd);
+  const tick = bandPosition(card.mcapUsd, loUsd, hiUsd);
   const seed = card.symbol ?? card.address;
 
+  const meta = [card.callerName, `${fmtUsd(card.mcapUsd)} now`];
+  if (card.liquidityUsd !== null) meta.push(`LP ${fmtUsd(card.liquidityUsd)}`);
+
   return (
-    <article className="range-row" data-call={card.callId}>
+    <article className={`range-row${expanded ? ' is-open' : ''}`} data-call={card.callId}>
       <div className="range-top">
         <span
           className="avatar avatar-fallback"
-          style={{ width: 20, height: 20, background: `hsl(${avatarHue(seed)} 45% 28%)` }}
+          style={{ width: 22, height: 22, background: `hsl(${avatarHue(seed)} 45% 28%)` }}
           aria-hidden="true"
         >
           {(card.symbol ?? '?').trim().charAt(0).toUpperCase() || '?'}
         </span>
         <span className="range-sym">{title}</span>
+        {card.watched ? <span className="watch-dot" title="On the group watchlist" /> : null}
         {card.mentionsCount > 1 ? (
           <span className="badge badge-recall">{`×${card.mentionsCount}`}</span>
         ) : null}
-        <span className="range-meta">{`${card.callerName} · ${fmtUsd(card.mcapUsd)} now`}</span>
+
+        {/* The reveal: pills take the meta line's place, so nothing reflows. */}
+        <span className="range-meta">{meta.join(' · ')}</span>
+        <span className="range-links">
+          <LinkPills target={card} watch={watchForCard(card, watch)} />
+        </span>
+        <button
+          type="button"
+          className="range-hit"
+          aria-expanded={expanded}
+          aria-label={`Trading links for ${title}`}
+          onClick={() => onToggle(card.address)}
+        />
+
         <span
           className="range-hero"
           title={`In range since ${fullTime(card.range.inRangeSince) ?? '—'} (${card.range.bucketCount} 5-minute buckets)`}
@@ -340,16 +417,7 @@ function RangeRow({
         </span>
       </div>
 
-      <div className="band">
-        <span
-          className="band-held"
-          style={{ left: `${left}%`, right: `${100 - right}%` }}
-          aria-hidden="true"
-        />
-        {tick === null ? null : (
-          <span className="band-tick" style={{ left: `${tick}%` }} aria-hidden="true" />
-        )}
-      </div>
+      <BandBar lowPct={left} highPct={right} tickPct={tick === null ? null : tick * 100} size="hero" />
 
       <div className="band-labels">
         <span>{fmtUsd(loUsd)}</span>
@@ -358,6 +426,10 @@ function RangeRow({
         </span>
         <span>{fmtUsd(hiUsd)}</span>
       </div>
+
+      <span className="range-since">
+        {`in band since ${sinceLabel(card.range.inRangeSince)} · ${card.range.bucketCount} five-minute buckets`}
+      </span>
       {/* The band bar is the visual; screen readers still get the call's age. */}
       <span className="visually-hidden">{`Called by ${card.callerName}, ${fmtAge(card.calledAt, now)} ago`}</span>
     </article>

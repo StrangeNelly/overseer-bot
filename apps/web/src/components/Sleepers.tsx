@@ -5,19 +5,34 @@ import type {
   SleeperEntry,
   SleepersResponse,
 } from '@groupie/shared';
-import { SLEEPER_DURATION_LABELS, SLEEPER_DURATIONS_HOURS, SLEEPERS } from '@groupie/shared';
-import { copyText } from '../clipboard';
+import {
+  SLEEPER_BANDS,
+  SLEEPER_DURATION_LABELS,
+  SLEEPER_DURATIONS_HOURS,
+  SLEEPERS,
+} from '@groupie/shared';
+import { bandPosition } from '../derive';
 import { avatarHue, fmtAge, fmtHours, fmtTurnover, fmtUsd, shortAddress } from '../format';
+import type { WatchProps } from '../watch';
+import { targetFromSleeper, watchFor } from '../watch';
+import { LinkPills } from './LinkPills';
+import { BandBar } from './Zone';
 
 /**
- * Sleepers (docs/decisions.md rounds 9 and 14) — the first UNCURATED surface in
- * the app. Everything here is a chain-wide research lead, not something the
- * group called, and the tab is written to say so before it says anything else.
+ * Sleepers (docs/decisions.md rounds 9, 14 and 16) — the first UNCURATED
+ * surface in the app. Everything here is a chain-wide research lead, not
+ * something the group called, and the view is written to say so before it says
+ * anything else (the trust frame now rides the view headline, where it cannot
+ * scroll away behind a filter).
  *
  * No sparkline (there is no history behind an entry) and no multiple (there is
  * no call to be a multiple of): turnover is the hero number, in cyan — the
  * analytical accent, the same one Ranging uses. Magenta stays the brand and
  * green/red stay P&L.
+ *
+ * Round 16 overrides the handoff on one point: these rows DO carry WATCH. A
+ * sleeper is not a call, so it is watched BY ADDRESS — the exact semantics of
+ * `/overseer watch <ca>`, which has always accepted a coin nobody has posted.
  */
 
 interface SleepersProps {
@@ -25,18 +40,22 @@ interface SleepersProps {
   loading: boolean;
   error: string | null;
   onRetry: () => void;
-  /** Twitter-required is the default view; the chip toggles it off. */
+  /** Twitter-required is the default view; the chip lives in the view header. */
   xOnly: boolean;
-  onXOnly: (next: boolean) => void;
   /** Minimum continuous time in band — the round-14 duration filter. */
   minHours: SleeperDurationHours;
   onMinHours: (next: SleeperDurationHours) => void;
   /** Shared clock, ticked once a minute by App. */
   now: number;
+  watch: WatchProps;
 }
 
 function bandLabel(band: SleeperBand): string {
   return `${fmtUsd(band.loUsd)}–${fmtUsd(band.hiUsd)}`;
+}
+
+function isLongOnly(band: SleeperBand): boolean {
+  return SLEEPER_BANDS.some((spec) => spec.loUsd === band.loUsd && spec.longOnly);
 }
 
 function title(entry: SleeperEntry): string {
@@ -49,10 +68,10 @@ export function Sleepers({
   error,
   onRetry,
   xOnly,
-  onXOnly,
   minHours,
   onMinHours,
   now,
+  watch,
 }: SleepersProps) {
   // One open link row at a time, exactly like the board's rows.
   const [openAddress, setOpenAddress] = useState<string | null>(null);
@@ -68,52 +87,31 @@ export function Sleepers({
   return (
     <>
       {/*
-        The trust boundary. It is the first thing in the tab and it never
-        scrolls away behind a filter: this is a machine's list of the whole
-        chain, not the group's calls.
-      */}
-      <div className="slp-head">
-        <span className="slp-frame">
-          chain-wide scan
-          <span className="slp-sep">·</span>
-          not group calls
-          {data?.refreshedAt ? (
-            <>
-              <span className="slp-sep">·</span>
-              {/* Never split "2h ago" across lines — it reads as two facts. */}
-              <span className="slp-nowrap">{`refreshed ${fmtAge(data.refreshedAt, now)} ago`}</span>
-            </>
-          ) : null}
-        </span>
-        <button
-          type="button"
-          className={`chip chip-x${xOnly ? ' is-active' : ''}`}
-          aria-pressed={xOnly}
-          onClick={() => onXOnly(!xOnly)}
-        >
-          {xOnly ? 'X only' : 'showing all'}
-        </button>
-      </div>
-
-      {/*
         The duration filter (round 14). Cyan when active, exactly like Ranging's
         "HELD FOR ≥" chips — same question, asked of the whole chain instead of
         the group's own calls.
       */}
-      <div className="slp-durations">
-        <div className="chips chips-hours" role="group" aria-label="Minimum time in band">
-          <span className="chips-label">IN BAND ≥</span>
-          {SLEEPER_DURATIONS_HOURS.map((hours) => (
-            <button
-              key={hours}
-              type="button"
-              className={`chip chip-hours${minHours === hours ? ' is-active' : ''}`}
-              aria-pressed={minHours === hours}
-              onClick={() => onMinHours(hours)}
-            >
-              {SLEEPER_DURATION_LABELS[hours]}
-            </button>
-          ))}
+      <div className="ctl-panel">
+        <div className="ctl-row">
+          <span className="ctl-label">IN BAND ≥</span>
+          <div className="chips chips-hours" role="group" aria-label="Minimum time in band">
+            {SLEEPER_DURATIONS_HOURS.map((hours) => (
+              <button
+                key={hours}
+                type="button"
+                className={`chip chip-hours${minHours === hours ? ' is-active' : ''}`}
+                aria-pressed={minHours === hours}
+                onClick={() => onMinHours(hours)}
+              >
+                {SLEEPER_DURATION_LABELS[hours]}
+              </button>
+            ))}
+          </div>
+          <span className="ctl-note">
+            {total === null
+              ? '$1M–$3M appears from 2w up — at 3h a $2M coin is just a big coin'
+              : `${total} leads across ${data?.bands.length ?? 0} bands · $1M–$3M appears from 2w up`}
+          </span>
         </div>
       </div>
 
@@ -142,6 +140,7 @@ export function Sleepers({
             xOnly={xOnly}
             minHours={minHours}
             now={now}
+            watch={watch}
             openAddress={openAddress}
             onToggle={toggle}
           />
@@ -158,6 +157,7 @@ function SleeperBody({
   xOnly,
   minHours,
   now,
+  watch,
   openAddress,
   onToggle,
 }: {
@@ -167,6 +167,7 @@ function SleeperBody({
   xOnly: boolean;
   minHours: SleeperDurationHours;
   now: number;
+  watch: WatchProps;
   openAddress: string | null;
   onToggle: (address: string) => void;
 }) {
@@ -198,34 +199,54 @@ function SleeperBody({
   }
 
   return (
-    <div className="slp-bands">
-      {data.bands.map((band) => (
-        <section className="slp-band" key={band.loUsd}>
-          <h3 className="slp-band-head">{bandLabel(band)}</h3>
-          {band.entries.length === 0 ? (
-            <p className="slp-band-empty">nothing qualifying in this band right now.</p>
-          ) : (
-            <div className="slp-rows">
-              {band.entries.map((entry) => (
-                <SleeperRow
-                  key={entry.address}
-                  entry={entry}
-                  now={now}
-                  expanded={openAddress === entry.address}
-                  onToggle={onToggle}
-                />
-              ))}
+    <>
+      {/* Keyed on the filters so a chip change remounts the grid: that is what
+          plays the 200ms cross-fade, and it is the only motion this surface has. */}
+      <div className="zone-grid slp-grid" key={`${minHours}-${xOnly ? 'x' : 'all'}`}>
+        {data.bands.map((band, index) => (
+          <section
+            className={`zone zone-cyan zone-slp${isLongOnly(band) ? ' is-glow' : ''}`}
+            key={band.loUsd}
+          >
+            <div className="zone-band">
+              <span className="zone-id">
+                <span className="zone-headline zone-headline-band">{bandLabel(band)}</span>
+                <span className="zone-count">{band.entries.length}</span>
+              </span>
+              {isLongOnly(band) ? (
+                <span className="zone-note">long holds only · unlocked at 2w+</span>
+              ) : index === 0 ? (
+                <span className="zone-note">ranked by turnover (24h vol ÷ mcap)</span>
+              ) : null}
             </div>
-          )}
-        </section>
-      ))}
-      <p className="footnote">
+            {band.entries.length === 0 ? (
+              <p className="slp-band-empty">nothing qualifying in this band right now.</p>
+            ) : (
+              <div className="slp-rows">
+                {band.entries.map((entry) => (
+                  <SleeperRow
+                    key={entry.address}
+                    entry={entry}
+                    loUsd={band.loUsd}
+                    hiUsd={band.hiUsd}
+                    now={now}
+                    watch={watch}
+                    expanded={openAddress === entry.address}
+                    onToggle={onToggle}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+        ))}
+      </div>
+      <p className="footnote slp-footnote">
         ranked by turnover (24h volume ÷ market cap) · liquidity ≥ {fmtUsd(SLEEPERS.minLiquidityUsd)}{' '}
         and ≥ {Math.round(SLEEPERS.liqToMcapMinRatio * 100)}% of market cap · pool age{' '}
         {SLEEPERS.minPoolAgeHours}h–{SLEEPERS.maxPoolAgeDays}d · time in band from hourly/daily
-        candles · nothing here is tracked or watched
+        candles · nothing here is tracked
       </p>
-    </div>
+    </>
   );
 }
 
@@ -258,40 +279,42 @@ function Disc({ entry }: { entry: SleeperEntry }) {
 }
 
 /**
- * One lead. Same row anatomy as the board — disc, identity, hero number, age —
+ * One lead. Same row anatomy as the board — disc, identity, shape, hero, age —
  * with the X link promoted onto the head line rather than buried in the tap
  * reveal: this surface defaults to coins that have one, and it is the fastest
  * way to research a name nobody in the group has mentioned.
+ *
+ * The shape slot carries a band bar with a tick and no fill: a sleeper has no
+ * observed range, so the tick says only where in the band the coin sits.
  */
 function SleeperRow({
   entry,
+  loUsd,
+  hiUsd,
   now,
+  watch,
   expanded,
   onToggle,
 }: {
   entry: SleeperEntry;
+  loUsd: number;
+  hiUsd: number;
   now: number;
+  watch: WatchProps;
   expanded: boolean;
   onToggle: (address: string) => void;
 }) {
-  const [copied, setCopied] = useState(false);
   const label = title(entry);
   const persistent = entry.onListSinceHours >= SLEEPERS.persistenceMarkerHours;
   // Measured off candles, so it reaches back before we ever saw the coin — and
   // it is capped, which the "+" says out loud rather than pretending precision.
   const capped = entry.inBandHours >= SLEEPERS.inBandMaxDays * 24;
   const inBand = entry.inBandHours > 0 ? `${fmtHours(entry.inBandHours)}${capped ? '+' : ''}` : null;
-
-  const onCopy = useCallback(() => {
-    void copyText(entry.address).then((ok) => {
-      if (!ok) return;
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1_400);
-    });
-  }, [entry.address]);
+  const tick = bandPosition(entry.mcapUsd, loUsd, hiUsd);
+  const control = watchFor(targetFromSleeper(entry), watch);
 
   return (
-    <div className={`row row-slp${expanded ? ' is-open' : ''}`}>
+    <div className={`row row-slp row-desk${expanded ? ' is-open' : ''}`}>
       <div className="row-head">
         <button
           type="button"
@@ -330,13 +353,20 @@ function SleeperRow({
                 {`on list ${fmtHours(entry.onListSinceHours)}`}
               </span>
             ) : null}
+            {entry.watched ? <span className="watch-dot" title="On the group watchlist" /> : null}
           </div>
           <div className="row-sub">
             {`${fmtUsd(entry.mcapUsd)} · vol ${fmtUsd(entry.vol24Usd)}`}
           </div>
         </div>
 
-        <div className="row-num">
+        <BandBar tickPct={tick === null ? null : tick * 100} className="slp-bar" />
+
+        <span className="row-hoverlinks">
+          <LinkPills target={entry} watch={control} />
+        </span>
+
+        <div className="row-num row-num-slp">
           <span className="slp-turn">{fmtTurnover(entry.turnover)}</span>
           <span className="mcaps">{`LP ${fmtUsd(entry.liquidityUsd)}`}</span>
         </div>
@@ -346,33 +376,7 @@ function SleeperRow({
 
       {expanded ? (
         <div className="row-pills">
-          <a className="pill" href={entry.links.axiom} target="_blank" rel="noopener">
-            AXIOM
-          </a>
-          <a className="pill" href={entry.links.gmgn} target="_blank" rel="noopener">
-            GMGN
-          </a>
-          <a className="pill" href={entry.links.dexscreener} target="_blank" rel="noopener">
-            DEXS
-          </a>
-          <button type="button" className="pill pill-copy" onClick={onCopy}>
-            {copied ? 'COPIED ✓' : 'COPY CA'}
-          </button>
-          {entry.twitterUrl ? (
-            <a className="pill" href={entry.twitterUrl} target="_blank" rel="noopener">
-              X
-            </a>
-          ) : null}
-          {/*
-            The scan has stored a website since round 9 and nothing ever showed
-            it. On an uncurated surface it is the second-best way to research a
-            name nobody in the group has mentioned (round 15).
-          */}
-          {entry.websiteUrl ? (
-            <a className="pill" href={entry.websiteUrl} target="_blank" rel="noopener">
-              WEBSITE
-            </a>
-          ) : null}
+          <LinkPills target={entry} watch={control} />
         </div>
       ) : null}
     </div>

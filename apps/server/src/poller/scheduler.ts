@@ -53,10 +53,12 @@ let lastSleeperScanMs = 0;
 /** The scan is detached, so it needs its own in-flight guard. */
 let sleeperScanRunning = false;
 
-interface Candidate {
+export interface Candidate {
   token: TokenRow;
   lastActivityMs: number;
   reviveRequested: boolean;
+  /** Some group has called it — the reason nearly every token is here. */
+  called: boolean;
   /** On some group's alert watchlist — alerts are only as fresh as the data. */
   watched: boolean;
 }
@@ -198,6 +200,7 @@ async function loadCandidates(db: Db): Promise<Candidate[]> {
       // A correlated EXISTS, not a second join: joining watches as well would
       // multiply rows (calls x watches) under the same group-by.
       watched: sql<boolean>`exists (select 1 from ${watches} where ${watches.tokenId} = ${tokens.id} and ${watches.active})`,
+      called: sql<string | number>`count(${calls.id})`,
     })
     .from(tokens)
     .leftJoin(calls, eq(calls.tokenId, tokens.id))
@@ -208,6 +211,8 @@ async function loadCandidates(db: Db): Promise<Candidate[]> {
       ? Number(r.lastActivityEpoch) * 1000
       : r.token.firstSeenAt.getTime(),
     reviveRequested: r.reviveRequested ?? false,
+    // count() is a bigint, which postgres-js hands back as a string.
+    called: Number(r.called) > 0,
     watched: r.watched === true,
   }));
 }
@@ -234,7 +239,21 @@ export function deadPollSeconds(diedAt: Date | null, nowMs: number): number {
     : POLL_TIERS.deadSeconds;
 }
 
-function isDue(c: Candidate, nowMs: number): boolean {
+/**
+ * Is this token due a poll? Exported for tests — the tiers are the poller's
+ * whole economy, and the orphan rule below is the only one that answers "never".
+ *
+ * An orphan is a tokens row no group ever called and nobody is watching:
+ * watch-by-address upserts the row before the watch, and unwatching leaves it
+ * behind (as does a cap refusal that slipped past the pre-check, or any row
+ * written before round 15 added one). Nothing on any board renders it and no
+ * alert can fire for it, so the old behaviour — activity clock falling back to
+ * first_seen_at, hence the 45-second fresh tier for a day — spent the GT budget
+ * on a coin nobody asked about. A revive request still wakes it, but that needs
+ * a call, so it can only ever be a real coin someone re-posted.
+ */
+export function isDue(c: Candidate, nowMs: number): boolean {
+  if (!c.called && !c.watched && !c.reviveRequested) return false;
   const last = c.token.lastPolledAt?.getTime() ?? 0;
   if (c.token.phase === 'dead') {
     if (c.reviveRequested) return true;

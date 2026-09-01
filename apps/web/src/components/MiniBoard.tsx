@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import type { BoardCard, BoardResponse } from '@groupie/shared';
 import type { PulseData } from '../derive';
-import { watchFor } from './Board';
-import type { WatchProps } from './Board';
+import type { WatchProps } from '../watch';
+import { watchForCard } from '../watch';
 import { Pulse } from './Pulse';
 import { TokenCard } from './TokenCard';
 
@@ -24,9 +24,13 @@ interface MiniBoardProps {
 }
 
 /**
- * Telegram Mini App half-sheet (design 2a). Round 8 stopped auto-expanding and
- * gave this surface its own job: today's Pulse, the freshest rows, and one
- * obvious bridge to the full board in the browser.
+ * Telegram Mini App half-sheet (design pass 2, 3E). Round 8 stopped
+ * auto-expanding and gave this surface its own job: today's Pulse, the freshest
+ * rows, and one obvious bridge to the full board in the browser.
+ *
+ * Pass 2 added the day-outcome strip to the Pulse hero and turned the FRESH
+ * label into a real 36px zone band — the seam between Pulse and list is a
+ * boundary now, not a caption. Still six rows at 560px.
  */
 export function MiniBoard({
   board,
@@ -50,9 +54,12 @@ export function MiniBoard({
     <div className="mini">
       <Pulse data={pulse} variant="hero" announcement={announcement} revalidating={revalidating} />
 
-      <div className="mini-listhead">
-        <span className="mini-label">{`FRESH · ${fresh.length}`}</span>
-        <button type="button" className="link-btn" onClick={onExpand}>
+      <div className="mini-band">
+        <span className="mini-band-id">
+          <span className="mini-band-headline">FRESH</span>
+          <span className="mini-band-count">{fresh.length}</span>
+        </span>
+        <button type="button" className="mini-band-link" onClick={onExpand}>
           all tabs ▾
         </button>
       </div>
@@ -71,7 +78,7 @@ export function MiniBoard({
               links="tap"
               expanded={openId === card.callId}
               onToggle={(callId) => setOpenId((prev) => (prev === callId ? null : callId))}
-              watch={watchFor(card, watch)}
+              watch={watchForCard(card, watch)}
               // Design: list rows never animate in the half-sheet.
               animate={false}
             />

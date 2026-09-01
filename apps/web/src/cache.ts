@@ -34,6 +34,10 @@ function isBoard(value: unknown): value is BoardResponse {
   // skeleton for one load is the cheaper honesty.
   if (typeof board.todayCallCount !== 'number') return false;
   if (typeof board.hiddenProbationCount !== 'number') return false;
+  // Round 16's watchlist. ON WATCH renders from it — the zone would paint empty
+  // off a pre-round-16 blob and tell a member they hold no slots, which is worse
+  // than a skeleton for one load.
+  if (!Array.isArray(board.watchlist)) return false;
   const sections = board.sections;
   if (!sections || typeof sections !== 'object') return false;
   for (const name of ['fresh', 'runners', 'retraced', 'died', 'reviving'] as const) {

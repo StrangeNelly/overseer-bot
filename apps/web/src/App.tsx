@@ -9,7 +9,12 @@ import type {
   SleeperDurationHours,
   SleepersResponse,
 } from '@groupie/shared';
-import { RANGE_DURATION_HOURS, RANGE_PRESETS, SLEEPER_DURATIONS_HOURS } from '@groupie/shared';
+import {
+  RANGE_DURATION_HOURS,
+  RANGE_PRESETS,
+  SLEEPER_DURATIONS_HOURS,
+  SLEEPER_DURATION_LABELS,
+} from '@groupie/shared';
 import {
   ApiError,
   authDev,
@@ -23,13 +28,13 @@ import {
   fetchSleepers,
   fetchTelegramLoginAvailable,
   setWatch,
+  setWatchByAddress,
   telegramLoginUrl,
 } from './api';
 import { readCachedBoard, writeCachedBoard } from './cache';
 import { Board } from './components/Board';
-import type { WatchProps } from './components/Board';
 import { DesktopBoard } from './components/DesktopBoard';
-import type { RangeSummary } from './components/DesktopBoard';
+import type { RangeSummary, SleepersSummary } from './components/DesktopBoard';
 import { MiniBoard } from './components/MiniBoard';
 import { Pulse } from './components/Pulse';
 import { DEFAULT_CONTROLS, Ranging, resolveBand, sanitizeRangeControls } from './components/Ranging';
@@ -38,9 +43,12 @@ import type { SectionKey } from './components/SectionTabs';
 import { Sleepers } from './components/Sleepers';
 import { GhostRows } from './components/Spotlight';
 import { WINDOWS, WindowSwitcher } from './components/WindowSwitcher';
-import { derivePulse, isStale } from './derive';
+import { ViewHeader, Zone } from './components/Zone';
+import { bandPosition, derivePulse, isStale } from './derive';
 import { fmtAge, fmtUsd, shortAddress } from './format';
-import { ANNOUNCEMENT_MS, suppressDiffAfter, useBoardChange, useTransient } from './motion';
+import { ANNOUNCEMENT_MS, suppressDiffAfter, useAnnouncementQueue, useBoardChange } from './motion';
+import type { WatchProps, WatchTarget } from './watch';
+import { watchKey } from './watch';
 import {
   tgExpand,
   tgHaptic,
@@ -76,6 +84,7 @@ const LIVE_EVENT_NAMES = ['update', 'price_update', 'new_call', 're_call', 'toke
 /** Telegram start params and our slugs share this alphabet. */
 const SLUG_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const NO_HIDDEN: ReadonlySet<number> = new Set<number>();
+const NO_PENDING: ReadonlySet<string> = new Set<string>();
 /** Design 2b: at this width the board stops being tabs and becomes columns. */
 const DESKTOP_MIN_PX = 1100;
 
@@ -405,8 +414,12 @@ export default function App() {
   const [live, setLive] = useState<LiveState>('idle');
   const [hidden, setHidden] = useState<ReadonlySet<number>>(NO_HIDDEN);
   const [binningId, setBinningId] = useState<number | null>(null);
-  /** tokenId of the watch toggle in flight — the card shows it, nothing else. */
-  const [watchingTokenId, setWatchingTokenId] = useState<number | null>(null);
+  /**
+   * Addresses whose watch toggle is in flight (round 16). Keyed by ADDRESS, not
+   * by tokenId: a Sleepers lead has no tokenId, and the same coin can be toggled
+   * from two surfaces at once — same coin, same key, no clobber.
+   */
+  const [watchPending, setWatchPending] = useState<ReadonlySet<string>>(NO_PENDING);
   const [actionError, setActionError] = useState<string | null>(null);
   const [handoffPending, setHandoffPending] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -436,6 +449,11 @@ export default function App() {
   sleepersXOnlyRef.current = sleepersXOnly;
   const sleepersMinHoursRef = useRef(sleepersMinHours);
   sleepersMinHoursRef.current = sleepersMinHours;
+  // "Has this view ever loaded?" — a watch toggle only refreshes what is there.
+  const rangeRef = useRef<RangeBoardResponse | null>(null);
+  rangeRef.current = range;
+  const sleepersRef = useRef<SleepersResponse | null>(null);
+  sleepersRef.current = sleepers;
   /** True once the server has answered: the cache never outranks a real payload. */
   const paintedRef = useRef(false);
 
@@ -579,6 +597,7 @@ export default function App() {
   /** Fixed for the life of the page: the launch payload only exists in the webview. */
   const inTelegram = useMemo(() => tgInitData() !== null, []);
   const layout = useLayoutMode(inTelegram);
+  const desktop = layout === 'desktop';
   const rangeBand = useMemo(() => resolveBand(rangeControls), [rangeControls]);
   const rangingActive = section === 'ranging';
   const sleepersActive = section === 'sleepers';
@@ -603,11 +622,17 @@ export default function App() {
   }, [slug, rangingNeeded, rangeBand, rangeHours, customBand, loadRange]);
 
   // Sleepers is a 3-hourly server snapshot, so it never rides the live stream:
-  // it loads when its tab opens, when a filter changes, and on focus.
+  // it loads when its view opens, when a filter changes, and on focus.
+  //
+  // Design pass 2 adds the desktop board as a reason to load it: the right rail
+  // draws the five bands as a count strip, which could only ever have said "open
+  // the view" while nothing had fetched the scan. One snapshot query per board
+  // load fills it in — the same trade round 15 made for the Ranging summary.
+  const sleepersNeeded = sleepersActive || layout === 'desktop';
   useEffect(() => {
-    if (!slug || !sleepersActive) return;
+    if (!slug || !sleepersNeeded) return;
     void loadSleepers(sleepersXOnly, sleepersMinHours);
-  }, [slug, sleepersActive, sleepersXOnly, sleepersMinHours, loadSleepers]);
+  }, [slug, sleepersNeeded, sleepersXOnly, sleepersMinHours, loadSleepers]);
 
   const scheduleRefetch = useCallback(() => {
     if (debounceRef.current !== null) return;
@@ -651,7 +676,7 @@ export default function App() {
       void loadBoard({ silent: true });
       const query = rangeQueryRef.current;
       if (rangingNeeded && query) void loadRange(query, { silent: true });
-      if (sleepersActive) {
+      if (sleepersNeeded) {
         void loadSleepers(sleepersXOnlyRef.current, sleepersMinHoursRef.current, { silent: true });
       }
     };
@@ -661,7 +686,7 @@ export default function App() {
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onFocus);
     };
-  }, [slug, loadBoard, loadRange, loadSleepers, rangingNeeded, sleepersActive]);
+  }, [slug, loadBoard, loadRange, loadSleepers, rangingNeeded, sleepersNeeded]);
 
   // Keeps every "3h" on the board honest without a refetch.
   useEffect(() => {
@@ -726,22 +751,46 @@ export default function App() {
   );
 
   /**
-   * The watch toggle (docs/decisions.md round 15). Watching turns on the
+   * The watch toggle (docs/decisions.md rounds 15 and 16). Watching turns on the
    * group's Telegram alerts for a coin, so this is a group-wide action like
    * binning — and deliberately NOT optimistic: the server owns the per-member
    * cap, so the only honest "watching" state is the one it hands back on the
    * refetch. The pending pill covers the round trip.
+   *
+   * A coin with a call routes to the card endpoint; a coin without one (a
+   * Sleepers lead) goes by address, which upserts the token exactly as
+   * `/overseer watch <ca>` does. After it lands, every loaded surface that
+   * carries watch state is refreshed — the board, and the two analytical views
+   * if they have data — so a pill toggled on one surface is not stale on another.
    */
   const onWatch = useCallback(
-    async (card: BoardCard, next: boolean) => {
+    async (target: WatchTarget, next: boolean) => {
       const currentSlug = slugRef.current;
       if (!currentSlug) return;
-      const label = card.symbol ? `$${card.symbol}` : shortAddress(card.address);
-      setWatchingTokenId(card.tokenId);
+      const label = target.symbol ? `$${target.symbol}` : shortAddress(target.address);
+      const key = watchKey(target.address);
+      setWatchPending((prev) => {
+        const set = new Set(prev);
+        set.add(key);
+        return set;
+      });
       setActionError(null);
       try {
-        await setWatch(currentSlug, card.tokenId, next);
-        await loadBoard({ silent: true });
+        if (target.tokenId !== null) await setWatch(currentSlug, target.tokenId, next);
+        else await setWatchByAddress(currentSlug, target.address, next);
+        // The pill stays pending until EVERY surface that draws this coin has
+        // re-read its own payload: a Sleepers row or a Range card reads its
+        // watch state from its own response, so clearing on the board alone
+        // re-enables a pill that still says WATCH — and a second click is a
+        // 409 for a coin the member has just watched.
+        const query = rangeQueryRef.current;
+        await Promise.all([
+          loadBoard({ silent: true }),
+          query && rangeRef.current ? loadRange(query, { silent: true }) : null,
+          sleepersRef.current
+            ? loadSleepers(sleepersXOnlyRef.current, sleepersMinHoursRef.current, { silent: true })
+            : null,
+        ]);
       } catch (err) {
         // The cap refusal arrives as a 409 whose message is the friendly
         // sentence the bot sends; describe() surfaces it verbatim.
@@ -749,18 +798,22 @@ export default function App() {
           next ? `Could not watch ${label}. ${describe(err)}` : `Could not unwatch ${label}. ${describe(err)}`,
         );
       } finally {
-        // Clear only OUR pending marker: a second toggle on another card owns
-        // the slot by now, and nulling it from this (slower) request would
-        // re-enable that card's pill mid-flight.
-        setWatchingTokenId((cur) => (cur === card.tokenId ? null : cur));
+        // Functional clear, and only OUR key: another coin's toggle may have
+        // started while this one was in flight.
+        setWatchPending((prev) => {
+          if (!prev.has(key)) return prev;
+          const set = new Set(prev);
+          set.delete(key);
+          return set;
+        });
       }
     },
-    [loadBoard],
+    [loadBoard, loadRange, loadSleepers],
   );
 
   const watchProps = useMemo<WatchProps>(
-    () => ({ onWatch: (card, next) => void onWatch(card, next), watchingTokenId }),
-    [onWatch, watchingTokenId],
+    () => ({ onWatch: (target, next) => void onWatch(target, next), pending: watchPending }),
+    [onWatch, watchPending],
   );
 
   /**
@@ -794,46 +847,182 @@ export default function App() {
   }, []);
 
   const change = useBoardChange(board);
-  const announcement = useTransient(change.announcement, ANNOUNCEMENT_MS);
+  // One ceremony line at a time; a second one queues rather than replacing the
+  // first. 3G: the coin the PRINTED line names is the row that blooms, so the
+  // bloom never appears without the sentence that explains it.
+  const announced = useAnnouncementQueue(change.announcements, ANNOUNCEMENT_MS);
+  const announcement = announced?.text ?? null;
+  const alertedAddress = announced?.address ?? null;
   const pulse = useMemo(
     () => (board ? derivePulse(board, now, hidden) : null),
     [board, now, hidden],
   );
+  // The desktop rail's RANGING summary: the top three coilers as band bars
+  // (design pass 2, 3A) — the response is sorted by inRangeHours desc.
   const rangeSummary = useMemo<RangeSummary | null>(() => {
     if (!range) return null;
-    // The response is sorted by inRangeHours desc, so the first card is the longest.
-    const longest = range.cards[0];
+    const span = { lo: range.loUsd, hi: range.hiUsd };
     return {
       count: range.cards.length,
       loUsd: range.loUsd,
       hiUsd: range.hiUsd,
       minHours: range.minHours,
-      longest: longest
-        ? {
-            label: longest.symbol ? `$${longest.symbol}` : shortAddress(longest.address),
-            hours: longest.range.inRangeHours,
-          }
-        : null,
+      rows: range.cards.slice(0, 3).map((card) => ({
+        callId: card.callId,
+        label: card.symbol ? `$${card.symbol}` : shortAddress(card.address),
+        hours: card.range.inRangeHours,
+        lowPct: (bandPosition(card.range.observedLowUsd, span.lo, span.hi) ?? 0) * 100,
+        highPct: (bandPosition(card.range.observedHighUsd, span.lo, span.hi) ?? 0) * 100,
+        tickPct: (() => {
+          const at = bandPosition(card.mcapUsd, span.lo, span.hi);
+          return at === null ? null : at * 100;
+        })(),
+      })),
     };
   }, [range]);
-  // Total entries actually shown, across every band — the SLPRS tab count.
+  // Total entries actually shown, across every band — the SLPRS chip count.
   const sleepersCount = useMemo(
     () => (sleepers ? sleepers.bands.reduce((sum, band) => sum + band.entries.length, 0) : null),
     [sleepers],
   );
-  // One element, shared by the mobile tab body and the desktop panel.
-  const sleepersPanel = (
+  const sleepersSummary = useMemo<SleepersSummary | null>(() => {
+    if (!sleepers) return null;
+    return {
+      total: sleepers.bands.reduce((sum, band) => sum + band.entries.length, 0),
+      bands: sleepers.bands.map((band) => ({
+        label: fmtUsd(band.loUsd),
+        count: band.entries.length,
+      })),
+      refreshedAt: sleepers.refreshedAt,
+      xOnly: sleepersXOnly,
+      minHoursLabel: SLEEPER_DURATION_LABELS[sleepers.minHours],
+    };
+  }, [sleepers, sleepersXOnly]);
+
+  // The two analytical views (design pass 2, 3B/3C): controls panel plus
+  // results, shared by the desktop full view and the mobile tab body. Only the
+  // wayfinding differs — desktop gets the 30px ViewHeader with a breadcrumb,
+  // mobile gets the same 46px tone band every other tab has (3F).
+  const rangingBody = (
+    <Ranging
+      controls={rangeControls}
+      onControls={onRangeControls}
+      band={rangeBand}
+      data={range}
+      loading={rangeLoading}
+      error={rangeError}
+      onRetry={onRangeRetry}
+      now={now}
+      watch={watchProps}
+    />
+  );
+
+  const sleepersXOnlyChip = (
+    <button
+      type="button"
+      className={`chip chip-x${sleepersXOnly ? ' is-active' : ''}`}
+      aria-pressed={sleepersXOnly}
+      onClick={() => onSleepersXOnly(!sleepersXOnly)}
+    >
+      {sleepersXOnly ? 'X only' : 'showing all'}
+    </button>
+  );
+
+  const sleepersBody = (
     <Sleepers
       data={sleepers}
       loading={sleepersLoading}
       error={sleepersError}
       onRetry={onSleepersRetry}
       xOnly={sleepersXOnly}
-      onXOnly={onSleepersXOnly}
       minHours={sleepersMinHours}
       onMinHours={onSleepersMinHours}
       now={now}
+      watch={watchProps}
     />
+  );
+
+  const rangingPanel = (
+    <div className="view">
+      <ViewHeader
+        title="RANGING"
+        sub={
+          <>
+            {'group calls holding a market-cap band · '}
+            <span className="view-hero">time in band is the hero</span>
+          </>
+        }
+        right={
+          <span className="view-note">
+            analytical — refreshes on control change and focus, not on the live stream
+          </span>
+        }
+        onBack={() => setSection('fresh')}
+      />
+      {rangingBody}
+    </div>
+  );
+
+  const sleepersPanel = (
+    <div className="view">
+      <ViewHeader
+        title="SLEEPERS"
+        sub={
+          <>
+            {'chain-wide scan · '}
+            <strong className="view-hard">not group calls</strong>
+            {sleepers?.refreshedAt ? ` · refreshed ${fmtAge(sleepers.refreshedAt, now)} ago` : ''}
+          </>
+        }
+        right={
+          <>
+            <span className="view-note">coins with an X account only</span>
+            {sleepersXOnlyChip}
+          </>
+        }
+        onBack={() => setSection('fresh')}
+      />
+      {sleepersBody}
+    </div>
+  );
+
+  // The keys are load-bearing: the mobile tab bodies all sit in one child slot,
+  // so without them React updates a single Zone in place and the tab-in
+  // cross-fade never replays.
+  const rangingTab = (
+    <Zone
+      key="ranging"
+      tone="cyan"
+      headline="RANGING"
+      count={range === null ? null : range.cards.length}
+      className="zone-tab"
+      note={<span className="view-hero">time in band is the hero</span>}
+    >
+      {rangingBody}
+    </Zone>
+  );
+
+  const sleepersTab = (
+    <Zone
+      key="sleepers"
+      tone="cyan"
+      headline="SLEEPERS"
+      count={sleepersCount}
+      className="zone-tab"
+      headExtra={
+        <span className="zone-head-right">
+          {/* The trust frame rides the band, where a filter cannot scroll it
+              away — and it leads, so the scan's age is what an ellipsis eats. */}
+          <span className="zone-note">
+            <strong className="view-hard">not group calls</strong>
+            {sleepers?.refreshedAt ? ` · refreshed ${fmtAge(sleepers.refreshedAt, now)} ago` : ''}
+          </span>
+          {sleepersXOnlyChip}
+        </span>
+      }
+    >
+      {sleepersBody}
+    </Zone>
   );
 
   if (boot.kind === 'loading') {
@@ -916,7 +1105,12 @@ export default function App() {
       <div className="app app-mini">
         <div className="grabber" aria-hidden="true" />
         <header className="head head-mini">
-          <Wordmark />
+          <span className="head-left">
+            <Wordmark />
+            <h1 className="group-title" title={title}>
+              {title}
+            </h1>
+          </span>
           <LiveDot state={live} />
         </header>
         {actionError ? (
@@ -946,20 +1140,21 @@ export default function App() {
     );
   }
 
-  const desktop = layout === 'desktop';
-
   return (
     <div className={`app${desktop ? ' app-desk' : ''}`}>
       <header className={`head${desktop ? ' head-desk' : ''}`}>
         <div className="head-left">
           <Wordmark />
+          <span className="head-div" aria-hidden="true" />
           <h1 className="group-title" title={title}>
             {title}
           </h1>
           <LiveDot state={live} />
         </div>
         <div className="head-right">
-          {pulse?.asOfMs !== undefined && pulse?.asOfMs !== null && (desktop || staleBoard) ? (
+          {/* 3F puts "data as of" on the mobile header's second line too — it is
+              the honesty marker for every number under it, not a stale badge. */}
+          {pulse?.asOfMs !== undefined && pulse?.asOfMs !== null ? (
             <span className={`asof${staleBoard ? ' is-stale' : ''}`}>
               {`data as of ${fmtAge(new Date(Date.now() - pulse.asOfMs).toISOString())} ago`}
             </span>
@@ -996,6 +1191,7 @@ export default function App() {
         <Pulse
           data={pulse}
           variant="strip"
+          dense={!desktop}
           announcement={announcement}
           revalidating={revalidating}
           rangingNote={
@@ -1025,24 +1221,8 @@ export default function App() {
         {board ? (
           desktop ? (
             section === 'ranging' || section === 'sleepers' ? (
-              <div className="desk-ranging">
-                <button type="button" className="link-btn back-btn" onClick={() => setSection('fresh')}>
-                  ◂ board
-                </button>
-                {section === 'sleepers' ? (
-                  sleepersPanel
-                ) : (
-                  <Ranging
-                    controls={rangeControls}
-                    onControls={onRangeControls}
-                    band={rangeBand}
-                    data={range}
-                    loading={rangeLoading}
-                    error={rangeError}
-                    onRetry={onRangeRetry}
-                    now={now}
-                  />
-                )}
+              <div className="desk-view">
+                {section === 'sleepers' ? sleepersPanel : rangingPanel}
               </div>
             ) : (
               <DesktopBoard
@@ -1055,8 +1235,9 @@ export default function App() {
                 ceremonies={change.ceremonies}
                 moved={change.moved}
                 rangeSummary={rangeSummary}
-                sleepersCount={sleepersCount}
+                sleepersSummary={sleepersSummary}
                 onOpenTab={setSection}
+                alertedAddress={alertedAddress}
               />
             )
           ) : (
@@ -1071,20 +1252,9 @@ export default function App() {
               watch={watchProps}
               ceremonies={change.ceremonies}
               rangingCount={range === null ? null : range.cards.length}
-              ranging={
-                <Ranging
-                  controls={rangeControls}
-                  onControls={onRangeControls}
-                  band={rangeBand}
-                  data={range}
-                  loading={rangeLoading}
-                  error={rangeError}
-                  onRetry={onRangeRetry}
-                  now={now}
-                />
-              }
+              ranging={rangingTab}
               sleepersCount={sleepersCount}
-              sleepers={sleepersPanel}
+              sleepers={sleepersTab}
             />
           )
         ) : boardError ? (

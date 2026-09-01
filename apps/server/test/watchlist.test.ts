@@ -1,11 +1,29 @@
 import { describe, expect, it } from 'vitest';
 import { Hono } from 'hono';
+import type { Context } from 'grammy';
 import { is, type SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { SQL as SQLClass } from 'drizzle-orm/sql/sql';
-import { tokens, watches, type Db } from '@groupie/db';
-import { WATCH_CAP_PER_MEMBER, watchCapMessage } from '@groupie/shared';
-import { createBoardRoutes } from '../src/api/board.js';
+import {
+  calls as callsTable,
+  mentions,
+  sleeperEntries,
+  sleeperSeen,
+  tokens,
+  watches,
+  type Db,
+} from '@groupie/db';
+import {
+  ROBINHOOD_CHAIN_ID,
+  WATCH_CAP_PER_MEMBER,
+  tradingLinks,
+  watchCapMessage,
+  type BoardResponse,
+  type SleepersResponse,
+} from '@groupie/shared';
+import { createBoardRoutes, parseAddress } from '../src/api/board.js';
+import { handleWatch } from '../src/bot/bot.js';
+import { createSleeperRoutes } from '../src/api/sleepers.js';
 import type { ApiEnv, GroupRow } from '../src/api/membership.js';
 import { subscribe, type GroupieEvent } from '../src/events.js';
 import { activeWatchCount, addWatch, removeWatch } from '../src/watchlist.js';
@@ -32,7 +50,10 @@ interface DbCall {
   values?: Record<string, unknown>;
   set?: Record<string, unknown>;
   where?: SQL;
+  orderBy?: unknown;
   conflict?: { set?: Record<string, unknown> };
+  /** ON conditions, in join order — the predicates a join carries are guarantees too. */
+  joinOn: SQL[];
 }
 
 /** Result sets for one key, consumed in call order; the last one repeats. */
@@ -51,6 +72,17 @@ function whereText(call: DbCall | undefined): string {
   return call?.where ? dialect.sqlToQuery(call.where).sql : '';
 }
 
+/** The nth join's ON clause, in the order the query declared its joins. */
+function joinText(call: DbCall | undefined, index: number): string {
+  const on = call?.joinOn[index];
+  return on ? dialect.sqlToQuery(on).sql : '';
+}
+
+function joinParams(call: DbCall | undefined, index: number): unknown[] {
+  const on = call?.joinOn[index];
+  return on ? (dialect.sqlToQuery(on).params as unknown[]) : [];
+}
+
 function chain(call: DbCall, take: (key: string) => unknown[]) {
   const node: Record<string, unknown> = {
     then: (ok: (rows: unknown[]) => unknown, err: (e: unknown) => unknown) =>
@@ -63,17 +95,24 @@ function chain(call: DbCall, take: (key: string) => unknown[]) {
     'set',
     'from',
     'where',
+    'innerJoin',
+    'leftJoin',
     'orderBy',
     'limit',
     'returning',
     'onConflictDoNothing',
     'onConflictDoUpdate',
   ]) {
-    node[method] = (arg: unknown) => {
+    node[method] = (...args: unknown[]) => {
+      const arg = args[0];
       if (method === 'values') call.values = arg as Record<string, unknown>;
       if (method === 'set') call.set = arg as Record<string, unknown>;
       if (method === 'where') call.where = arg as SQL;
+      if (method === 'orderBy') call.orderBy = arg;
       if (method === 'onConflictDoUpdate') call.conflict = arg as { set?: Record<string, unknown> };
+      // leftJoin(table, on) / innerJoin(table, on): the ON clause is where the
+      // watchlist's group scope and its non-binned rule actually live.
+      if (method === 'innerJoin' || method === 'leftJoin') call.joinOn.push(args[1] as SQL);
       return node;
     };
   }
@@ -93,10 +132,14 @@ function makeDb(script: Script = {}): { db: Db; calls: DbCall[] } {
   const nameOf = (table: unknown): string => {
     if (table === watches) return 'watches';
     if (table === tokens) return 'tokens';
+    if (table === callsTable) return 'calls';
+    if (table === mentions) return 'mentions';
+    if (table === sleeperEntries) return 'sleeperEntries';
+    if (table === sleeperSeen) return 'sleeperSeen';
     return 'unknown';
   };
   const start = (op: string, table: unknown) => {
-    const call: DbCall = { key: `${op}:${nameOf(table)}` };
+    const call: DbCall = { key: `${op}:${nameOf(table)}`, joinOn: [] };
     calls.push(call);
     return chain(call, take);
   };
@@ -104,8 +147,10 @@ function makeDb(script: Script = {}): { db: Db; calls: DbCall[] } {
     insert: (table: unknown) => start('insert', table),
     update: (table: unknown) => start('update', table),
     select: () => ({ from: (table: unknown) => start('select', table) }),
+    selectDistinct: () => ({ from: (table: unknown) => start('select', table) }),
+    selectDistinctOn: () => ({ from: (table: unknown) => start('select', table) }),
     execute: (statement: unknown) => {
-      calls.push({ key: 'execute', where: statement as SQL });
+      calls.push({ key: 'execute', where: statement as SQL, joinOn: [] });
       return Promise.resolve([]);
     },
   };
@@ -343,6 +388,7 @@ function testApp(db: Db): Hono<ApiEnv> {
     await next();
   });
   app.route('/', createBoardRoutes(db));
+  app.route('/', createSleeperRoutes(db));
   return app;
 }
 
@@ -433,5 +479,735 @@ describe('DELETE /api/g/:slug/tokens/:tokenId/watch', () => {
       expect(res.status).toBe(404);
       expect(calls).toHaveLength(0);
     }
+  });
+});
+
+/* ------------------------------------------------- watch by address (r16) */
+
+const ADDRESS = '0x1111111111111111111111111111111111111111';
+/** Mixed case that passes EIP-55, to prove the checksum path is the live one. */
+const CHECKSUMMED = '0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359';
+
+describe('parseAddress â€” the body/path address, normalised like ingest', () => {
+  it('lowercases a well-formed address', () => {
+    expect(parseAddress(`  ${ADDRESS}  `)).toBe(ADDRESS);
+  });
+
+  it('accepts a checksummed address and stores it lowercase', () => {
+    expect(parseAddress(CHECKSUMMED)).toBe(CHECKSUMMED.toLowerCase());
+  });
+
+  it('refuses a mixed-case address that fails EIP-55 â€” a corrupted paste', () => {
+    const broken = '0xFb6916095ca1df60bB79Ce92cE3Ea74c37c5d359';
+    expect(parseAddress(broken)).toBeNull();
+  });
+
+  it('refuses junk, wrong lengths, and non-strings', () => {
+    for (const raw of [
+      '',
+      'nope',
+      '0x123',
+      `${ADDRESS}00`,
+      42,
+      null,
+      undefined,
+      { address: ADDRESS },
+    ]) {
+      expect(parseAddress(raw)).toBeNull();
+    }
+  });
+
+  it('refuses an address buried in other text â€” a field is not a sentence', () => {
+    expect(parseAddress(`buy ${ADDRESS} now`)).toBeNull();
+  });
+});
+
+async function post(db: Db, body: unknown): Promise<Response> {
+  return testApp(db).request(`/api/g/${SLUG}/watch`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+describe('POST /api/g/:slug/watch (by address)', () => {
+  it('400s a malformed address and writes nothing at all', async () => {
+    for (const body of [{ address: 'nope' }, { address: 42 }, {}, [ADDRESS]]) {
+      const { db, calls } = makeDb();
+      const res = await post(db, body);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toHaveProperty('error');
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  it('400s an unparseable body without touching the database', async () => {
+    const { db, calls } = makeDb();
+    const res = await testApp(db).request(`/api/g/${SLUG}/watch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{',
+    });
+    expect(res.status).toBe(400);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('413s a body past the limit before reading it', async () => {
+    // The whole expected body is ~60 bytes; a member's session must not be
+    // usable to make the process buffer an arbitrary amount of memory.
+    const { db, calls } = makeDb();
+    const res = await testApp(db).request(`/api/g/${SLUG}/watch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ address: ADDRESS, padding: 'x'.repeat(2048) }),
+    });
+    expect(res.status).toBe(413);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('accepts a body at the small end of the limit', async () => {
+    const { db } = makeDb({
+      'select:tokens': [[]],
+      'select:watches': [[{ n: '0' }], [], [{ n: '0' }]],
+      'insert:tokens': [[{ id: TOKEN_ID, symbol: null, mcapUsd: null }]],
+      'insert:watches': [[]],
+    });
+    expect((await post(db, { address: ADDRESS })).status).toBe(204);
+  });
+
+  it('204s: upserts the token, then adds the watch under the SESSION member', async () => {
+    const { db, calls } = makeDb({
+      // the by-address lookup misses, then: pre-check count, addWatch's
+      // existence probe, and its own count.
+      'select:tokens': [[]],
+      'select:watches': [[{ n: '0' }], [], [{ n: '0' }]],
+      'insert:tokens': [[{ id: TOKEN_ID, symbol: null, mcapUsd: null }]],
+      'insert:watches': [[]],
+    });
+    const res = await post(db, { address: CHECKSUMMED });
+    expect(res.status).toBe(204);
+    // Stored lowercase, exactly like an address ingested from chat.
+    expect(find(calls, 'insert:tokens')[0]?.values).toEqual({
+      chainId: ROBINHOOD_CHAIN_ID,
+      address: CHECKSUMMED.toLowerCase(),
+    });
+    expect(find(calls, 'insert:watches')[0]?.values).toEqual({
+      groupId: GROUP_ID,
+      tokenId: TOKEN_ID,
+      addedBy: USER_ID,
+    });
+  });
+
+  it('checks the cap BEFORE upserting, so a refusal leaves no orphan token', async () => {
+    // The round-15 orphan guard: a tokens row with no call and no watch would
+    // be polled at the fresh tier for a day for nothing.
+    const { db, calls } = makeDb({
+      'select:tokens': [[]],
+      'select:watches': count(WATCH_CAP_PER_MEMBER),
+    });
+    const res = await post(db, { address: ADDRESS });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: watchCapMessage(WATCH_CAP_PER_MEMBER),
+      cap: WATCH_CAP_PER_MEMBER,
+    });
+    expect(find(calls, 'insert:tokens')).toHaveLength(0);
+    expect(find(calls, 'insert:watches')).toHaveLength(0);
+    // ...and nothing but the coin lookup ran before it.
+    expect(calls.map((c) => c.key)).toEqual(['select:tokens', 'select:watches']);
+  });
+
+  /**
+   * Round 16 review: pressing WATCH on a coin the GROUP already watches
+   * consumes no slot — addWatch answers ok/alreadyActive, and the card route
+   * 204s — so a member at their cap must not be refused here. It is reachable:
+   * a Sleepers payload is not refetched when another member watches a row, so
+   * the pill still reads WATCH long after the coin was taken.
+   */
+  it('204s an already-watched coin at cap, without consulting the cap at all', async () => {
+    const { db, calls } = makeDb({
+      'select:tokens': [[{ id: TOKEN_ID, symbol: 'TKN' }]],
+      // The isWatched probe answers yes; the cap count is never reached.
+      'select:watches': [[{ id: 3 }]],
+    });
+    const res = await post(db, { address: ADDRESS });
+    expect(res.status).toBe(204);
+    expect(calls.map((c) => c.key)).toEqual(['select:tokens', 'select:watches']);
+    expect(find(calls, 'insert:tokens')).toHaveLength(0);
+    expect(find(calls, 'insert:watches')).toHaveLength(0);
+  });
+
+  it('...and publishes nothing: the board did not change', async () => {
+    const { db } = makeDb({
+      'select:tokens': [[{ id: TOKEN_ID, symbol: 'TKN' }]],
+      'select:watches': [[{ id: 3 }]],
+    });
+    const { events } = await capture(() => post(db, { address: ADDRESS }));
+    expect(events).toEqual([]);
+  });
+
+  it('still refuses at cap when the known coin is NOT watched — that costs a slot', async () => {
+    const { db, calls } = makeDb({
+      'select:tokens': [[{ id: TOKEN_ID, symbol: 'TKN' }]],
+      // isWatched: no, then the cap pre-check.
+      'select:watches': [[], count(WATCH_CAP_PER_MEMBER)[0] ?? []],
+    });
+    const res = await post(db, { address: ADDRESS });
+    expect(res.status).toBe(409);
+    expect(find(calls, 'insert:watches')).toHaveLength(0);
+  });
+
+  it('skips the upsert for a coin we already have — the row exists', async () => {
+    const { db, calls } = makeDb({
+      'select:tokens': [[{ id: TOKEN_ID, symbol: 'TKN' }]],
+      'select:watches': [[], [{ n: '0' }], [], [{ n: '0' }]],
+      'insert:watches': [[]],
+    });
+    expect((await post(db, { address: ADDRESS })).status).toBe(204);
+    expect(find(calls, 'insert:tokens')).toHaveLength(0);
+    expect(find(calls, 'insert:watches')[0]?.values).toEqual({
+      groupId: GROUP_ID,
+      tokenId: TOKEN_ID,
+      addedBy: USER_ID,
+    });
+  });
+
+  it('409s when the authoritative locked check refuses, after the upsert', async () => {
+    // The pre-check passed (a stale/racing count); addWatch is the real gate.
+    const { db } = makeDb({
+      'select:tokens': [[]],
+      'select:watches': [[{ n: '0' }], [], [{ n: String(WATCH_CAP_PER_MEMBER) }]],
+      'insert:tokens': [[{ id: TOKEN_ID, symbol: null, mcapUsd: null }]],
+    });
+    const res = await post(db, { address: ADDRESS });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: watchCapMessage(WATCH_CAP_PER_MEMBER),
+      cap: WATCH_CAP_PER_MEMBER,
+    });
+  });
+
+  it('publishes watch_changed for the group, like the card-id route', async () => {
+    const { db } = makeDb({
+      'select:tokens': [[]],
+      'select:watches': [[{ n: '0' }], [], [{ n: '0' }]],
+      'insert:tokens': [[{ id: TOKEN_ID, symbol: null, mcapUsd: null }]],
+      'insert:watches': [[]],
+    });
+    const { events } = await capture(() => post(db, { address: ADDRESS }));
+    expect(events).toEqual([{ type: 'watch_changed', tokenId: TOKEN_ID, groupId: GROUP_ID }]);
+  });
+});
+
+/**
+ * The chat command is the third surface on the same rule (docs/decisions.md
+ * round 16 review): `/overseer watch <ca>` for a coin the group already watches
+ * must not be refused for cap either — nothing about it consumes a slot.
+ */
+describe('/overseer watch — the bot mirrors the cap rule', () => {
+  const replies: string[] = [];
+  const ctx = { reply: async (text: string) => void replies.push(text) } as unknown as Context;
+
+  const watch = async (db: Db) => {
+    replies.length = 0;
+    await handleWatch(db, ctx, GROUP, [ADDRESS], USER_ID);
+    return replies;
+  };
+
+  it('confirms a coin the group already watches, even at cap', async () => {
+    const { db, calls } = makeDb({
+      // lookup hit, then pollTokenNow's own read finds nothing to poll.
+      'select:tokens': [[{ id: TOKEN_ID, symbol: 'TKN' }], []],
+      // isWatched: yes; addWatch's probe: active; then the slots-held count.
+      'select:watches': [[{ id: 3 }], [{ active: true }], count(WATCH_CAP_PER_MEMBER)[0] ?? []],
+    });
+    const [reply] = await watch(db);
+    expect(reply).toContain('Watching');
+    expect(reply).not.toContain('unwatch one first');
+    expect(find(calls, 'insert:tokens')).toHaveLength(0);
+  });
+
+  it('still refuses a NEW coin at cap, and writes no orphan token', async () => {
+    const { db, calls } = makeDb({
+      'select:tokens': [[]],
+      'select:watches': count(WATCH_CAP_PER_MEMBER),
+    });
+    const [reply] = await watch(db);
+    expect(reply).toContain(watchCapMessage(WATCH_CAP_PER_MEMBER));
+    expect(find(calls, 'insert:tokens')).toHaveLength(0);
+    expect(find(calls, 'insert:watches')).toHaveLength(0);
+  });
+
+  it('asks for the usage line when the argument is not an address', async () => {
+    const { db, calls } = makeDb();
+    replies.length = 0;
+    await handleWatch(db, ctx, GROUP, ['nope'], USER_ID);
+    expect(replies[0]).toContain('Usage:');
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('DELETE /api/g/:slug/watch/:address', () => {
+  it('204s and stops the group s watch on the named coin', async () => {
+    const { db, calls } = makeDb({
+      'select:tokens': [[{ id: TOKEN_ID }]],
+      'update:watches': [[{ id: 3 }]],
+    });
+    const res = await testApp(db).request(`/api/g/${SLUG}/watch/${CHECKSUMMED}`, {
+      method: 'DELETE',
+    });
+    expect(res.status).toBe(204);
+    // Looked up by (chain, lowercase address) â€” the bot's unwatch lookup.
+    expect(whereParams(find(calls, 'select:tokens')[0])).toEqual([
+      ROBINHOOD_CHAIN_ID,
+      CHECKSUMMED.toLowerCase(),
+    ]);
+    expect(find(calls, 'update:watches')[0]?.set).toEqual({ active: false });
+  });
+
+  it('never filters by who added it â€” the watchlist is the group s', async () => {
+    const { db, calls } = makeDb({
+      'select:tokens': [[{ id: TOKEN_ID }]],
+      'update:watches': [[{ id: 3 }]],
+    });
+    await testApp(db).request(`/api/g/${SLUG}/watch/${ADDRESS}`, { method: 'DELETE' });
+    const update = find(calls, 'update:watches')[0];
+    expect(whereParams(update)).toEqual([GROUP_ID, TOKEN_ID, true]);
+    expect(whereText(update)).not.toContain('added_by');
+  });
+
+  it('204s a coin we have never seen â€” no existence oracle', async () => {
+    const { db, calls } = makeDb({ 'select:tokens': [[]] });
+    const res = await testApp(db).request(`/api/g/${SLUG}/watch/${ADDRESS}`, { method: 'DELETE' });
+    expect(res.status).toBe(204);
+    expect(find(calls, 'update:watches')).toHaveLength(0);
+  });
+
+  it('204s a malformed address without querying anything', async () => {
+    const { db, calls } = makeDb();
+    const res = await testApp(db).request(`/api/g/${SLUG}/watch/not-an-address`, {
+      method: 'DELETE',
+    });
+    expect(res.status).toBe(204);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+/* ------------------------------------------ BoardResponse.watchlist (r16) */
+
+type TokenRow = typeof tokens.$inferSelect;
+type CallRow = typeof callsTable.$inferSelect;
+
+const AT = new Date('2026-09-02T12:00:00.000Z');
+
+function tokenRow(over: Partial<TokenRow> = {}): TokenRow {
+  return {
+    id: TOKEN_ID,
+    chainId: ROBINHOOD_CHAIN_ID,
+    address: ADDRESS,
+    symbol: 'TKN',
+    name: 'Token',
+    imageUrl: null,
+    socials: null,
+    launchpad: null,
+    phase: 'graduated',
+    poolAddress: null,
+    tokenCreatedAt: null,
+    graduatedAt: null,
+    diedAt: null,
+    deathReason: null,
+    mcapAtDeath: null,
+    revivedAt: null,
+    rugHiddenAt: null,
+    revivingAt: null,
+    priceUsd: null,
+    mcapUsd: 120_000,
+    liquidityUsd: 30_000,
+    vol24Usd: 10_000,
+    firstSeenAt: AT,
+    lastPolledAt: AT,
+    lastSnapshotAt: AT,
+    ...over,
+  };
+}
+
+function callRow(over: Partial<CallRow> = {}): CallRow {
+  return {
+    id: 500,
+    groupId: GROUP_ID,
+    tokenId: TOKEN_ID,
+    callerUserId: USER_ID,
+    callerName: '@caller',
+    messageId: 10,
+    calledAt: AT,
+    mcapAtCall: 60_000,
+    liquidityAtCall: 20_000,
+    peakMcapSinceCall: 120_000,
+    peakAt: AT,
+    mentionsCount: 1,
+    lastMentionAt: AT,
+    status: 'active',
+    diedAt: null,
+    deathReason: null,
+    mcapAtDeath: null,
+    binnedBy: null,
+    binnedAt: null,
+    reviveRequested: false,
+    ...over,
+  };
+}
+
+/** One row of loadWatchlistRows, as the fake hands it back. */
+function watchRow(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    token: tokenRow({ id: 88 }),
+    addedBy: USER_ID,
+    addedAt: AT,
+    callId: null,
+    callStatus: null,
+    ...over,
+  };
+}
+
+/**
+ * Script a board GET: board rows then the two count queries, all on `calls`;
+ * `names` answers the slot-holder name lookup (mentions joined to calls).
+ */
+function boardScript(options: {
+  cards?: Array<{ call: CallRow; token: TokenRow }>;
+  watchlist?: unknown[];
+  names?: Array<{ userId: number; userName: string }>;
+}): Script {
+  return {
+    'select:calls': [options.cards ?? [], [{ n: '0' }], [{ n: '0' }]],
+    'select:watches': [options.watchlist ?? []],
+    'select:mentions': [options.names ?? []],
+  };
+}
+
+const board = async (db: Db): Promise<BoardResponse> => {
+  const res = await testApp(db).request(`/api/g/${SLUG}/board`);
+  expect(res.status).toBe(200);
+  return (await res.json()) as BoardResponse;
+};
+
+describe('BoardResponse.watchlist', () => {
+  it('is present and empty when the group watches nothing', async () => {
+    const { db } = makeDb(boardScript({}));
+    expect((await board(db)).watchlist).toEqual([]);
+  });
+
+  it('carries a watched coin that has NO call on this board', async () => {
+    const token = tokenRow({ id: 88, address: ADDRESS, symbol: 'SLPR' });
+    const { db } = makeDb(boardScript({ watchlist: [watchRow({ token })] }));
+    const body = await board(db);
+    expect(body.watchlist).toHaveLength(1);
+    const entry = body.watchlist[0]!;
+    expect(entry).toMatchObject({
+      tokenId: 88,
+      address: ADDRESS,
+      symbol: 'SLPR',
+      phase: 'graduated',
+      rugHiddenAt: null,
+      callStatus: null,
+      mcapUsd: 120_000,
+      liquidityUsd: 30_000,
+      dataAsOf: AT.toISOString(),
+      addedBy: USER_ID,
+      addedByName: null,
+      addedAt: AT.toISOString(),
+      watchedByMe: true,
+      callId: null,
+      twitterUrl: null,
+      websiteUrl: null,
+    });
+    expect(entry.links).toEqual(tradingLinks(ADDRESS));
+    expect(entry.sparkline).toEqual([]);
+  });
+
+  it('marks another member s slot as not mine, and joins the call when there is one', async () => {
+    const { db } = makeDb(
+      boardScript({
+        watchlist: [watchRow({ addedBy: OTHER_USER_ID, callId: 500, callStatus: 'active' })],
+      }),
+    );
+    const entry = (await board(db)).watchlist[0];
+    expect(entry?.watchedByMe).toBe(false);
+    expect(entry?.addedBy).toBe(OTHER_USER_ID);
+    expect(entry?.callId).toBe(500);
+  });
+
+  /**
+   * Round 16 review: a watched coin the sections do not contain is on rug
+   * probation, or died, or simply older than the window — the row has to be
+   * able to say which instead of printing "no call" at a called coin.
+   */
+  it('serves rugHiddenAt and the joined call s status', async () => {
+    const hiddenAt = new Date('2026-09-02T09:00:00.000Z');
+    const { db } = makeDb(
+      boardScript({
+        watchlist: [
+          watchRow({
+            token: tokenRow({ id: 88, rugHiddenAt: hiddenAt }),
+            callId: 500,
+            callStatus: 'died',
+          }),
+        ],
+      }),
+    );
+    const entry = (await board(db)).watchlist[0];
+    expect(entry?.rugHiddenAt).toBe(hiddenAt.toISOString());
+    expect(entry?.callStatus).toBe('died');
+  });
+
+  it('leaves callStatus null when the coin has no call at all', async () => {
+    const { db } = makeDb(boardScript({ watchlist: [watchRow()] }));
+    const entry = (await board(db)).watchlist[0];
+    expect(entry?.callId).toBeNull();
+    expect(entry?.callStatus).toBeNull();
+  });
+
+  /**
+   * The call join is the payload's only claim about "the group's call": it must
+   * be THIS group's, and never a binned one (a binned card is not on the board,
+   * so an id to join against would dangle). `calls` is unique per (group, token)
+   * but not per token, so dropping the group predicate would silently serve
+   * another group's call id.
+   */
+  it('scopes the call join to this group and excludes binned calls', async () => {
+    const { db, calls } = makeDb(boardScript({}));
+    await board(db);
+    const query = find(calls, 'select:watches')[0];
+    // joins in declared order: tokens (innerJoin), then calls (leftJoin).
+    expect(joinText(query, 0)).toContain('"tokens"."id"');
+    const on = joinText(query, 1);
+    expect(on).toContain('"calls"."group_id"');
+    expect(on).toContain('<>');
+    expect(joinParams(query, 1)).toEqual([GROUP_ID, 'binned']);
+  });
+
+  it('does not window the watchlist — it is the slot inventory, not a section', async () => {
+    const { db, calls } = makeDb(boardScript({}));
+    await board(db);
+    const query = find(calls, 'select:watches')[0];
+    // The window predicate the sections carry (last_mention_at >= since) must
+    // not appear here, or a quiet coin's slot would vanish from the one surface
+    // that can free it.
+    expect(whereText(query)).not.toContain('last_mention_at');
+    expect(whereText(query)).not.toContain('>=');
+    expect(whereParams(query)).toEqual([GROUP_ID, true]);
+  });
+
+  it('asks for the group s ACTIVE watches, newest slot first', async () => {
+    const { db, calls } = makeDb(boardScript({}));
+    await board(db);
+    const query = find(calls, 'select:watches')[0];
+    expect(whereParams(query)).toEqual([GROUP_ID, true]);
+    // Ordering is the database's, so nothing downstream can re-sort it.
+    expect(renderSql(query?.orderBy)).toContain('desc');
+    expect(renderSql(query?.orderBy)).toContain('added_at');
+  });
+
+  it('marks a watched CARD watched, and mine, off the same rows', async () => {
+    const token = tokenRow();
+    const { db, calls } = makeDb(
+      boardScript({
+        cards: [{ call: callRow(), token }],
+        watchlist: [watchRow({ token, callId: 500, callStatus: 'active' })],
+      }),
+    );
+    const body = await board(db);
+    const card = body.sections.fresh[0];
+    expect(card?.watched).toBe(true);
+    expect(card?.watchedByMe).toBe(true);
+    // ...and ONE watches query served both the cards and the watchlist.
+    expect(find(calls, 'select:watches')).toHaveLength(1);
+  });
+
+  it('a card watched by someone else is watched, but not mine', async () => {
+    const token = tokenRow();
+    const { db } = makeDb(
+      boardScript({
+        cards: [{ call: callRow(), token }],
+        watchlist: [watchRow({ token, addedBy: OTHER_USER_ID, callId: 500, callStatus: 'active' })],
+      }),
+    );
+    const card = (await board(db)).sections.fresh[0];
+    expect(card?.watched).toBe(true);
+    expect(card?.watchedByMe).toBe(false);
+  });
+
+  it('fetches sparklines for cards AND watchlist rows in one query', async () => {
+    const { db, calls } = makeDb(
+      boardScript({
+        cards: [{ call: callRow(), token: tokenRow() }],
+        watchlist: [watchRow()],
+      }),
+    );
+    await board(db);
+    const sparkQueries = find(calls, 'execute');
+    expect(sparkQueries).toHaveLength(1);
+    const params = dialect.sqlToQuery(sparkQueries[0]?.where as SQL).params;
+    expect(params).toContain(TOKEN_ID);
+    expect(params).toContain(88);
+  });
+});
+
+/**
+ * Whose slot is this (docs/decisions.md round 16 review)? `watches.added_by`
+ * and `mentions.user_id` are the same Telegram user id, so a slot holder's own
+ * most recent mention in THIS group is the freshest display name we hold for
+ * them. "@member's slot" is what makes the cap actionable — "unwatch one
+ * first", but whose?
+ */
+describe('WatchlistEntry.addedByName', () => {
+  it('names the slot holder from their own latest mention in this group', async () => {
+    const { db } = makeDb(
+      boardScript({
+        watchlist: [watchRow({ addedBy: OTHER_USER_ID })],
+        names: [{ userId: OTHER_USER_ID, userName: '@pwnzssg' }],
+      }),
+    );
+    expect((await board(db)).watchlist[0]?.addedByName).toBe('@pwnzssg');
+  });
+
+  it('stays null for a member who has never posted here — never a guess', async () => {
+    const { db } = makeDb(
+      boardScript({
+        watchlist: [watchRow({ addedBy: OTHER_USER_ID })],
+        names: [{ userId: 12345, userName: '@someone-else' }],
+      }),
+    );
+    expect((await board(db)).watchlist[0]?.addedByName).toBeNull();
+  });
+
+  it('asks once for every slot holder, scoped to this group s calls', async () => {
+    const { db, calls } = makeDb(
+      boardScript({
+        watchlist: [
+          watchRow({ addedBy: USER_ID }),
+          watchRow({ token: tokenRow({ id: 89 }), addedBy: OTHER_USER_ID }),
+          watchRow({ token: tokenRow({ id: 90 }), addedBy: USER_ID }),
+        ],
+        names: [{ userId: USER_ID, userName: '@caller' }],
+      }),
+    );
+    const body = await board(db);
+    expect(body.watchlist.map((e) => e.addedByName)).toEqual(['@caller', null, '@caller']);
+    const queries = find(calls, 'select:mentions');
+    expect(queries).toHaveLength(1);
+    // Group-scoped, and asked for each DISTINCT holder exactly once.
+    const params = whereParams(queries[0]);
+    expect(params).toEqual([GROUP_ID, USER_ID, OTHER_USER_ID]);
+  });
+
+  it('asks nothing at all when the group watches nothing', async () => {
+    const { db, calls } = makeDb(boardScript({}));
+    await board(db);
+    expect(find(calls, 'select:mentions')).toHaveLength(0);
+  });
+});
+
+/* ----------------------------------------------- SleeperEntry watch flags */
+
+type SleeperRow = typeof sleeperEntries.$inferSelect;
+
+function sleeperRow(over: Partial<SleeperRow> = {}): SleeperRow {
+  return {
+    id: 1,
+    scanAt: AT,
+    bandLoUsd: 50_000,
+    bandHiUsd: 100_000,
+    rank: 1,
+    address: ADDRESS,
+    symbol: 'SLPR',
+    name: 'Sleeper',
+    imageUrl: null,
+    twitterUrl: 'https://x.com/sleeper',
+    websiteUrl: null,
+    poolAddress: '0xpool',
+    mcapUsd: 80_000,
+    vol24Usd: 40_000,
+    liquidityUsd: 20_000,
+    txns24: 100,
+    turnover: 0.5,
+    inBandHours: 12,
+    poolCreatedAt: new Date(AT.getTime() - 48 * 3_600_000),
+    ...over,
+  };
+}
+
+async function sleepers(db: Db): Promise<SleepersResponse> {
+  const res = await testApp(db).request(`/api/g/${SLUG}/sleepers`);
+  expect(res.status).toBe(200);
+  return (await res.json()) as SleepersResponse;
+}
+
+/** The scan rows, the group's called addresses, the seen ledger, the watches. */
+function sleeperScript(options: { rows?: SleeperRow[]; watches?: unknown[] }): Script {
+  return {
+    'select:sleeperEntries': [options.rows ?? []],
+    'select:calls': [[]],
+    'select:sleeperSeen': [[]],
+    'select:watches': [options.watches ?? []],
+  };
+}
+
+const firstEntry = (body: SleepersResponse) => body.bands[0]?.entries[0];
+
+describe('SleeperEntry.watched / watchedByMe', () => {
+  it('is unwatched when the group watches nothing', async () => {
+    const { db } = makeDb(sleeperScript({ rows: [sleeperRow()] }));
+    const entry = firstEntry(await sleepers(db));
+    expect(entry?.address).toBe(ADDRESS);
+    expect(entry?.watched).toBe(false);
+    expect(entry?.watchedByMe).toBe(false);
+  });
+
+  it('marks the reader s own slot, matching on address whatever its case', async () => {
+    const { db } = makeDb(
+      sleeperScript({
+        rows: [sleeperRow()],
+        // A sleeper has no token id here: the address is all the two share.
+        watches: [{ address: ADDRESS.toUpperCase().replace('0X', '0x'), addedBy: USER_ID }],
+      }),
+    );
+    const entry = firstEntry(await sleepers(db));
+    expect(entry?.watched).toBe(true);
+    expect(entry?.watchedByMe).toBe(true);
+  });
+
+  it('marks another member s watch watched but not mine', async () => {
+    const { db } = makeDb(
+      sleeperScript({ rows: [sleeperRow()], watches: [{ address: ADDRESS, addedBy: OTHER_USER_ID }] }),
+    );
+    const entry = firstEntry(await sleepers(db));
+    expect(entry?.watched).toBe(true);
+    expect(entry?.watchedByMe).toBe(false);
+  });
+
+  it('leaves an unwatched row in the same payload unwatched', async () => {
+    const other = `0x${'2'.repeat(40)}`;
+    const { db } = makeDb(
+      sleeperScript({
+        rows: [sleeperRow(), sleeperRow({ id: 2, rank: 2, address: other })],
+        watches: [{ address: ADDRESS, addedBy: USER_ID }],
+      }),
+    );
+    const entries = (await sleepers(db)).bands[0]?.entries ?? [];
+    expect(entries.map((e) => e.watched)).toEqual([true, false]);
+  });
+
+  it('asks for the group s active watches ONCE, not per row', async () => {
+    const { db, calls } = makeDb(
+      sleeperScript({
+        rows: [sleeperRow(), sleeperRow({ id: 2, rank: 2, address: `0x${'2'.repeat(40)}` })],
+        watches: [{ address: ADDRESS, addedBy: USER_ID }],
+      }),
+    );
+    await sleepers(db);
+    const queries = find(calls, 'select:watches');
+    expect(queries).toHaveLength(1);
+    expect(whereParams(queries[0])).toEqual([GROUP_ID, true]);
   });
 });

@@ -8,6 +8,7 @@ import type {
   SleeperDurationHours,
   SleepersResponse,
   TelegramLoginAvailability,
+  WatchByAddressRequest,
 } from '@groupie/shared';
 
 /** Any non-2xx response, or a request that never reached the server (status 0). */
@@ -173,6 +174,30 @@ export function binCall(slug: string, callId: number): Promise<void> {
 export function setWatch(slug: string, tokenId: number, watched: boolean): Promise<void> {
   return request<void>(`${groupPath(slug)}/tokens/${encodeURIComponent(String(tokenId))}/watch`, {
     method: watched ? 'POST' : 'DELETE',
+  });
+}
+
+/**
+ * Watch by ADDRESS (docs/decisions.md round 16) — the same thing
+ * `/overseer watch <ca>` does, and the only path for a coin with no call on
+ * this board (a Sleepers row, or a watch someone set from the chat). 409 carries
+ * the same friendly over-cap sentence as the card path.
+ */
+export function setWatchByAddress(
+  slug: string,
+  address: string,
+  watched: boolean,
+): Promise<void> {
+  if (watched) {
+    const body: WatchByAddressRequest = { address };
+    return request<void>(`${groupPath(slug)}/watch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+  return request<void>(`${groupPath(slug)}/watch/${encodeURIComponent(address)}`, {
+    method: 'DELETE',
   });
 }
 

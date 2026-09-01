@@ -1,6 +1,6 @@
-import { asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { calls, sleeperEntries, sleeperSeen, tokens, type Db } from '@groupie/db';
+import { calls, sleeperEntries, sleeperSeen, tokens, watches, type Db } from '@groupie/db';
 import {
   SLEEPER_DURATIONS_HOURS,
   SLEEPER_LONG_ONLY_MIN_HOURS,
@@ -102,7 +102,31 @@ async function loadOnListSince(
   return out;
 }
 
-function toEntry(row: EntryRow, onListSinceHours: number): SleeperEntry {
+/**
+ * The group's active watches keyed by ADDRESS (docs/decisions.md round 16) —
+ * one query for the whole payload, never a lookup per row. A sleeper is not one
+ * of the group's calls, so there is no token id to join on here; the address is
+ * the only thing the two surfaces share, and both sides store it lowercase.
+ *
+ * The value is the slot holder, so a row can say WATCHING·YOU: the cap is per
+ * member, and "unwatch one first" is only actionable when the app says which
+ * pills are the reader's own.
+ */
+async function loadWatchedAddresses(db: Db, groupId: number): Promise<Map<string, number>> {
+  const rows = await db
+    .select({ address: tokens.address, addedBy: watches.addedBy })
+    .from(watches)
+    .innerJoin(tokens, eq(tokens.id, watches.tokenId))
+    .where(and(eq(watches.groupId, groupId), eq(watches.active, true)));
+  return new Map(rows.map((r) => [r.address.toLowerCase(), r.addedBy]));
+}
+
+function toEntry(
+  row: EntryRow,
+  onListSinceHours: number,
+  watched: boolean,
+  watchedByMe: boolean,
+): SleeperEntry {
   return {
     address: row.address,
     symbol: row.symbol,
@@ -119,6 +143,8 @@ function toEntry(row: EntryRow, onListSinceHours: number): SleeperEntry {
     onListSinceHours,
     inBandHours: row.inBandHours,
     links: tradingLinks(row.address),
+    watched,
+    watchedByMe,
   };
 }
 
@@ -151,10 +177,12 @@ export function createSleeperRoutes(db: Db): Hono<ApiEnv> {
       .orderBy(asc(sleeperEntries.bandLoUsd), asc(sleeperEntries.rank));
 
     const nowMs = Date.now();
-    const [called, seen] = await Promise.all([
+    const [called, seen, watchedBy] = await Promise.all([
       loadCalledAddresses(db, group.id),
       loadOnListSince(db, [...new Set(rows.map((r) => r.address))], nowMs),
+      loadWatchedAddresses(db, group.id),
     ]);
+    const userId = c.get('userId');
 
     const byBand = new Map<number, SleeperEntry[]>();
     for (const row of rows) {
@@ -167,7 +195,10 @@ export function createSleeperRoutes(db: Db): Hono<ApiEnv> {
       const list = byBand.get(row.bandLoUsd) ?? [];
       // Rows arrive rank-ascending, so a plain length check is the top-N cut.
       if (list.length >= SLEEPERS.servePerBand) continue;
-      list.push(toEntry(row, seen.get(address) ?? 0));
+      const slotHolder = watchedBy.get(address);
+      list.push(
+        toEntry(row, seen.get(address) ?? 0, slotHolder !== undefined, slotHolder === userId),
+      );
       byBand.set(row.bandLoUsd, list);
     }
 

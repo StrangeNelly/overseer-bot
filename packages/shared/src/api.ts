@@ -159,8 +159,13 @@ export interface BoardResponse {
 
 /**
  * One active watch (round 16). Carries enough market data to render a row on
- * its own; when `callId` is set, the same coin is also a BoardCard in
- * `sections` and the client may join to it for the sparkline and call story.
+ * its own. `callId` is the group's non-binned call for the coin, if any — but
+ * that call is NOT guaranteed to be a BoardCard in `sections`: the sections are
+ * windowed and probation-filtered, the watchlist is neither (it is the slot
+ * inventory). The client joins to the card when one is present and otherwise
+ * explains the gap honestly from `callStatus` / `rugHiddenAt` / `phase`:
+ * "called, outside this window", "on rug probation", "died", or — only when
+ * `callId` is null — "no call" (a chat or Sleepers watch).
  */
 export interface WatchlistEntry {
   tokenId: number;
@@ -168,6 +173,10 @@ export interface WatchlistEntry {
   symbol: string | null;
   imageUrl: string | null;
   phase: TokenPhase;
+  /** tokens.rugHiddenAt — set while the coin is hidden on rug probation. ISO or null. */
+  rugHiddenAt: string | null;
+  /** Status of the joined call ('active' | 'died'); null when there is no call. */
+  callStatus: CallStatus | null;
   mcapUsd: number | null;
   liquidityUsd: number | null;
   /** tokens.lastSnapshotAt — the honesty marker for the numbers above. */

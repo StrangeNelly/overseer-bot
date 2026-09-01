@@ -9,7 +9,12 @@ import {
   MAX_LIQUIDITY_READING_AGE_MS,
   type LiquidityReading,
 } from '../src/poller/death.js';
-import { deadPollSeconds, isSuspiciousPair } from '../src/poller/scheduler.js';
+import {
+  deadPollSeconds,
+  isDue,
+  isSuspiciousPair,
+  type Candidate,
+} from '../src/poller/scheduler.js';
 
 const NOW = Date.UTC(2026, 8, 2, 12, 0, 0);
 const MINUTE = 60_000;
@@ -430,5 +435,75 @@ describe('deadPollSeconds (docs/decisions.md round 15)', () => {
     expect(POLL_TIERS.deadRecentSeconds).toBeLessThan(POLL_TIERS.deadSeconds);
     expect(POLL_TIERS.deadRecentSeconds).toBe(3 * 3_600);
     expect(POLL_TIERS.deadRecentHours).toBe(48);
+  });
+});
+
+/**
+ * Which tokens are worth a poll at all (docs/decisions.md round 16 review).
+ *
+ * Watch-by-address upserts a `tokens` row before the watch, and unwatching
+ * leaves it behind. Such a row is called by nobody and watched by nobody: no
+ * board renders it, no alert can fire for it — and the old rule read its
+ * activity clock off first_seen_at and put it on the 45-second fresh tier for a
+ * day, once per watch/unwatch, forever.
+ */
+describe('isDue — orphan tokens are never due', () => {
+  /** Alive, never hidden — the plain shape the tiers are written for. */
+  const tok = (over: Partial<TokenRow>): TokenRow =>
+    token({ phase: 'graduated', rugHiddenAt: null, firstSeenAt: new Date(NOW), ...over });
+
+  const candidate = (over: Partial<Candidate>): Candidate => ({
+    token: tok({ lastPolledAt: null }),
+    lastActivityMs: NOW,
+    reviveRequested: false,
+    called: true,
+    watched: false,
+    ...over,
+  });
+
+  it('skips a token no group called and nobody watches', () => {
+    expect(isDue(candidate({ called: false }), NOW)).toBe(false);
+  });
+
+  it('...however long it has sat unpolled', () => {
+    const stale = candidate({
+      called: false,
+      token: tok({
+        lastPolledAt: new Date(NOW - 30 * 24 * 3_600_000),
+        firstSeenAt: new Date(NOW - 30 * 24 * 3_600_000),
+      }),
+    });
+    expect(isDue(stale, NOW)).toBe(false);
+  });
+
+  it('...and whatever phase it is in — a dead orphan is still an orphan', () => {
+    for (const phase of ['unresolved', 'curve', 'graduated', 'dead'] as const) {
+      const orphan = candidate({
+        called: false,
+        token: tok({ phase, lastPolledAt: null, diedAt: new Date(NOW - 3_600_000) }),
+      });
+      expect(isDue(orphan, NOW)).toBe(false);
+    }
+  });
+
+  it('polls an uncalled coin the moment someone watches it', () => {
+    expect(isDue(candidate({ called: false, watched: true }), NOW)).toBe(true);
+  });
+
+  it('still honours a revive request — that only exists where a call does', () => {
+    const dead = candidate({
+      called: false,
+      reviveRequested: true,
+      token: tok({ phase: 'dead', lastPolledAt: new Date(NOW) }),
+    });
+    expect(isDue(dead, NOW)).toBe(true);
+  });
+
+  it('leaves a called token on its normal tier', () => {
+    const fresh = candidate({ token: tok({ lastPolledAt: new Date(NOW - 44_000) }) });
+    expect(isDue(fresh, NOW)).toBe(false);
+    expect(isDue(candidate({ token: tok({ lastPolledAt: new Date(NOW - 46_000) }) }), NOW)).toBe(
+      true,
+    );
   });
 });
