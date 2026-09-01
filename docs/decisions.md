@@ -19,6 +19,13 @@ Running record of decisions made with the owner. Newest at the bottom.
 
 - COV link label in Phanes: unidentified; dropped as non-blocking.
 
+## 2026-09-02 — Liquidity deaths need persistence (round 11)
+
+- Live case OMNI: pool 6 minutes old, called 19:02:11, declared dead (liquidity_floor) 19:02:14 off a single liquidity=$0 first reading while the chart traded happily to $132K — newborn-pool indexing lag, not a rug.
+- Fix: liquidity-based deaths (token liquidity_floor AND per-call liquidity collapse) fire only when the condition holds across >= 10 minutes AND >= 3 readings — never one snapshot. Plus a 30-minute newborn grace (since token_created_at/first_seen) where liquidity deaths are off entirely. Real drains stay drained; confirmation is free.
+- Also extend the DS suspicious-pair guard: a best-pair switch to a dust-liquidity pair while the cached liquidity was >= 10x healthier is distrusted (skip + log), not snapshotted.
+- Healing: existing repost->revive machinery already resurrects false deaths (used for OMNI same day). Builds after round 10 lands (shared files).
+
 ## 2026-09-02 — Collapse rugs + Retraced honesty (round 10)
 
 - Live case HDFI: sell-off rug to $8,249 ($249 above the $8K hide floor), LP down to 18.8% of call-time (above the 5% collapse line — LP survived because supply was dumped, not pulled), -99% from an $872K peak → showed as "Retraced 0.03x". Every rule individually correct; composition wrong for the dump-rug pattern.
