@@ -22,7 +22,7 @@ import {
   multipleTone,
   shortAddress,
 } from '../format';
-import { canFlash, requestMotion, useAlertBloom, useReducedMotion } from '../motion';
+import { canFlash, hoverCapable, requestMotion, useAlertBloom, useReducedMotion } from '../motion';
 import type { Ceremony } from '../motion';
 import { LinkPills, WatchPill } from './LinkPills';
 import type { WatchControl } from './LinkPills';
@@ -247,7 +247,7 @@ export function TokenCard({
     };
   }, [ceremony, animate]);
 
-  const pills = <LinkPills target={card} watch={watch} />;
+  const pills = <LinkPills target={card} watch={watch} compact={links === 'hover'} />;
 
   // ---- the died rail (desktop right column) is its own, flatter anatomy.
   if (size === 'rail') {
@@ -349,7 +349,12 @@ export function TokenCard({
             className="row-hit"
             aria-expanded={tapped}
             aria-label={`Trading links for ${title}`}
-            onClick={() => setTapped((prev) => !prev)}
+            // A mouse already has the strip on hover; toggling it on click too
+            // pinned it open. The tap exists for pointers that cannot hover.
+            onClick={() => {
+              if (hoverCapable()) return;
+              setTapped((prev) => !prev);
+            }}
           />
         ) : null}
 

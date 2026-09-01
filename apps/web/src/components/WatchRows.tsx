@@ -3,7 +3,7 @@ import type { WatchlistEntry } from '@groupie/shared';
 import type { WatchRow } from '../derive';
 import { slotLabel } from '../derive';
 import { avatarHue, fmtAge, fmtUsd, shortAddress } from '../format';
-import { useAlertBloom } from '../motion';
+import { hoverCapable, useAlertBloom } from '../motion';
 import type { WatchProps } from '../watch';
 import { targetFromWatchEntry, watchForCard, watchFor } from '../watch';
 import { LinkPills } from './LinkPills';
@@ -133,7 +133,7 @@ function CalllessRow({
   const title = entry.symbol ? `$${entry.symbol}` : shortAddress(entry.address);
   const seed = entry.symbol ?? entry.address;
   const control = watchFor(targetFromWatchEntry(entry), watch);
-  const pills = <LinkPills target={entry} watch={control} />;
+  const pills = <LinkPills target={entry} watch={control} compact={desk} />;
   const blooming = useAlertBloom(alerted);
   // Touch at desktop width has no hover, so the strip needs a tap (and the
   // button is what makes it keyboard-reachable at any width).
@@ -182,7 +182,10 @@ function CalllessRow({
             className="row-hit"
             aria-expanded={tapped}
             aria-label={`Trading links for ${title}`}
-            onClick={() => setTapped((prev) => !prev)}
+            onClick={() => {
+              if (hoverCapable()) return;
+              setTapped((prev) => !prev);
+            }}
           />
         ) : onToggle ? (
           <button

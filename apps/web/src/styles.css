@@ -890,25 +890,27 @@ a {
 .row-hoverlinks {
   display: none;
   position: absolute;
+  /* Starts past the identity column so the symbol and caller stay readable:
+     the strip takes the spark and the numbers, never the coin (3A). */
+  left: 118px;
   right: 0;
   top: 0;
   bottom: 0;
+  /* Above the numbers, which the odometer positions — otherwise digits paint
+     through the gaps between pills. */
+  z-index: 2;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
-  max-width: 100%;
-  padding: 0 12px 0 28px;
-  background: linear-gradient(90deg, rgba(21, 12, 38, 0), var(--fill-2) 22px);
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.row-hoverlinks::-webkit-scrollbar {
-  display: none;
+  align-content: center;
+  gap: 3px 4px;
+  padding: 0 10px 0 22px;
+  background: linear-gradient(90deg, rgba(21, 12, 38, 0), var(--fill-2) 18px);
+  overflow: hidden;
 }
 
 .row-hoverlinks .pill {
-  min-height: 22px;
-  padding: 2px 6px;
+  min-height: 20px;
+  padding: 2px 5px;
   font-size: 8.5px;
 }
 

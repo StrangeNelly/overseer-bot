@@ -53,6 +53,12 @@ export interface WatchControl {
 interface LinkPillsProps {
   target: LinkTarget;
   watch?: WatchControl;
+  /**
+   * Short labels (CA, WEB) for the narrow desktop rail, where the strip has to
+   * share a 48px row with the symbol and the numbers — the 3A artboard's own
+   * wording for that surface.
+   */
+  compact?: boolean;
 }
 
 /**
@@ -60,7 +66,7 @@ interface LinkPillsProps {
  * `.row-pills`, the desktop `.row-hoverlinks`, a spotlight card's `.card-links`)
  * and sizes them from it.
  */
-export function LinkPills({ target, watch }: LinkPillsProps) {
+export function LinkPills({ target, watch, compact = false }: LinkPillsProps) {
   const [copied, setCopied] = useState(false);
 
   const onCopy = useCallback(() => {
@@ -83,7 +89,7 @@ export function LinkPills({ target, watch }: LinkPillsProps) {
         DEXS
       </a>
       <button type="button" className="pill pill-copy" onClick={onCopy}>
-        {copied ? 'COPIED ✓' : 'COPY CA'}
+        {copied ? (compact ? '✓' : 'COPIED ✓') : compact ? 'CA' : 'COPY CA'}
       </button>
       {/* The project's X account, where we have one (docs/decisions.md round 9). */}
       {target.twitterUrl ? (
@@ -94,7 +100,7 @@ export function LinkPills({ target, watch }: LinkPillsProps) {
       {/* ...and its website, where we have one (round 15). */}
       {target.websiteUrl ? (
         <a className="pill" href={target.websiteUrl} target="_blank" rel="noopener">
-          WEBSITE
+          {compact ? 'WEB' : 'WEBSITE'}
         </a>
       ) : null}
       {watch ? <WatchPill target={target} watch={watch} /> : null}
