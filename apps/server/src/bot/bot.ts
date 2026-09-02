@@ -18,8 +18,10 @@ import {
   WATCH_CAP_PER_MEMBER,
   watchCapMessage,
   type AlertSettings,
+  type DiscoverySettings,
 } from '@groupie/shared';
 import { publish } from '../events.js';
+import { clampLaunchMinEth, discoverySettingsOf } from '../discovery/settings.js';
 import {
   activeWatchCount,
   addWatch,
@@ -186,6 +188,36 @@ export function alertsSummary(s: AlertSettings): string {
   );
 }
 
+/**
+ * The discovery half of `/overseer alerts` (docs/decisions.md rounds 18 and
+ * 20). A separate line rather than a longer first one: these are a different
+ * family — they are about coins nobody here has called, and they are capped per
+ * hour rather than cooled down per coin.
+ */
+export function discoverySummary(d: DiscoverySettings, enabled: boolean): string {
+  // No chain listener in this process: whatever the settings say, nothing will
+  // ever be posted, and printing thresholds as if they were live would be a
+  // promise the deployment cannot keep.
+  if (!enabled) return 'Discovery: off (not configured)';
+  const launch =
+    d.launchMinEth > 0 ? `launches ≥${d.launchMinEth} ETH` : 'launches muted';
+  return (
+    `Discovery: ${launch} · graduations ${d.gradsOn ? 'on' : 'off'} · ` +
+    `max ${d.alertsPerHour}/h (the rest stay on the board). ` +
+    `Tune: /overseer set launch <eth> (0 mutes) · /overseer set grads on|off`
+  );
+}
+
+/**
+ * ...and what a `set` says after writing one. The write still happens when the
+ * feed is off — a group configuring its threshold before the key lands is doing
+ * something reasonable — but the reply must not imply anything is listening.
+ */
+export function discoverySetReply(d: DiscoverySettings, enabled: boolean): string {
+  if (enabled) return discoverySummary(d, true);
+  return `${discoverySummary(d, true)}\n(The discovery feed is off on this deployment.)`;
+}
+
 /** The address a watch/unwatch is about, or null when the argument is junk. */
 function commandAddress(args: string[]): string | null {
   return extractEvmAddresses(args.join(' '))[0] ?? null;
@@ -330,18 +362,94 @@ async function handleWatchlist(
 }
 
 const SET_USAGE =
-  'Usage: /overseer set nuke <pct 5-95> <minutes 5-60> · /overseer set buyopp <pct 5-95>';
+  'Usage: /overseer set nuke <pct 5-95> <minutes 5-60> · /overseer set buyopp <pct 5-95> · ' +
+  '/overseer set launch <eth, 0 mutes> · /overseer set grads on|off';
 
-/** Exported for tests: what a `set` writes is what the group lives with. */
+/** A decimal argument — ETH thresholds are not whole numbers. */
+function parseDecimal(raw: string | undefined): number | null {
+  if (raw === undefined) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+/** `on`/`off` (and the obvious synonyms), or null when it is neither. */
+function parseToggle(raw: string | undefined): boolean | null {
+  const word = raw?.toLowerCase();
+  if (word === 'on' || word === 'yes' || word === 'true' || word === '1') return true;
+  if (word === 'off' || word === 'no' || word === 'false' || word === '0') return false;
+  return null;
+}
+
+/**
+ * Merge a patch into one key of `groups.settings`, in SQL — so a concurrent
+ * write to some OTHER settings key survives, and a hand-edited non-object blob
+ * cannot break the update. SET expressions see the OLD row, which is what is
+ * being merged.
+ */
+async function mergeSettings(
+  db: Db,
+  groupId: number,
+  key: 'alerts' | 'discovery',
+  patch: Record<string, unknown>,
+): Promise<unknown> {
+  const current = sql`case when jsonb_typeof(${groups.settings}) = 'object' then ${groups.settings} else '{}'::jsonb end`;
+  const branch = sql`case when jsonb_typeof(${groups.settings} -> ${key}) = 'object' then ${groups.settings} -> ${key} else '{}'::jsonb end`;
+  // The path is a LITERAL, not a parameter: `key` is a two-value union from
+  // this module, and keeping it inline leaves the statement's parameter list as
+  // "the patch, and nothing else" — which is what makes a merge auditable.
+  const path = sql.raw(`'{${key}}'`);
+  const updated = await db
+    .update(groups)
+    .set({
+      settings: sql`jsonb_set(${current}, ${path}, ${branch} || ${JSON.stringify(patch)}::jsonb, true)`,
+    })
+    .where(eq(groups.id, groupId))
+    .returning({ settings: groups.settings });
+  return updated[0]?.settings;
+}
+
+/**
+ * Exported for tests: what a `set` writes is what the group lives with.
+ * `discoveryEnabled` only shapes the REPLY — a group may configure a feed this
+ * deployment cannot run, and the settings survive the day the key arrives.
+ */
 export async function handleSet(
   db: Db,
   ctx: Context,
   group: GroupRow,
   args: string[],
+  discoveryEnabled: boolean,
 ): Promise<void> {
   const what = args[0]?.toLowerCase();
   const pct = parseWholeNumber(args[1]);
   const span = parseWholeNumber(args[2]);
+
+  // Discovery (docs/decisions.md rounds 18 and 20) lives under its own settings
+  // key and answers with its own summary line, so the two families never merge
+  // into one wall of knobs.
+  if (what === 'launch') {
+    const eth = parseDecimal(args[1]);
+    if (eth === null || eth < 0) {
+      await ctx.reply(SET_USAGE);
+      return;
+    }
+    const settings = await mergeSettings(db, group.id, 'discovery', {
+      launchMinEth: clampLaunchMinEth(eth),
+    });
+    await ctx.reply(discoverySetReply(discoverySettingsOf(settings), discoveryEnabled));
+    return;
+  }
+  if (what === 'grads' || what === 'graduations') {
+    const on = parseToggle(args[1]);
+    if (on === null) {
+      await ctx.reply(SET_USAGE);
+      return;
+    }
+    const settings = await mergeSettings(db, group.id, 'discovery', { gradsOn: on });
+    await ctx.reply(discoverySetReply(discoverySettingsOf(settings), discoveryEnabled));
+    return;
+  }
+
   let patch: Partial<AlertSettings>;
   if (what === 'nuke' && pct !== null && span !== null) {
     patch = {
@@ -359,34 +467,27 @@ export async function handleSet(
     return;
   }
 
-  // Merge into settings.alerts in SQL so a concurrent write to some OTHER
-  // settings key survives, and so a hand-edited non-object blob can't break the
-  // update. SET expressions see the OLD row, which is what is being merged.
-  const current = sql`case when jsonb_typeof(${groups.settings}) = 'object' then ${groups.settings} else '{}'::jsonb end`;
-  const currentAlerts = sql`case when jsonb_typeof(${groups.settings} -> 'alerts') = 'object' then ${groups.settings} -> 'alerts' else '{}'::jsonb end`;
-  const updated = await db
-    .update(groups)
-    .set({
-      settings: sql`jsonb_set(${current}, '{alerts}', ${currentAlerts} || ${JSON.stringify(patch)}::jsonb, true)`,
-    })
-    .where(eq(groups.id, group.id))
-    .returning({ settings: groups.settings });
-
-  await ctx.reply(alertsSummary(alertSettingsOf(updated[0]?.settings)));
+  const settings = await mergeSettings(db, group.id, 'alerts', patch);
+  await ctx.reply(alertsSummary(alertSettingsOf(settings)));
 }
 
 /**
  * Everything after `/overseer`. Returns true when the command consumed a
  * contract address as an ARGUMENT — that address is a watchlist instruction,
  * not a call, so the message must not fall through to call ingestion.
+ *
+ * Exported for tests: `discoveryEnabled` has to reach BOTH discovery replies
+ * (`alerts` and `set`), and the only way to prove that is to dispatch through
+ * here rather than to call the two helpers directly.
  */
-async function handleGroupieCommand(
+export async function handleGroupieCommand(
   db: Db,
   config: Config,
   ctx: Context,
   group: GroupRow,
   rawArgs: string,
   userId: number,
+  discoveryEnabled: boolean,
 ): Promise<boolean> {
   const args = rawArgs.trim().split(/\s+/).filter(Boolean);
   switch (args[0]?.toLowerCase()) {
@@ -400,10 +501,13 @@ async function handleGroupieCommand(
       await handleWatchlist(db, ctx, group, userId);
       return false;
     case 'alerts':
-      await ctx.reply(alertsSummary(alertSettingsOf(group.settings)));
+      await ctx.reply(
+        `${alertsSummary(alertSettingsOf(group.settings))}\n\n` +
+          discoverySummary(discoverySettingsOf(group.settings), discoveryEnabled),
+      );
       return false;
     case 'set':
-      await handleSet(db, ctx, group, args.slice(1));
+      await handleSet(db, ctx, group, args.slice(1), discoveryEnabled);
       return false;
     default: {
       // The t.me deep link opens the board inside Telegram; the plain URL is
@@ -419,7 +523,12 @@ async function handleGroupieCommand(
   }
 }
 
-export function createBot(config: Config, db: Db): Bot {
+/**
+ * `discoveryEnabled` is whether THIS process runs the chain listener, so
+ * `/overseer alerts` can say "off (not configured)" instead of quoting
+ * thresholds nothing will ever act on (round 18/20 review).
+ */
+export function createBot(config: Config, db: Db, discoveryEnabled = false): Bot {
   const bot = new Bot(config.botToken);
 
   // Being added to / removed from a group is the entire onboarding flow.
@@ -459,6 +568,7 @@ export function createBot(config: Config, db: Db): Bot {
         group,
         ctx.match,
         ctx.from.id,
+        discoveryEnabled,
       );
     }
     if (!consumedAddress) await next();

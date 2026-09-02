@@ -53,6 +53,8 @@ const BASE_CONFIG: Config = {
   miniAppUrl: null,
   tgOauthClientId: CLIENT_ID,
   tgOauthClientSecret: CLIENT_SECRET,
+  alchemyApiKey: null,
+  alchemyRpcUrl: null,
   devAuthUserId: null,
 };
 

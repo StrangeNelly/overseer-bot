@@ -36,6 +36,18 @@ export interface Config {
   tgOauthClientId: string | null;
   tgOauthClientSecret: string | null;
   /**
+   * Alchemy key for Robinhood Chain (docs/decisions.md rounds 18 and 20). Its
+   * ABSENCE is the feature flag: no key means the chain listener never starts,
+   * nothing polls, and /discovery answers `enabled:false` — a stream that says
+   * it is off, rather than an empty one that looks like a quiet day.
+   */
+  alchemyApiKey: string | null;
+  /**
+   * Full RPC URL override — a self-hosted node, another provider, or a test
+   * double. Wins over the key when both are set.
+   */
+  alchemyRpcUrl: string | null;
+  /**
    * DEV ONLY: browse the board as this Telegram user id without initData (no
    * Telegram webview, no membership check). Non-null ONLY when ENABLE_DEV_AUTH
    * is exactly 'true' and NODE_ENV is not 'production', so this one field is
@@ -67,6 +79,8 @@ export function loadConfig(): Config {
     miniAppUrl: process.env.MINI_APP_URL?.trim() || null,
     tgOauthClientId: process.env.TG_OAUTH_CLIENT_ID?.trim() || null,
     tgOauthClientSecret: process.env.TG_OAUTH_CLIENT_SECRET?.trim() || null,
+    alchemyApiKey: process.env.ALCHEMY_API_KEY?.trim() || null,
+    alchemyRpcUrl: process.env.ALCHEMY_RPC_URL?.trim() || null,
     devAuthUserId: devAuthArmed ? optionalInt('DEV_AUTH_USER_ID') : null,
   };
 }

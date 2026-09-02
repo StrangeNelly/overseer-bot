@@ -193,6 +193,7 @@ function poolInfo(over: Partial<GtPoolInfo> = {}): GtPoolInfo {
     graduated: false,
     migratedPoolAddress: null,
     dex: 'pons',
+    lockedLiquidityPct: null,
     ...over,
   };
 }

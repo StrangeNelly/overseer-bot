@@ -1,6 +1,9 @@
 import type {
   BoardResponse,
   BoardWindow,
+  DiscoveryFilters,
+  DiscoveryKind,
+  DiscoveryResponse,
   HandoffResponse,
   MeResponse,
   RangeBoardResponse,
@@ -45,7 +48,18 @@ async function errorMessage(res: Response): Promise<string> {
   return res.statusText || `Request failed (${res.status})`;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+/**
+ * A response together with the server's own instant for it (the HTTP `Date`
+ * header, whole-second resolution), so a client can compare a server timestamp
+ * in the body against the server's clock instead of its own. Null when the
+ * header is missing or unparseable.
+ */
+export interface Timed<T> {
+  body: T;
+  serverAt: number | null;
+}
+
+async function requestTimed<T>(path: string, init?: RequestInit): Promise<Timed<T>> {
   let res: Response;
   try {
     res = await fetch(path, {
@@ -59,13 +73,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
 
+  const dateHeader = res.headers.get('date');
+  const parsed = dateHeader ? Date.parse(dateHeader) : NaN;
+  const serverAt = Number.isFinite(parsed) ? parsed : null;
+
   const text = await res.text();
-  if (!text) return undefined as T;
+  if (!text) return { body: undefined as T, serverAt };
   try {
-    return JSON.parse(text) as T;
+    return { body: JSON.parse(text) as T, serverAt };
   } catch {
     throw new ApiError(res.status, 'The server sent a malformed response.');
   }
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return (await requestTimed<T>(path, init)).body;
 }
 
 function groupPath(slug: string): string {
@@ -165,6 +187,36 @@ export function fetchSleepers(
     minHours: String(minHours),
   });
   return request<SleepersResponse>(`${groupPath(slug)}/sleepers?${params.toString()}`, { signal });
+}
+
+/**
+ * Discovery: what the CHAIN surfaced on its own (docs/decisions.md rounds 18 and
+ * 20) — direct Uniswap launches and PONS graduations, neither of them a group
+ * call.
+ *
+ * Three independent filters, three query flags (`xweb`, `bundles`, `stocks`,
+ * all default 1): one switch per chip, so a chip that is lit can never mean a
+ * filter the payload dropped. Every parameter is sent explicitly rather than
+ * omitted at its default, so the URL always says what the payload answers — and
+ * the payload echoes `hours` and `filters` back, which is what the view prints.
+ */
+export function fetchDiscovery(
+  slug: string,
+  query: { kind: DiscoveryKind | 'all'; hours: number; filters: DiscoveryFilters },
+  signal?: AbortSignal,
+): Promise<Timed<DiscoveryResponse>> {
+  const params = new URLSearchParams({
+    kind: query.kind,
+    hours: String(query.hours),
+    xweb: query.filters.xWeb ? '1' : '0',
+    bundles: query.filters.noBundles ? '1' : '0',
+    stocks: query.filters.noStocks ? '1' : '0',
+  });
+  // Timed: `lastTickAt` in the body is a server timestamp, and the stall verdict
+  // must read it against the server's clock, never this device's.
+  return requestTimed<DiscoveryResponse>(`${groupPath(slug)}/discovery?${params.toString()}`, {
+    signal,
+  });
 }
 
 export function binCall(slug: string, callId: number): Promise<void> {

@@ -184,7 +184,13 @@ export async function backfillBaselines(db: Db, tokenIds: number[]): Promise<Map
   return filled;
 }
 
-function cooldownKey(groupId: number, tokenId: number, type: AlertType): string {
+/**
+ * `type` is the column's type, not AlertType: since rounds 18/20 the table also
+ * holds 'launch'/'graduation' rows, which have no token and are read back here
+ * only to be skipped. Keying on the raw string keeps this pass indifferent to
+ * families it does not own.
+ */
+function cooldownKey(groupId: number, tokenId: number, type: string): string {
   return `${groupId}:${tokenId}:${type}`;
 }
 
@@ -215,6 +221,9 @@ async function loadLastFired(
     .groupBy(alerts.groupId, alerts.tokenId, alerts.type);
   for (const row of rows) {
     if (!row.lastFiredAt) continue;
+    // token_id is nullable since the discovery family joined the table (rounds
+    // 18/20); those rows are never watchlist alerts and have no cooldown key.
+    if (row.tokenId === null) continue;
     out.set(cooldownKey(row.groupId, row.tokenId, row.type), row.lastFiredAt.getTime());
   }
   return out;

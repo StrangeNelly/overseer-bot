@@ -94,6 +94,10 @@ interface BoardProps {
   sleepers: ReactNode;
   /** null until the sleepers stream has loaded once. */
   sleepersCount: number | null;
+  /** Discovery tab body — launches and graduations off the chain (rounds 18/20). */
+  discovery: ReactNode;
+  /** null until discovery has loaded once, and null while the feed is dormant. */
+  discoveryCount: number | null;
   /** Per-card state changes worth a ceremony this update. */
   ceremonies: ReadonlyMap<number, Ceremony>;
 }
@@ -131,6 +135,8 @@ export function Board({
   rangingCount,
   sleepers,
   sleepersCount,
+  discovery,
+  discoveryCount,
   ceremonies,
 }: BoardProps) {
   const visible = useVisibleSections(board, hiddenCallIds);
@@ -152,11 +158,12 @@ export function Board({
     const out = {
       ranging: rangingCount,
       sleepers: sleepersCount,
+      discovery: discoveryCount,
       watch: watchRows.length,
     } as Record<SectionKey, number | null>;
     for (const { key } of BOARD_SECTIONS) out[key] = visible[key].length;
     return out;
-  }, [visible, rangingCount, sleepersCount, watchRows.length]);
+  }, [visible, rangingCount, sleepersCount, discoveryCount, watchRows.length]);
 
   const toggle = (callId: number) => setOpenId((prev) => (prev === callId ? null : callId));
   const toggleWatch = (key: string) => setOpenWatch((prev) => (prev === key ? null : key));
@@ -169,6 +176,8 @@ export function Board({
         ranging
       ) : section === 'sleepers' ? (
         sleepers
+      ) : section === 'discovery' ? (
+        discovery
       ) : section === 'watch' ? (
         <Zone
           key="watch"

@@ -261,6 +261,13 @@ export interface GtPoolInfo {
   /** Where trading moved after graduation; the curve pool is abandoned. */
   migratedPoolAddress: string | null;
   dex: string | null;
+  /**
+   * `locked_liquidity_percentage`, 0-100 (docs/decisions.md round 18). Null when
+   * GeckoTerminal does not report it — which is NOT 0% locked. Uniswap LP is
+   * unlocked unless a team locks it, so 0 is a real and common answer and
+   * conflating it with "we don't know" would turn a missing field into a claim.
+   */
+  lockedLiquidityPct: number | null;
 }
 
 /**
@@ -290,11 +297,15 @@ export function parsePoolResource(resource: JsonApiResource, poolAddress: string
     graduated: typeof launchpad?.completed === 'boolean' ? launchpad.completed : null,
     migratedPoolAddress: typeof migrated === 'string' && migrated ? migrated.toLowerCase() : null,
     dex: typeof dexId === 'string' ? dexId : null,
+    lockedLiquidityPct: num(a.locked_liquidity_percentage),
   };
 }
 
-export async function getPool(poolAddress: string): Promise<GtPoolInfo | null> {
-  const body = (await gtFetch(`/networks/${ROBINHOOD_SLUG}/pools/${poolAddress}`)) as {
+export async function getPool(
+  poolAddress: string,
+  priority: GtPriority = 'poll',
+): Promise<GtPoolInfo | null> {
+  const body = (await gtFetch(`/networks/${ROBINHOOD_SLUG}/pools/${poolAddress}`, priority)) as {
     data?: JsonApiResource;
   } | null;
   if (!body?.data?.attributes) return null;

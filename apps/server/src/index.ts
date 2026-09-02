@@ -14,7 +14,9 @@ import { createDb } from '@groupie/db';
 import { createApi } from './api/app.js';
 import { startAlertDelivery } from './bot/alertDelivery.js';
 import { createBot } from './bot/bot.js';
+import { chainRpcUrl, createChainClient } from './chain/client.js';
 import { loadConfig } from './config.js';
+import { startDiscovery } from './discovery/runner.js';
 import { startPoller } from './poller/scheduler.js';
 
 // Load the repo-root .env regardless of cwd; a missing file is a no-op
@@ -23,8 +25,6 @@ loadEnv({ path: fileURLToPath(new URL('../../../.env', import.meta.url)) });
 
 const config = loadConfig();
 const { db, client } = createDb(config.databaseUrl);
-const bot = createBot(config, db);
-const api = createApi(db, bot.api, config);
 
 // The bot + poller run ONLY in production (or under an explicit RUN_BOT=1).
 // A second bot instance anywhere 409-crash-fights the deployed one — a local
@@ -35,6 +35,16 @@ const api = createApi(db, bot.api, config);
 const webOnly =
   process.env.WEB_ONLY === '1' ||
   (process.env.NODE_ENV !== 'production' && process.env.RUN_BOT !== '1');
+
+// The chain listener writes shared rows and posts into the chat, so it obeys
+// the same guardrail: exactly one instance, alongside the poller. Absent an
+// Alchemy key it is dormant anyway (startDiscovery says so once and returns).
+// Started BEFORE the API and the bot because both have to tell members the
+// truth about it: the board's `enabled`, and `/overseer alerts`.
+const discovery = startDiscovery(db, webOnly ? null : createChainClient(chainRpcUrl(config)));
+
+const bot = createBot(config, db, discovery.running);
+const api = createApi(db, bot.api, config, discovery);
 
 const server = serve({ fetch: api.fetch, port: config.port }, (info) => {
   console.log(`api listening on :${info.port}${webOnly ? ' (WEB_ONLY: no bot, no poller)' : ''}`);
@@ -77,6 +87,7 @@ async function shutdown() {
   console.log('shutting down...');
   stopPoller();
   stopAlertDelivery();
+  discovery.stop();
   if (!webOnly) await bot.stop();
   await closeServer();
   await client.end().catch(() => {});

@@ -9,7 +9,7 @@ export type BoardSectionKey = keyof BoardResponse['sections'];
  * a Sleepers row has no call to file under. Ranging and Sleepers each have their
  * own endpoint and their own controls, but they ride the same strip.
  */
-export type SectionKey = BoardSectionKey | 'watch' | 'ranging' | 'sleepers';
+export type SectionKey = BoardSectionKey | 'watch' | 'ranging' | 'sleepers' | 'discovery';
 
 // Reviving sits SECOND, right after Fresh: the owner asked for a comeback
 // banner, and a coin that just clawed its way out of rug probation is the most
@@ -22,11 +22,11 @@ export const BOARD_SECTIONS = [
   { key: 'died', label: 'Died', short: 'DIED' },
 ] as const satisfies readonly { key: BoardSectionKey; label: string; short: string }[];
 
-// Sleepers sits LAST, after the group's own surfaces: it is the one tab that is
-// not about the group's calls at all (docs/decisions.md round 9), and its
-// distance from Fresh is part of saying so. ON WATCH sits between the board's
-// zones and the analytical views — it is the group's, but it is a state, not a
-// section.
+// The two uncurated surfaces sit LAST, after the group's own: neither Sleepers
+// (docs/decisions.md round 9) nor Discovery (rounds 18 and 20) is about the
+// group's calls at all, and their distance from Fresh is part of saying so. ON
+// WATCH sits between the board's zones and the analytical views — it is the
+// group's, but it is a state, not a section.
 export const SECTIONS = [
   { key: 'fresh', label: 'Fresh', short: 'FRESH', tone: 'fresh' },
   { key: 'reviving', label: 'Reviving', short: 'REVIVING', tone: 'reviving' },
@@ -36,6 +36,7 @@ export const SECTIONS = [
   { key: 'died', label: 'Died', short: 'DIED', tone: 'died' },
   { key: 'ranging', label: 'Ranging', short: 'RNG', tone: 'cyan' },
   { key: 'sleepers', label: 'Sleepers', short: 'SLPRS', tone: 'cyan' },
+  { key: 'discovery', label: 'Discovery', short: 'DSCVR', tone: 'cyan' },
 ] as const satisfies readonly {
   key: SectionKey;
   label: string;

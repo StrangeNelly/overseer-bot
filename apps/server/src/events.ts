@@ -28,13 +28,18 @@ export type GroupieEvent =
   // marker rather than waiting for a poll. Group-scoped for the same reason —
   // a watch is one group's state, not the token's.
   | { type: 'watch_changed'; tokenId: number; groupId: number }
-  // Already persisted in `alerts` and past its cooldown when this fires: the
-  // subscriber's only job is delivering `message` to the group's chat.
+  // Already persisted in `alerts` and past its cooldown (watchlist) or under its
+  // hourly cap (discovery) when this fires: the subscriber's only job is
+  // delivering `message` to the group's chat.
+  //
+  // `tokenId` is NULL for the discovery family (docs/decisions.md rounds 18 and
+  // 20): a launch or a graduation is about a coin nobody here has called, so
+  // there is no token row and no call message to thread the reply onto.
   | {
       type: 'alert_fired';
       groupId: number;
-      tokenId: number;
-      alertType: 'nuke' | 'buy_opp';
+      tokenId: number | null;
+      alertType: 'nuke' | 'buy_opp' | 'launch' | 'graduation';
       message: string;
     };
 

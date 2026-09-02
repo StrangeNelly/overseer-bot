@@ -934,9 +934,10 @@ a {
     background: var(--wash-magenta);
   }
 
-  /* Sleepers rows have a tap-reveal row for touch; on a mouse the hover strip
-     is the only copy of the links that may show. */
-  .row-slp .row-pills {
+  /* Sleepers and Discovery rows have a tap-reveal row for touch; on a mouse the
+     hover strip is the only copy of the links that may show. */
+  .row-slp .row-pills,
+  .row-dsc .row-pills {
     display: none;
   }
 }
@@ -1572,9 +1573,11 @@ a {
   white-space: nowrap;
 }
 
-/* The two Sleepers filters — X-only and no-stocks: cyan chips, both active by
-   default (docs/decisions.md rounds 9 and 17). */
+/* The Sleepers filters — X-only and no-stocks — and Discovery's three
+   (X + web, no bundles, no stocks): cyan chips, active by default
+   (docs/decisions.md rounds 9, 17 and 20). */
 .chip-x,
+.chip-bundles,
 .chip-stocks {
   flex: 0 0 auto;
   min-height: 28px;
@@ -1582,6 +1585,7 @@ a {
 }
 
 .chip-x.is-active,
+.chip-bundles.is-active,
 .chip-stocks.is-active {
   background: var(--cyan);
   border-color: var(--cyan);
@@ -3137,6 +3141,107 @@ a {
 
 .slp-legend > span:last-child {
   text-align: right;
+}
+
+/* ---------- discovery (rounds 18 + 20) ----------
+   The chain's own feed, in the same clothes as Sleepers: cyan zones for an
+   analytical surface, no P&L anywhere (nothing here has a call to be a multiple
+   of), and the launch-block facts printed on every row so the bundle filter is
+   never a hidden verdict. */
+
+.dsc-grid {
+  padding: 18px 14px 6px;
+}
+
+/* The listener's own health. It sits outside the control panel because
+   `.ctl-note` is desktop-only, and "the feed stopped reading blocks" is exactly
+   the thing a phone must not be told quietly. Cyan hairline, no fill: it is a
+   fact about the feed, not an alarm about a coin. */
+.dsc-stall {
+  margin: 10px 14px 0;
+  padding: 7px 12px;
+  border: 1px solid var(--badge-border-cyan);
+  border-radius: 8px;
+  background: var(--zone-bg);
+  font: 400 10px var(--font-mono);
+  color: var(--dim);
+}
+
+.app-desk .dsc-stall {
+  margin: 12px 28px 0;
+  font-size: 10.5px;
+}
+
+.app-desk .dsc-grid {
+  padding: 22px 28px 14px;
+}
+
+.zone-dsc .zone-band {
+  height: 40px;
+}
+
+.dsc-rows {
+  display: flex;
+  flex-direction: column;
+}
+
+/* No call, so no P&L direction: the edge is the neutral hairline. */
+.row-dsc {
+  border-left-color: var(--badge-border);
+}
+
+.row-dsc:last-child {
+  border-bottom: 0;
+}
+
+/* The bundle facts sit where a sparkline would: an hour-old coin has no history
+   to draw, and how the supply started out is the number that replaces it. Dim
+   and unstyled — a fact, never a rating. */
+.dsc-bundle {
+  flex: 0 0 auto;
+  width: 148px;
+  text-align: right;
+  font: 400 9.5px var(--font-mono);
+  color: var(--dimmer);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Which venue opened the pool (v2 · v4 · PONS). Neutral: cyan on this row is
+   spent on the zone, and the dex is not an opinion. */
+.badge-dex {
+  color: var(--dim);
+  border-color: var(--badge-border);
+  letter-spacing: 0.6px;
+}
+
+/* "The chat already said this one." A note about us, not about the coin, so it
+   is the dimmest thing on the line. */
+.badge-alerted {
+  color: var(--dimmer);
+  border-color: var(--badge-border);
+  letter-spacing: 0.6px;
+}
+
+.dsc-footnote {
+  padding: 10px 14px 24px;
+  line-height: 1.5;
+}
+
+.app-desk .dsc-footnote {
+  padding: 0 28px 26px;
+  font-size: 9.5px;
+}
+
+/* Narrow screens give the identity column the room: the bundle line shrinks
+   (and ellipses to "launch block 12%…") rather than squeezing the symbol. */
+@media (max-width: 460px) {
+  .dsc-bundle {
+    width: 96px;
+    font-size: 9px;
+  }
 }
 
 /* ---------- rail summaries ---------- */

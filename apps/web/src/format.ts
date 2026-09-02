@@ -36,6 +36,21 @@ export function fmtUsd(value: number | null | undefined): string {
   return `${sign}$${compact(abs)}`;
 }
 
+/**
+ * `5.8 ETH`, `12 ETH`, `0.42 ETH`, `—` — a pool's opening size in the unit the
+ * owner asked the launch threshold in ("even a 5 ETH paired launch is something
+ * to look at", docs/decisions.md round 18). Dollars move; the ETH figure is what
+ * the pool actually opened with.
+ */
+export function fmtEth(value: number | null | undefined): string {
+  if (!isNum(value) || value < 0) return DASH;
+  if (value >= 10) return `${Math.round(value)} ETH`;
+  if (value === 0) return '0 ETH';
+  if (value >= 0.1) return `${stripTrailingZero(value.toFixed(1))} ETH`;
+  if (value < 0.01) return '<0.01 ETH';
+  return `${value.toFixed(2)} ETH`;
+}
+
 /** `4.2x`, `13x`, `0.38x`, `—`. */
 export function fmtMultiple(value: number | null | undefined): string {
   if (!isNum(value) || value < 0) return DASH;

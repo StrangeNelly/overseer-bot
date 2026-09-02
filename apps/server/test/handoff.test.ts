@@ -40,6 +40,8 @@ const CONFIG: Config = {
   miniAppUrl: null,
   tgOauthClientId: null,
   tgOauthClientSecret: null,
+  alchemyApiKey: null,
+  alchemyRpcUrl: null,
   devAuthUserId: null,
 };
 

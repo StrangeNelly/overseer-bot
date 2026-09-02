@@ -4,6 +4,8 @@ import type {
   BoardCard,
   BoardResponse,
   BoardWindow,
+  DiscoveryFilters,
+  DiscoveryResponse,
   RangeBoardResponse,
   RangeDurationHours,
   SleeperDurationHours,
@@ -23,6 +25,7 @@ import {
   createHandoff,
   eventsUrl,
   fetchBoard,
+  fetchDiscovery,
   fetchMe,
   fetchRange,
   fetchSleepers,
@@ -35,6 +38,17 @@ import { readCachedBoard, writeCachedBoard } from './cache';
 import { Board } from './components/Board';
 import { DesktopBoard } from './components/DesktopBoard';
 import type { RangeSummary, SleepersSummary } from './components/DesktopBoard';
+import { Discovery } from './components/Discovery';
+import {
+  DISCOVERY_FRAME_TAIL,
+  DISCOVERY_POLL_MS,
+  deriveDiscoverySummary,
+  discoveryCountOf,
+  filtersAfterFailedReload,
+  parseDiscoveryFlag,
+  parseDiscoveryHours,
+} from './discovery';
+import type { DiscoveryHours } from './discovery';
 import { MiniBoard } from './components/MiniBoard';
 import { Pulse } from './components/Pulse';
 import { DEFAULT_CONTROLS, Ranging, resolveBand, sanitizeRangeControls } from './components/Ranging';
@@ -65,6 +79,10 @@ const RANGE_STORAGE_KEY = 'groupie.range';
 const SLEEPERS_X_ONLY_STORAGE_KEY = 'groupie.sleepers.xOnly';
 const SLEEPERS_NO_STOCKS_STORAGE_KEY = 'groupie.sleepers.noStocks';
 const SLEEPERS_MIN_HOURS_STORAGE_KEY = 'groupie.sleepers.minHours';
+const DISCOVERY_HOURS_STORAGE_KEY = 'groupie.discovery.hours';
+const DISCOVERY_X_WEB_STORAGE_KEY = 'groupie.discovery.xWeb';
+const DISCOVERY_NO_BUNDLES_STORAGE_KEY = 'groupie.discovery.noBundles';
+const DISCOVERY_NO_STOCKS_STORAGE_KEY = 'groupie.discovery.noStocks';
 /** 3h — the shortest duration, and the server's own default (round 14). */
 const DEFAULT_SLEEPER_HOURS: SleeperDurationHours = 3;
 const DEFAULT_WINDOW: BoardWindow = '24h';
@@ -239,6 +257,48 @@ function loadSleepersMinHours(): SleeperDurationHours {
 function saveSleepersMinHours(value: SleeperDurationHours): void {
   try {
     window.localStorage.setItem(SLEEPERS_MIN_HOURS_STORAGE_KEY, String(value));
+  } catch {
+    // Persisting the preference is best-effort.
+  }
+}
+
+/**
+ * The three discovery filters (docs/decisions.md round 20), all ON by default.
+ *
+ * Each one is stored, toggled AND requested separately: the endpoint takes three
+ * flags (`xweb`, `bundles`, `stocks`), so a chip is exactly one filter and the
+ * payload echoes back the set it applied. The view prints that echo, never the
+ * chips.
+ */
+function loadDiscoveryFlag(key: string): boolean {
+  try {
+    return parseDiscoveryFlag(window.localStorage.getItem(key));
+  } catch {
+    return true;
+  }
+}
+
+function saveDiscoveryFlag(key: string, value: boolean): void {
+  try {
+    window.localStorage.setItem(key, value ? '1' : '0');
+  } catch {
+    // Persisting the preference is best-effort.
+  }
+}
+
+/** Re-validated against the tuple: the stored value is user-editable. */
+function loadDiscoveryHours(): DiscoveryHours {
+  try {
+    return parseDiscoveryHours(window.localStorage.getItem(DISCOVERY_HOURS_STORAGE_KEY));
+  } catch {
+    // Private mode / disabled storage: fall back to the default.
+    return parseDiscoveryHours(null);
+  }
+}
+
+function saveDiscoveryHours(value: DiscoveryHours): void {
+  try {
+    window.localStorage.setItem(DISCOVERY_HOURS_STORAGE_KEY, String(value));
   } catch {
     // Persisting the preference is best-effort.
   }
@@ -459,6 +519,30 @@ export default function App() {
   const [sleepers, setSleepers] = useState<SleepersResponse | null>(null);
   const [sleepersError, setSleepersError] = useState<string | null>(null);
   const [sleepersLoading, setSleepersLoading] = useState(false);
+  // Discovery is the chain's own feed (rounds 18 and 20): like Sleepers it is a
+  // snapshot of something outside this group, so it lives in memory only.
+  const [discoveryHours, setDiscoveryHours] = useState<DiscoveryHours>(loadDiscoveryHours);
+  const [discoveryXWeb, setDiscoveryXWeb] = useState<boolean>(() =>
+    loadDiscoveryFlag(DISCOVERY_X_WEB_STORAGE_KEY),
+  );
+  const [discoveryNoBundles, setDiscoveryNoBundles] = useState<boolean>(() =>
+    loadDiscoveryFlag(DISCOVERY_NO_BUNDLES_STORAGE_KEY),
+  );
+  const [discoveryNoStocks, setDiscoveryNoStocks] = useState<boolean>(() =>
+    loadDiscoveryFlag(DISCOVERY_NO_STOCKS_STORAGE_KEY),
+  );
+  const [discovery, setDiscovery] = useState<DiscoveryResponse | null>(null);
+  /**
+   * When the payload on screen landed, on THIS machine's clock. The stall line
+   * is judged against it rather than against `now`, so a backgrounded tab or a
+   * clock that jumped never turns our own silence into a verdict on the chain
+   * listener (see `feedStatusText`).
+   */
+  const [discoveryFetchedAt, setDiscoveryFetchedAt] = useState<number | null>(null);
+  /** The server's own instant for that payload (its Date header), or null. */
+  const [discoveryServerAt, setDiscoveryServerAt] = useState<number | null>(null);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  const [discoveryLoading, setDiscoveryLoading] = useState(false);
 
   const slug = boot.kind === 'ready' ? boot.slug : null;
   const slugRef = useRef<string | null>(null);
@@ -475,11 +559,29 @@ export default function App() {
   sleepersNoStocksRef.current = sleepersNoStocks;
   const sleepersMinHoursRef = useRef(sleepersMinHours);
   sleepersMinHoursRef.current = sleepersMinHours;
+  const discoverySeqRef = useRef(0);
+  /** Set by a failed chip reload's snap-back; the load effect consumes it once. */
+  const discoverySkipLoadRef = useRef(false);
+  const discoveryHoursRef = useRef(discoveryHours);
+  discoveryHoursRef.current = discoveryHours;
+  /**
+   * One chip, one flag, one query parameter (round 20's three filters). The
+   * object identity changes on every render, which is exactly why it is a ref:
+   * the load effect keys off the three booleans below, never off this.
+   */
+  const discoveryFilters = useMemo<DiscoveryFilters>(
+    () => ({ xWeb: discoveryXWeb, noBundles: discoveryNoBundles, noStocks: discoveryNoStocks }),
+    [discoveryXWeb, discoveryNoBundles, discoveryNoStocks],
+  );
+  const discoveryFiltersRef = useRef(discoveryFilters);
+  discoveryFiltersRef.current = discoveryFilters;
   // "Has this view ever loaded?" — a watch toggle only refreshes what is there.
   const rangeRef = useRef<RangeBoardResponse | null>(null);
   rangeRef.current = range;
   const sleepersRef = useRef<SleepersResponse | null>(null);
   sleepersRef.current = sleepers;
+  const discoveryRef = useRef<DiscoveryResponse | null>(null);
+  discoveryRef.current = discovery;
   /** True once the server has answered: the cache never outranks a real payload. */
   const paintedRef = useRef(false);
 
@@ -621,6 +723,59 @@ export default function App() {
     [],
   );
 
+  const loadDiscovery = useCallback(
+    async (
+      hours: DiscoveryHours,
+      filters: DiscoveryFilters,
+      options: { silent?: boolean } = {},
+    ) => {
+      const currentSlug = slugRef.current;
+      if (!currentSlug) return;
+      // Latest-wins, exactly like the board and the other two views.
+      const seq = ++discoverySeqRef.current;
+      if (!options.silent) setDiscoveryLoading(true);
+      try {
+        // Both kinds in one request: the view draws both zones, and one payload
+        // is what lets the footnote describe a single set of applied filters.
+        const { body: data, serverAt } = await fetchDiscovery(currentSlug, {
+          kind: 'all',
+          hours,
+          filters,
+        });
+        if (seq !== discoverySeqRef.current) return;
+        setDiscovery(data);
+        // Stamped from the client clock at the instant the response landed: it
+        // dates THIS payload, which is what the stall verdict is measured from.
+        // The server's own instant rides along so that verdict can read the
+        // server's `lastTickAt` against the server's clock, not this device's.
+        setDiscoveryFetchedAt(Date.now());
+        setDiscoveryServerAt(serverAt);
+        setDiscoveryError(null);
+      } catch (err) {
+        if (seq !== discoverySeqRef.current) return;
+        setDiscoveryError(describe(err));
+        // A chip is a REQUEST, and a request that failed changed nothing: the
+        // payload on screen is still the old one. The flags snap back to the
+        // filters that payload applied, so `aria-pressed` cannot claim a cut the
+        // rows below it never had. (Mid-flight the optimistic chip stands.)
+        // Only the on-screen state snaps back: the STORED preference is what
+        // the member chose, and a network blip is not a choice. The snap-back
+        // render must not fire a second request either — the load effect skips
+        // exactly one run for it.
+        const restore = filtersAfterFailedReload(filters, discoveryRef.current);
+        if (restore) {
+          discoverySkipLoadRef.current = true;
+          setDiscoveryXWeb(restore.xWeb);
+          setDiscoveryNoBundles(restore.noBundles);
+          setDiscoveryNoStocks(restore.noStocks);
+        }
+      } finally {
+        if (!options.silent && seq === discoverySeqRef.current) setDiscoveryLoading(false);
+      }
+    },
+    [],
+  );
+
   /** Fixed for the life of the page: the launch payload only exists in the webview. */
   const inTelegram = useMemo(() => tgInitData() !== null, []);
   const layout = useLayoutMode(inTelegram);
@@ -628,6 +783,7 @@ export default function App() {
   const rangeBand = useMemo(() => resolveBand(rangeControls), [rangeControls]);
   const rangingActive = section === 'ranging';
   const sleepersActive = section === 'sleepers';
+  const discoveryActive = section === 'discovery';
   const rangeHours = rangeControls.hours;
   const customBand = rangeControls.presetIndex === null;
 
@@ -668,6 +824,45 @@ export default function App() {
     loadSleepers,
   ]);
 
+  // Discovery is an on-chain feed, not a live board: it loads when its view
+  // opens, when a control changes, and on focus — plus once per board load on
+  // desktop, which is what fills the rail's summary card.
+  //
+  // "Needed" means MOUNTED, not "the window is wide": the desktop rail card only
+  // exists once the board has painted, and it is replaced entirely while RANGING
+  // or SLEEPERS owns the view. Polling for a card nobody is looking at is a
+  // request every two minutes that no pixel is waiting for.
+  const discoveryNeeded =
+    discoveryActive ||
+    (layout === 'desktop' && board !== null && section !== 'ranging' && section !== 'sleepers');
+  useEffect(() => {
+    if (!slug || !discoveryNeeded) return;
+    // A failed chip reload snaps the flags back to the payload on screen; that
+    // render is a correction, not a request, and issues no fetch.
+    if (discoverySkipLoadRef.current) {
+      discoverySkipLoadRef.current = false;
+      return;
+    }
+    void loadDiscovery(discoveryHours, discoveryFiltersRef.current);
+  }, [slug, discoveryNeeded, discoveryHours, discoveryXWeb, discoveryNoBundles, discoveryNoStocks, loadDiscovery]);
+
+  /**
+   * ...and then keeps itself current while the surface is on screen. The server
+   * publishes no discovery frame, so a poll is the only thing between an open
+   * DISCOVERY view (or the desktop rail card) and a launch that happened five
+   * minutes ago. Silent, and never while the document is hidden: a backgrounded
+   * tab has nobody reading it, and the focus handler above already refreshes on
+   * the way back.
+   */
+  useEffect(() => {
+    if (!slug || !discoveryNeeded) return;
+    const id = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      void loadDiscovery(discoveryHoursRef.current, discoveryFiltersRef.current, { silent: true });
+    }, DISCOVERY_POLL_MS);
+    return () => window.clearInterval(id);
+  }, [slug, discoveryNeeded, loadDiscovery]);
+
   const scheduleRefetch = useCallback(() => {
     if (debounceRef.current !== null) return;
     debounceRef.current = window.setTimeout(() => {
@@ -684,6 +879,9 @@ export default function App() {
   );
 
   // Live stream. EventSource reconnects on its own; we only mirror its state.
+  //
+  // Discovery is deliberately absent here: it is the CHAIN's feed, the server
+  // publishes no frame for it, and the poll above is what keeps it current.
   useEffect(() => {
     if (!slug) return;
     const source = new EventSource(eventsUrl(slug));
@@ -718,6 +916,11 @@ export default function App() {
           { silent: true },
         );
       }
+      if (discoveryNeeded) {
+        void loadDiscovery(discoveryHoursRef.current, discoveryFiltersRef.current, {
+          silent: true,
+        });
+      }
     };
     window.addEventListener('focus', onFocus);
     document.addEventListener('visibilitychange', onFocus);
@@ -725,7 +928,16 @@ export default function App() {
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onFocus);
     };
-  }, [slug, loadBoard, loadRange, loadSleepers, rangingNeeded, sleepersNeeded]);
+  }, [
+    slug,
+    loadBoard,
+    loadRange,
+    loadSleepers,
+    loadDiscovery,
+    rangingNeeded,
+    sleepersNeeded,
+    discoveryNeeded,
+  ]);
 
   // Keeps every "3h" on the board honest without a refetch.
   useEffect(() => {
@@ -762,6 +974,30 @@ export default function App() {
     setSleepersMinHours(next);
     saveSleepersMinHours(next);
   }, []);
+
+  const onDiscoveryHours = useCallback((next: DiscoveryHours) => {
+    setDiscoveryHours(next);
+    saveDiscoveryHours(next);
+  }, []);
+
+  const onDiscoveryXWeb = useCallback((next: boolean) => {
+    setDiscoveryXWeb(next);
+    saveDiscoveryFlag(DISCOVERY_X_WEB_STORAGE_KEY, next);
+  }, []);
+
+  const onDiscoveryNoBundles = useCallback((next: boolean) => {
+    setDiscoveryNoBundles(next);
+    saveDiscoveryFlag(DISCOVERY_NO_BUNDLES_STORAGE_KEY, next);
+  }, []);
+
+  const onDiscoveryNoStocks = useCallback((next: boolean) => {
+    setDiscoveryNoStocks(next);
+    saveDiscoveryFlag(DISCOVERY_NO_STOCKS_STORAGE_KEY, next);
+  }, []);
+
+  const onDiscoveryRetry = useCallback(() => {
+    void loadDiscovery(discoveryHoursRef.current, discoveryFiltersRef.current);
+  }, [loadDiscovery]);
 
   const onSleepersRetry = useCallback(() => {
     void loadSleepers(
@@ -843,6 +1079,11 @@ export default function App() {
                 { silent: true },
               )
             : null,
+          discoveryRef.current
+            ? loadDiscovery(discoveryHoursRef.current, discoveryFiltersRef.current, {
+                silent: true,
+              })
+            : null,
         ]);
       } catch (err) {
         // The cap refusal arrives as a 409 whose message is the friendly
@@ -861,7 +1102,7 @@ export default function App() {
         });
       }
     },
-    [loadBoard, loadRange, loadSleepers],
+    [loadBoard, loadRange, loadSleepers, loadDiscovery],
   );
 
   const watchProps = useMemo<WatchProps>(
@@ -959,6 +1200,17 @@ export default function App() {
     };
   }, [sleepers]);
 
+  /**
+   * The DSCVR chip's count and the rail card's numbers. A dormant feed counts
+   * nothing — the chip shows an em dash and the card says why, rather than
+   * printing a zero nobody can act on.
+   */
+  const discoveryCount = useMemo(() => discoveryCountOf(discovery), [discovery]);
+  const discoverySummary = useMemo(
+    () => deriveDiscoverySummary(discovery, discoveryFetchedAt, discoveryServerAt),
+    [discovery, discoveryFetchedAt, discoveryServerAt],
+  );
+
   // The two analytical views (design pass 2, 3B/3C): controls panel plus
   // results, shared by the desktop full view and the mobile tab body. Only the
   // wayfinding differs — desktop gets the 30px ViewHeader with a breadcrumb,
@@ -1019,6 +1271,61 @@ export default function App() {
     />
   );
 
+  /**
+   * The discovery filters. Three questions, three chips, three query flags — an
+   * X account and a website, the launch-block bundle limit, and tokenized stocks
+   * (round 20). One switch each: the chips can no longer disagree with the
+   * payload, and the footnote under the zones still reports what the response
+   * actually applied rather than what was asked for.
+   */
+  const discoveryChips = (
+    <>
+      <button
+        type="button"
+        className={`chip chip-x${discoveryXWeb ? ' is-active' : ''}`}
+        aria-pressed={discoveryXWeb}
+        title="Show only coins that have both an X account and a website"
+        onClick={() => onDiscoveryXWeb(!discoveryXWeb)}
+      >
+        {discoveryXWeb ? 'X + web' : 'any socials'}
+      </button>
+      <button
+        type="button"
+        className={`chip chip-bundles${discoveryNoBundles ? ' is-active' : ''}`}
+        aria-pressed={discoveryNoBundles}
+        title="Hide coins whose launch block absorbed a large share of the supply"
+        onClick={() => onDiscoveryNoBundles(!discoveryNoBundles)}
+      >
+        {discoveryNoBundles ? 'no bundles' : 'any launch block'}
+      </button>
+      <button
+        type="button"
+        className={`chip chip-stocks${discoveryNoStocks ? ' is-active' : ''}`}
+        aria-pressed={discoveryNoStocks}
+        title="Hide tokenized stocks, ETFs and leveraged equity products"
+        onClick={() => onDiscoveryNoStocks(!discoveryNoStocks)}
+      >
+        {discoveryNoStocks ? 'no stocks' : 'with stocks'}
+      </button>
+    </>
+  );
+
+  const discoveryBody = (
+    <Discovery
+      data={discovery}
+      loading={discoveryLoading}
+      error={discoveryError}
+      onRetry={onDiscoveryRetry}
+      hours={discoveryHours}
+      onHours={onDiscoveryHours}
+      filterChips={discoveryChips}
+      fetchedAt={discoveryFetchedAt}
+      serverAt={discoveryServerAt}
+      now={now}
+      watch={watchProps}
+    />
+  );
+
   const rangingPanel = (
     <div className="view">
       <ViewHeader
@@ -1063,6 +1370,24 @@ export default function App() {
     </div>
   );
 
+  const discoveryPanel = (
+    <div className="view">
+      <ViewHeader
+        title="DISCOVERY"
+        sub={
+          <>
+            {'chain-wide · '}
+            <strong className="view-hard">not group calls</strong>
+            {` · ${DISCOVERY_FRAME_TAIL}`}
+          </>
+        }
+        right={<span className="view-note">on-chain events — no market scan, nothing tracked</span>}
+        onBack={() => setSection('fresh')}
+      />
+      {discoveryBody}
+    </div>
+  );
+
   // The keys are load-bearing: the mobile tab bodies all sit in one child slot,
   // so without them React updates a single Zone in place and the tab-in
   // cross-fade never replays.
@@ -1098,6 +1423,26 @@ export default function App() {
       }
     >
       {sleepersBodyWith(sleepersChips)}
+    </Zone>
+  );
+
+  const discoveryTab = (
+    <Zone
+      key="discovery"
+      tone="cyan"
+      headline="DISCOVERY"
+      count={discoveryCount}
+      className="zone-tab"
+      /* Same rule as the Sleepers band: at 375px the trust frame owns this line
+         alone — the chips live in the control panel below. */
+      note={
+        <>
+          <strong className="view-hard">not group calls</strong>
+          {` · ${DISCOVERY_FRAME_TAIL}`}
+        </>
+      }
+    >
+      {discoveryBody}
     </Zone>
   );
 
@@ -1251,9 +1596,9 @@ export default function App() {
               3h scan) — the board windows don't apply there, so the chips go
               visibly inert instead of lying about being pressable. */}
           <div
-            className={rangingActive || sleepersActive ? 'wins-inert' : undefined}
+            className={rangingActive || sleepersActive || discoveryActive ? 'wins-inert' : undefined}
             title={
-              rangingActive || sleepersActive
+              rangingActive || sleepersActive || discoveryActive
                 ? 'Board time windows don’t apply to this tab'
                 : undefined
             }
@@ -1296,9 +1641,13 @@ export default function App() {
 
         {board ? (
           desktop ? (
-            section === 'ranging' || section === 'sleepers' ? (
+            section === 'ranging' || section === 'sleepers' || section === 'discovery' ? (
               <div className="desk-view">
-                {section === 'sleepers' ? sleepersPanel : rangingPanel}
+                {section === 'sleepers'
+                  ? sleepersPanel
+                  : section === 'discovery'
+                    ? discoveryPanel
+                    : rangingPanel}
               </div>
             ) : (
               <DesktopBoard
@@ -1312,6 +1661,7 @@ export default function App() {
                 moved={change.moved}
                 rangeSummary={rangeSummary}
                 sleepersSummary={sleepersSummary}
+                discoverySummary={discoverySummary}
                 onOpenTab={setSection}
                 alertedAddress={alertedAddress}
               />
@@ -1331,6 +1681,8 @@ export default function App() {
               ranging={rangingTab}
               sleepersCount={sleepersCount}
               sleepers={sleepersTab}
+              discoveryCount={discoveryCount}
+              discovery={discoveryTab}
             />
           )
         ) : boardError ? (

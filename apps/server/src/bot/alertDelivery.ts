@@ -29,13 +29,18 @@ export function startAlertDelivery(db: Db, api: Api): () => void {
         if (!group || group.status !== 'active') return;
         // Thread the alert onto the original call message when there is one —
         // context travels with the alert. Deleted/migrated originals degrade to
-        // a plain send; watched-but-never-called tokens have no call row.
-        const call = (
-          await db
-            .select({ messageId: calls.messageId })
-            .from(calls)
-            .where(and(eq(calls.groupId, event.groupId), eq(calls.tokenId, event.tokenId)))
-        )[0];
+        // a plain send; watched-but-never-called tokens have no call row, and a
+        // discovery alert (rounds 18/20) has no token at all, so it is always a
+        // fresh message.
+        const call =
+          event.tokenId === null
+            ? undefined
+            : (
+                await db
+                  .select({ messageId: calls.messageId })
+                  .from(calls)
+                  .where(and(eq(calls.groupId, event.groupId), eq(calls.tokenId, event.tokenId)))
+              )[0];
         await api.sendMessage(group.chatId, event.message, {
           link_preview_options: { is_disabled: true },
           ...(call

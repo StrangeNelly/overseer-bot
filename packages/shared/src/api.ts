@@ -237,12 +237,23 @@ export interface DiscoveryEntry {
   dex: string;
   /** ISO instant of the on-chain event. */
   at: string;
-  /** Total pool reserve at the event, in USD and in ETH terms (WETH-priced). */
+  /**
+   * The QUOTE-SIDE deposit that opened the pool (the deployer's liquidity add,
+   * buys excluded), in USD and in ETH terms. `initialLiquidityEth` is the
+   * ETH-equivalent every threshold compares against; `quoteSymbol` names the
+   * asset actually deposited so the row prints "$12K USDG", never "3.1 ETH",
+   * for a USDG-quoted pool. Null when the deposit could not be measured.
+   */
   initialLiquidityUsd: number | null;
   initialLiquidityEth: number | null;
-  /** Latest enrichment (DexScreener), null until the first read. */
+  quoteSymbol: 'ETH' | 'USDG' | null;
+  /**
+   * Latest enrichment (DexScreener), null until the first read; `dataAsOf`
+   * is the instant of that read so a client can print how old the figures are.
+   */
   mcapUsd: number | null;
   liquidityUsd: number | null;
+  dataAsOf: string | null;
   /** Locked share of LP, 0–100, null when unknown. Uniswap LP is unlocked unless the team locks it. */
   lpLockedPct: number | null;
   twitterUrl: string | null;
@@ -263,17 +274,34 @@ export interface DiscoveryEntry {
 }
 
 /**
- * GET /api/g/:slug/discovery?kind=launch|graduation|all&hours=24&filtered=0|1
+ * The three serve-time filters, each its own query flag
+ * (`xweb=0|1`, `bundles=0|1`, `stocks=0|1`, all default on) so a chip in the
+ * UI always equals what the payload applied.
+ */
+export interface DiscoveryFilters {
+  /** Only entries with both an X account and a website. */
+  xWeb: boolean;
+  /** Hide entries whose launch-block share is at/above bundleMaxPct; unknown is never hidden. */
+  noBundles: boolean;
+  /** Hide tokenized stocks. */
+  noStocks: boolean;
+}
+
+/**
+ * GET /api/g/:slug/discovery?kind=launch|graduation|all&hours=24&xweb=1&bundles=1&stocks=1
  *
- * `enabled` is false when the on-chain client is not configured (no
- * ALCHEMY_API_KEY): the zones then say so instead of pretending to be empty.
- * `filtered=0` drops every default filter for the reader who wants the raw
- * stream; the flags echo what THIS payload applied.
+ * `enabled` is false when the on-chain listener is not configured OR not
+ * running in this process (WEB_ONLY dev box): the zones then say so instead of
+ * pretending the chain was quiet. `lastTickAt` is the listener's last
+ * successful block read (null before the first), so a client can print a
+ * stalled feed rather than an empty one.
  */
 export interface DiscoveryResponse {
   enabled: boolean;
+  lastTickAt: string | null;
   hours: number;
-  filtered: boolean;
+  /** The filters THIS payload applied. */
+  filters: DiscoveryFilters;
   /** The launch-block share at/above which an entry is hidden by the bundle filter, 0–100. */
   bundleMaxPct: number;
   launches: DiscoveryEntry[];

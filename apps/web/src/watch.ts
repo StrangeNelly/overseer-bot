@@ -14,7 +14,7 @@
  * request, and two toggles on different coins can never share a key.
  */
 
-import type { BoardCard, SleeperEntry, WatchlistEntry } from '@groupie/shared';
+import type { BoardCard, DiscoveryEntry, SleeperEntry, WatchlistEntry } from '@groupie/shared';
 import type { WatchControl } from './components/LinkPills';
 
 export interface WatchTarget {
@@ -63,6 +63,21 @@ export function targetFromWatchEntry(entry: WatchlistEntry): WatchTarget {
  * token exactly as `/overseer watch <ca>` does.
  */
 export function targetFromSleeper(entry: SleeperEntry): WatchTarget {
+  return {
+    address: entry.address,
+    tokenId: null,
+    symbol: entry.symbol,
+    watched: entry.watched,
+    watchedByMe: entry.watchedByMe,
+  };
+}
+
+/**
+ * A discovery lead — a Uniswap launch or a PONS graduation the chain surfaced on
+ * its own (docs/decisions.md rounds 18 and 20). Like a sleeper it has no call
+ * and therefore no tokenId, so it routes to the by-address endpoint.
+ */
+export function targetFromDiscovery(entry: DiscoveryEntry): WatchTarget {
   return {
     address: entry.address,
     tokenId: null,

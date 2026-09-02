@@ -133,8 +133,17 @@ export function createSseRoutes(db: Db): Hono<ApiEnv> {
           // Force a fresh lookup (and re-cache) for this group only: a positive
           // written here would mark the token relevant for every group with an
           // open stream.
-          if (changesRelevance(event)) relevance.delete(`${group.id}:${event.tokenId}`);
-          if (decision === 'ask' && !(await isGroupToken(db, group.id, event.tokenId))) return;
+          // A discovery alert names no token at all (rounds 18/20), so the id
+          // is nullable now. Such an event is group-scoped and already decided
+          // 'write' above; the guard is what proves that to the type system.
+          const tokenId = typeof event.tokenId === 'number' ? event.tokenId : null;
+          if (changesRelevance(event) && tokenId !== null) {
+            relevance.delete(`${group.id}:${tokenId}`);
+          }
+          if (decision === 'ask') {
+            if (tokenId === null) return;
+            if (!(await isGroupToken(db, group.id, tokenId))) return;
+          }
           await stream.writeSSE({ event: 'update', data: JSON.stringify(event) });
         });
       });

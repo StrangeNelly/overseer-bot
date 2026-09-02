@@ -8,6 +8,7 @@ import type { Db } from '@groupie/db';
 import type { Config } from '../config.js';
 import { createAuthRoutes, devAuthEnabled } from './auth.js';
 import { createBoardRoutes } from './board.js';
+import { createDiscoveryRoutes } from './discovery.js';
 import { createHandoffRoutes } from './handoff.js';
 import { requireMember, type ApiEnv } from './membership.js';
 import { createOauthRoutes } from './oauth.js';
@@ -56,7 +57,21 @@ function allowedOrigins(config: Config): ReadonlySet<string> {
   return origins;
 }
 
-export function createApi(db: Db, botApi: Api, config: Config): Hono<ApiEnv> {
+/**
+ * Whether the on-chain listener is LIVE IN THIS PROCESS. index.ts passes the
+ * handle startDiscovery returned; the default is the honest answer for anything
+ * that builds an API without one (tests, and any future embedding).
+ *
+ * Deliberately not `chainRpcUrl(config) !== null`: a WEB_ONLY box has the key
+ * and runs no listener, and telling its board the feed is on would make a
+ * stream nobody is reading look like a quiet chain.
+ */
+export function createApi(
+  db: Db,
+  botApi: Api,
+  config: Config,
+  discovery: { running: boolean } = { running: false },
+): Hono<ApiEnv> {
   const app = new Hono<ApiEnv>();
 
   app.get('/health', (c) => c.json({ ok: true }));
@@ -74,6 +89,9 @@ export function createApi(db: Db, botApi: Api, config: Config): Hono<ApiEnv> {
   app.route('/', createBoardRoutes(db));
   app.route('/', createRangeRoutes(db));
   app.route('/', createSleeperRoutes(db));
+  // The discovery zones answer `enabled:false` — not an empty stream — wherever
+  // no listener is running here (docs/decisions.md rounds 18 and 20).
+  app.route('/', createDiscoveryRoutes(db, discovery));
   app.route('/', createSseRoutes(db));
   // Mini App -> browser handoff. The mint sits under /api/g/:slug/* so it picks
   // up the csrf + requireMember middleware above; the redeem is a PUBLIC GET on

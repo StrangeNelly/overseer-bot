@@ -231,18 +231,35 @@ export const alerts = pgTable(
     groupId: integer('group_id')
       .notNull()
       .references(() => groups.id),
-    tokenId: integer('token_id')
-      .notNull()
-      .references(() => tokens.id),
-    type: text('type', { enum: ['nuke', 'buy_opp'] }).notNull(),
+    // NULLABLE since migration 0013: a discovery alert (docs/decisions.md
+    // rounds 18 and 20) is about a coin the group has never called, so there is
+    // no tokens row to point at. `details.address` carries the coin instead.
+    // Every watchlist alert still has one.
+    tokenId: integer('token_id').references(() => tokens.id),
+    // 'launch'/'graduation' joined the family in round 18/20. The column is
+    // plain text in Postgres (this enum is a TypeScript claim, not a CHECK), so
+    // widening it needs no migration — but the delivery path does branch on the
+    // null token id above, which does.
+    type: text('type', { enum: ['nuke', 'buy_opp', 'launch', 'graduation'] }).notNull(),
     firedAt: timestamp('fired_at', { withTimezone: true }).notNull().defaultNow(),
     /** Market cap at fire time; details carries the peak/drop that triggered it. */
     mcapUsd: doublePrecision('mcap_usd'),
     details: jsonb('details'),
   },
-  // Every fired row is also the cooldown record: the poller asks "did this
-  // (group, token, type) fire recently?" on every tick a condition holds.
-  (t) => [index('alerts_cooldown_idx').on(t.groupId, t.tokenId, t.type, t.firedAt)],
+  (t) => [
+    // Every fired row is also the cooldown record: the poller asks "did this
+    // (group, token, type) fire recently?" on every tick a condition holds.
+    index('alerts_cooldown_idx').on(t.groupId, t.tokenId, t.type, t.firedAt),
+    // A discovery alert has no token id, so the cooldown index cannot make it
+    // unique — the coin is named by `details.pool`. This partial unique index
+    // makes a double send impossible at the SCHEMA level: whatever two
+    // overlapping delivery passes decide, only one row per (group, kind, pool)
+    // can ever exist, and the insert's ON CONFLICT DO NOTHING turns the loser
+    // into "already delivered" rather than an error.
+    uniqueIndex('alerts_discovery_pool_uq')
+      .on(t.groupId, t.type, sql`(${t.details} ->> 'pool')`)
+      .where(sql`${t.type} in ('launch', 'graduation')`),
+  ],
 );
 
 /**
@@ -356,6 +373,190 @@ export const sleeperSeen = pgTable(
     lastListedAt: timestamp('last_listed_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('sleeper_seen_last_listed_idx').on(t.lastListedAt)],
+);
+
+/**
+ * Discovery: what the CHAIN surfaced on its own (docs/decisions.md rounds 18 and
+ * 20) — a direct Uniswap launch, or a PONS graduation.
+ *
+ * Group-agnostic like `sleeper_entries`: one chain listener serves every group,
+ * and everything group-specific (the watch pills, the chat threshold) happens at
+ * read time. Unlike Sleepers this IS a ledger rather than a snapshot — an event
+ * happened at an instant and that instant does not get replaced by the next
+ * scan — so rows accumulate and are pruned by age instead of swapped out.
+ *
+ * Nothing here is tracked or polled the way a call is: a discovery coin becomes
+ * a tracked token only when a member posts it in the chat, exactly like a
+ * sleeper. The one enrichment pass fills the market columns once, shortly after
+ * the event.
+ */
+export const discoveryEvents = pgTable(
+  'discovery_events',
+  {
+    id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
+    kind: text('kind', { enum: ['launch', 'graduation'] }).notNull(),
+    tokenAddress: text('token_address').notNull(), // stored lowercase
+    /**
+     * The pool the event created (launch) or migrated into (graduation). A
+     * Uniswap v2 pair address, or a v4 32-byte POOL ID — v4 pools are not
+     * contracts, and GeckoTerminal reports the id in its own `address` field,
+     * so the two surfaces agree on this string.
+     *
+     * UNIQUE, and that uniqueness is the dedupe: the listener replays block
+     * ranges after a restart and must never post the same launch twice.
+     */
+    poolAddress: text('pool_address').notNull().unique(),
+    /** GeckoTerminal/DexScreener dex id, e.g. 'uniswap-v4-robinhood'. */
+    dex: text('dex').notNull(),
+    /** The instant of the on-chain event, from the block timestamp. */
+    at: timestamp('at', { withTimezone: true }).notNull(),
+    blockNumber: bigint('block_number', { mode: 'number' }).notNull(),
+    txHash: text('tx_hash').notNull(),
+    /**
+     * Reserve at the event: the DEPOSIT that opened the pool — a v2 pair's own
+     * `Mint`, or a v4 creating transaction's quote Transfer minus the same-tx
+     * Swap (its `value` when the quote is native ETH). NULL is unknown, never
+     * zero: the read failed, or no deposit landed inside the launch window
+     * (see apps/server/src/chain/reserve.ts). Such a candidate is never stored
+     * as a launch, so a NULL here belongs to a graduation row; an unknown
+     * reserve can never clear a chat threshold.
+     */
+    initialLiquidityEth: doublePrecision('initial_liquidity_eth'),
+    initialLiquidityUsd: doublePrecision('initial_liquidity_usd'),
+    /**
+     * WHICH asset the deposit above was actually made in. An ETH-quoted pool's
+     * ETH figure is the measurement and its dollars are derived; a USDG pool is
+     * the other way round, and the row must say so or "3.1 ETH" would be
+     * printed about a pool nobody put ETH into. Null for a graduation (no
+     * deposit is measured) and for rows written before the column existed.
+     */
+    quoteSymbol: text('quote_symbol', { enum: ['ETH', 'USDG'] }),
+    symbol: text('symbol'),
+    name: text('name'),
+    imageUrl: text('image_url'),
+    twitterUrl: text('twitter_url'),
+    websiteUrl: text('website_url'),
+    /** Latest enrichment (DexScreener); null until the first read succeeds. */
+    mcapUsd: doublePrecision('mcap_usd'),
+    liquidityUsd: doublePrecision('liquidity_usd'),
+    /**
+     * GeckoTerminal's locked_liquidity_percentage, 0-100. Null when unknown —
+     * which is NOT the same as 0% locked, and the row must say so: Uniswap LP is
+     * unlocked unless the team locks it, so "unknown" and "0" would otherwise
+     * read alike and one of them is a claim we cannot make.
+     */
+    lpLockedPct: doublePrecision('lp_locked_pct'),
+    /**
+     * Bundle facts (docs/decisions.md round 20): the share of total supply
+     * bought in the launch block window, 0-100, and the distinct wallets that
+     * took it. Null when the logs or the supply could not be read.
+     */
+    launchBlockPct: doublePrecision('launch_block_pct'),
+    launchBlockWallets: integer('launch_block_wallets'),
+    /** isTokenizedStock, decided at enrichment when the name arrives. */
+    isStock: boolean('is_stock').notNull().default(false),
+    /**
+     * When the FIRST enrichment succeeded; null = never enriched. Stamped by
+     * the DexScreener read alone: folding the GeckoTerminal lock read into the
+     * same stamp meant one GT 429 could leave a fully enriched row looking
+     * unenriched forever.
+     */
+    enrichedAt: timestamp('enriched_at', { withTimezone: true }),
+    /**
+     * When the market figures above were last read — what the board prints as
+     * "read 3h ago". Moves on every re-enrichment; `enriched_at` never does.
+     */
+    dataAsOf: timestamp('data_as_of', { withTimezone: true }),
+    /**
+     * When the re-enrichment pass last TRIED this row, whether or not
+     * DexScreener had a pair for it. `data_as_of` only moves on a real read, so
+     * ordering the batch by it alone put the rows nobody can enrich at the front
+     * of every pass forever; this stamp is what rotates a no-pair row to the
+     * back and lets the rest of the window get read.
+     */
+    refreshAttemptedAt: timestamp('refresh_attempted_at', { withTimezone: true }),
+    /**
+     * Every LP-lock attempt, figure or not. Lock reads are ordered by it
+     * (falling back to enriched_at), which is what keeps a pool GeckoTerminal
+     * cannot answer from heading the queue on every pass until lockGiveUpHours.
+     */
+    lockAttemptedAt: timestamp('lock_attempted_at', { withTimezone: true }),
+    /**
+     * Stamped ONLY when GeckoTerminal returned a lock FIGURE. A pool it has not
+     * indexed, or one it knows without a figure, stays null so a later pass
+     * asks again (rotated by lock_attempted_at) until DISCOVERY.lockGiveUpHours.
+     */
+    lockCheckedAt: timestamp('lock_checked_at', { withTimezone: true }),
+    /**
+     * Set when a chat alert went out for this event ANYWHERE. Kept as an
+     * operator-facing record only — it is not served and never decides
+     * delivery, because "alerted" is a per-GROUP fact and lives in
+     * discovery_alert_decisions.
+     */
+    alertedAt: timestamp('alerted_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // The zones read "this kind, newest first, inside a window".
+    index('discovery_events_kind_at_idx').on(t.kind, t.at),
+    // The enrichment pass reads "not enriched yet, oldest first".
+    index('discovery_events_enriched_idx').on(t.enrichedAt, t.at),
+    // ...and the re-enrichment pass filters on how stale the FIGURES are
+    // (data_as_of) before ordering by when the row was last TRIED.
+    index('discovery_events_data_as_of_idx').on(t.dataAsOf),
+    // "Have we already seen this TOKEN?" — the second-pool / second-fee-tier
+    // test, asked once per candidate.
+    index('discovery_events_token_idx').on(t.tokenAddress),
+  ],
+);
+
+/**
+ * How far the chain listener has read. One row per chain (`id` = the network
+ * slug), so a restart resumes instead of replaying history — bounded by
+ * DISCOVERY.backfillMaxHours, which the reader applies rather than the writer:
+ * the stored number is always the honest "last block we processed".
+ */
+export const chainCursor = pgTable('chain_cursor', {
+  id: text('id').primaryKey(),
+  lastBlock: bigint('last_block', { mode: 'number' }).notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * What the delivery pass DECIDED about one (event, group) pair — including the
+ * times it decided not to send.
+ *
+ * Before this table the pass re-considered every enriched row on every tick and
+ * used a global `alerted_at` stamp to stop: an event that failed one group's
+ * filter was re-evaluated forever, and an event that passed for one group
+ * marked itself delivered for all of them. A decision row per group ends both.
+ * It is also the honest source for `DiscoveryEntry.alerted`, which is a
+ * per-group fact and was being served from a global column.
+ */
+export const discoveryAlertDecisions = pgTable(
+  'discovery_alert_decisions',
+  {
+    eventId: integer('event_id')
+      .notNull()
+      .references(() => discoveryEvents.id, { onDelete: 'cascade' }),
+    groupId: integer('group_id')
+      .notNull()
+      .references(() => groups.id),
+    /**
+     * 'sent' — a chat message went out. 'capped' — the group was over its
+     * hourly ceiling. 'filtered' — the group's own settings or the shared
+     * filters said no. 'stale' — the event aged past maxAlertAgeMinutes before
+     * anything could be decided about it.
+     */
+    outcome: text('outcome', { enum: ['sent', 'capped', 'filtered', 'stale'] }).notNull(),
+    decidedAt: timestamp('decided_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.eventId, t.groupId] }),
+    // "Which of these events has this group been told about?" — the route's
+    // per-group `alerted`, asked once per page.
+    index('discovery_decisions_group_idx').on(t.groupId, t.outcome),
+  ],
 );
 
 export const launchMonitors = pgTable(

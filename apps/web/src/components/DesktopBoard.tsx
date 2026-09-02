@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { BoardCard, BoardResponse } from '@groupie/shared';
 import { WATCH_CAP_PER_MEMBER, fmtDurationHours } from '@groupie/shared';
 import { deriveInPlay, mySlots } from '../derive';
-import { fmtHours, fmtUsd } from '../format';
+import { DISCOVERY_DORMANT_LINE, feedStatusText } from '../discovery';
+import type { DiscoverySummary } from '../discovery';
+import { fmtAge, fmtHours, fmtUsd } from '../format';
 import { canReorder, hasMotionRoom, prefersReducedMotion, requestMotion } from '../motion';
 import type { Ceremony } from '../motion';
 import type { WatchProps } from '../watch';
@@ -78,6 +80,7 @@ interface DesktopBoardProps {
   moved: ReadonlySet<number>;
   rangeSummary: RangeSummary | null;
   sleepersSummary: SleepersSummary | null;
+  discoverySummary: DiscoverySummary | null;
   onOpenTab: (section: SectionKey) => void;
   /** 3G: the address a watch-move announcement just named. */
   alertedAddress: string | null;
@@ -142,6 +145,7 @@ export function DesktopBoard({
   moved,
   rangeSummary,
   sleepersSummary,
+  discoverySummary,
   onOpenTab,
   alertedAddress,
 }: DesktopBoardProps) {
@@ -494,6 +498,62 @@ export function DesktopBoard({
             </>
           ) : (
             <p className="summary-line">open the view to scan the whole chain</p>
+          )}
+        </Zone>
+
+        {/*
+          Discovery sits under Sleepers for the same reason Sleepers has no
+          column: it is the chain's own feed, not the group's board — a door,
+          not a section (docs/decisions.md rounds 18 and 20).
+        */}
+        <Zone
+          tone="cyan"
+          headline="DISCOVERY"
+          count={
+            discoverySummary && discoverySummary.enabled
+              ? discoverySummary.launches + discoverySummary.graduations
+              : null
+          }
+          headExtra={
+            <button type="button" className="zone-open" onClick={() => onOpenTab('discovery')}>
+              open view ▸
+            </button>
+          }
+        >
+          {discoverySummary === null ? (
+            <p className="summary-line">open the view to see what the chain launched</p>
+          ) : !discoverySummary.enabled ? (
+            // The same honest line the view itself shows: a dormant feed never
+            // renders as a quiet chain.
+            <p className="summary-line">{DISCOVERY_DORMANT_LINE}</p>
+          ) : (
+            <>
+              <p className="summary-line">
+                <strong>
+                  {`${discoverySummary.launches} ${discoverySummary.launches === 1 ? 'launch' : 'launches'} · ${discoverySummary.graduations} graduated`}
+                </strong>
+                {` · ${discoverySummary.hours}h`}
+              </p>
+              {/* A stalled listener leads: the counts under it are whatever the
+                  last successful tick left behind, and the rail must say so
+                  before it names the newest thing the chain did. */}
+              <p className="zone-foot">
+                {[
+                  feedStatusText(
+                    discoverySummary.enabled,
+                    discoverySummary.lastTickAt,
+                    discoverySummary.fetchedAt,
+                    now,
+                    discoverySummary.serverAt,
+                  ),
+                  discoverySummary.newest
+                    ? `newest ${discoverySummary.newest.label} · ${fmtAge(discoverySummary.newest.at, now)} ago`
+                    : 'nothing from the chain in this window',
+                ]
+                  .filter((line): line is string => line !== null)
+                  .join(' · ')}
+              </p>
+            </>
           )}
         </Zone>
       </div>

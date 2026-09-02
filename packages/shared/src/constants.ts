@@ -205,6 +205,154 @@ export type AlertType = (typeof ALERT_TYPES)[number];
 
 export type AlertSettings = { -readonly [K in keyof typeof ALERT_DEFAULTS]: number };
 
+/**
+ * Discovery alerts (docs/decisions.md rounds 18 and 20) share the `alerts` table
+ * and the delivery path with the watchlist alerts above, but they are a
+ * different FAMILY: they are about a coin nobody in the group has called (there
+ * is no token row, no call, and therefore no message to reply to), and they are
+ * capped per hour across both kinds rather than cooled down per coin.
+ */
+export const DISCOVERY_ALERT_TYPES = ['launch', 'graduation'] as const;
+export type DiscoveryAlertType = (typeof DISCOVERY_ALERT_TYPES)[number];
+
+/** Every value `alerts.type` may hold. */
+export type AnyAlertType = AlertType | DiscoveryAlertType;
+
+/**
+ * Per-group discovery settings (`groups.settings.discovery`), merged over these
+ * (docs/decisions.md rounds 18 and 20). `bundleMaxPct` is deliberately NOT a
+ * group setting — it is a filter the board and the chat share, and the round-20
+ * note that thresholds are "tunable later via /overseer set" is exactly that:
+ * later. It lives here so the board can echo the number it filtered on.
+ */
+export const DISCOVERY_DEFAULTS = {
+  /**
+   * Minimum initial liquidity, in ETH, for a launch to earn a CHAT message.
+   * The owner's line was "even a 5 ETH paired launch is something to look at",
+   * so 5 is the floor rather than an aspiration. 0 mutes launch alerts.
+   */
+  launchMinEth: 5,
+  /** Whether filtered graduations are posted to the chat (round 20: wanted). */
+  gradsOn: true,
+  /** Chat messages per hour across BOTH kinds; the overflow stays board-only. */
+  alertsPerHour: 3,
+  /**
+   * The launch-block share (0-100) at or above which an entry is hidden by the
+   * bundle filter. Round 20 starts it at 25%. An UNKNOWN share is not hidden:
+   * unknown is not evidence, and the row says "unknown" instead.
+   */
+  bundleMaxPct: 25,
+} as const;
+
+/** Bounds for the two tunable discovery settings, enforced on write and on read. */
+export const DISCOVERY_LIMITS = {
+  /** 0 is legal and means muted, so the floor is a floor on a REAL threshold. */
+  launchMinEth: { min: 0.1, max: 1_000 },
+  alertsPerHour: { min: 0, max: 20 },
+} as const;
+
+/**
+ * The discovery engine's own constants — the shape of the stream, not a group's
+ * taste in it. Kept beside the defaults so the board, the scanner and the tests
+ * read one source.
+ */
+export const DISCOVERY = {
+  /**
+   * Everything at or above this initial reserve is KEPT ON THE BOARD, whatever
+   * the group's chat threshold is. Round 18's zone is "launches from the last
+   * 24h" — a research surface — and a 0.6 ETH launch is still a launch. The
+   * chat threshold sits on top of this, never under it.
+   */
+  boardMinEth: 0.5,
+  /** A pool older than this when we first see it is a backfill, not a launch. */
+  maxDetectionAgeMinutes: 10,
+  /** Default window of the discovery zones, in hours, and its ceiling. */
+  defaultHours: 24,
+  maxHours: 168,
+  /** Rows older than this are pruned; the zones never look back further. */
+  retentionDays: 7,
+  /** How often the chain listener asks for new logs. */
+  pollIntervalMs: 20_000,
+  /**
+   * The most chain a restart will ever replay. A process that has been down
+   * longer simply resumes at (head - this): the discovery zones show the last
+   * 24h and nothing is owed for an outage older than the poll cadence, while an
+   * unbounded backfill would spend a day of Alchemy budget catching up to a
+   * stream nobody can act on any more.
+   */
+  backfillMaxHours: 2,
+  /** ~100ms blocks. Only used to size the backfill bound in blocks. */
+  blocksPerSecond: 10,
+  /** One eth_getLogs never spans more than this many blocks (provider ceiling). */
+  maxBlocksPerRequest: 2_000,
+  /** ...and one tick never asks for more than this many of those ranges. */
+  maxRangesPerTick: 4,
+  /**
+   * The launch block plus this many after it: the window the bundle facts are
+   * read over (round 20: "the launch block and the first few blocks").
+   */
+  bundleBlockSpan: 2,
+  /**
+   * A candidate is enriched (DexScreener socials/mcap/liquidity, GeckoTerminal
+   * lock %) once it is this old — new enough to still be a launch, old enough
+   * that the indexers have seen the pool.
+   */
+  enrichAfterSeconds: 90,
+  /** ...and never more than this many rows per pass, so a backlog paces itself. */
+  enrichPerPass: 30,
+  /** An unenriched row this old is given up on; it keeps whatever it has. */
+  enrichGiveUpHours: 6,
+  /**
+   * The head is not read to its tip: a block that has not settled can be
+   * re-orged away, and a launch decoded out of an orphaned block would be a row
+   * pointing at a pool that never existed. Three blocks of a ~100ms chain is
+   * sub-second of latency for a stream measured in minutes.
+   */
+  headLagBlocks: 3,
+  /**
+   * How often the enrichment loop runs. Separate from `pollIntervalMs`: the
+   * chain tick must never wait behind a DexScreener batch or a GeckoTerminal
+   * back-off (that coupling was the review's finding), so the two loops have
+   * their own timers and their own `running` flags.
+   */
+  enrichIntervalMs: 30_000,
+  /**
+   * GeckoTerminal lock reads per enrichment pass. The lock percentage is the
+   * ONE field DexScreener has not got, and GT is the budget the whole app
+   * competes for (docs/decisions.md round 16b), so the pass takes a few and
+   * leaves the rest for the next one.
+   */
+  lockReadsPerPass: 3,
+  /**
+   * ...and stops asking after this long. A null `lock_checked_at` is what makes
+   * the next pass retry, so without a give-up bound a permanently unlockable
+   * pool would be asked about forever.
+   */
+  lockGiveUpHours: 6,
+  /**
+   * Rows younger than a day are re-read on this cadence, so a launch that
+   * added its socials (or lost its liquidity) an hour after the pool opened is
+   * not frozen at its first reading. `data_as_of` on the row is what the board
+   * prints so the age of the numbers is never implied.
+   */
+  reenrichMinutes: 10,
+  /** ...and only rows this young are re-read at all. */
+  reenrichWithinHours: 24,
+  /**
+   * An event older than this never earns a CHAT message. The board keeps the
+   * whole window; the chat only ever hears about something that just happened,
+   * which is also what stops a backfill after a restart from replaying an hour
+   * of launches into the group.
+   */
+  maxAlertAgeMinutes: 15,
+  /**
+   * How far back the graduation bundle read hunts for a coin's `TokenLaunched`
+   * when the provider refuses an unbounded range. A PONS coin that took longer
+   * than this to graduate simply reports its launch block as unknown.
+   */
+  gradLaunchLookbackDays: 35,
+} as const;
+
 /** No mention for this long demotes a living token to the idle tier. */
 export const IDLE_AFTER_HOURS = 7 * 24;
 

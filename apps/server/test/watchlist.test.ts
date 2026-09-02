@@ -1097,7 +1097,7 @@ describe('/overseer set buyopp — the round-19 shape', () => {
 
   const set = async (db: Db, args: string[]) => {
     replies.length = 0;
-    await handleSet(db, ctx, GROUP, args);
+    await handleSet(db, ctx, GROUP, args, true);
     return replies;
   };
 
