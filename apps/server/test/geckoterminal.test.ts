@@ -161,6 +161,37 @@ function state(over: Partial<BudgetState> = {}): BudgetState {
   };
 }
 
+/* -------------------------------------------- reserve readings (round 22) */
+
+/**
+ * GeckoTerminal reports a NEGATIVE `reserve_in_usd` for some Uniswap v4 pools on
+ * this chain (nine in the 2026-09-02 14:15Z sleeper scan). It is the singleton
+ * PoolManager's delta accounting reaching the field, not a pool balance.
+ */
+describe('reserve_in_usd', () => {
+  const withReserve = (reserve: unknown): JsonApiResource => ({
+    id: 'robinhood_0xabc',
+    type: 'pool',
+    attributes: { address: '0xabc', reserve_in_usd: reserve },
+  });
+
+  it('is UNKNOWN when negative — a reading like that measures nothing', () => {
+    expect(parsePoolResource(withReserve('-545308.12'), '0xabc').reserveUsd).toBeNull();
+    expect(parsePoolResource(withReserve(-1), '0xabc').reserveUsd).toBeNull();
+    expect(gtSnapshot(parsePoolResource(withReserve('-620576'), '0xabc')).liquidityUsd).toBeNull();
+  });
+
+  it('stands as a reading at ZERO on the pool resource: a drained pool is real', () => {
+    // The liquidity_floor death rule is entitled to this one (death.ts); only
+    // the sleeper listing treats 0 as unknown, where nothing is lost by it.
+    expect(parsePoolResource(withReserve('0'), '0xabc').reserveUsd).toBe(0);
+    expect(parsePoolResource(withReserve('30000'), '0xabc').reserveUsd).toBe(30_000);
+    // Absent stays absent — this rule invents nothing.
+    expect(parsePoolResource(withReserve(null), '0xabc').reserveUsd).toBeNull();
+    expect(parsePoolResource(withReserve('not a number'), '0xabc').reserveUsd).toBeNull();
+  });
+});
+
 describe('budgetDecision', () => {
   it('grants when nothing is in the way', () => {
     expect(budgetDecision(state(), 'poll', NOW)).toEqual({ grant: true });
@@ -333,6 +364,39 @@ describe('getTopPools', () => {
       // No h1 block at all is UNKNOWN, not zero trades.
       [15, null],
     ]);
+  });
+
+  it('reads a non-positive reserve as unknown liquidity (round 22)', async () => {
+    // On this listing a zero or negative reserve is a figure the scan does not
+    // have: it must reach the floors as null so DexScreener can answer instead.
+    const row = (address: string, reserve: unknown) => ({
+      id: `robinhood_${address}`,
+      attributes: {
+        address,
+        name: 'AAA / WETH 1%',
+        fdv_usd: '80000',
+        reserve_in_usd: reserve,
+        volume_usd: { h24: '200000' },
+        transactions: { h24: { buys: 300, sells: 100 } },
+      },
+      relationships: { base_token: { data: { id: `robinhood_${address}token` } } },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        status: 200,
+        ok: true,
+        json: async () => ({
+          data: [
+            row('0xnegative', '-55040.5'),
+            row('0xzero', '0'),
+            row('0xreal', '25000'),
+            row('0xmissing', null),
+          ],
+        }),
+      })),
+    );
+    expect((await getTopPools(1)).map((r) => r.liquidityUsd)).toEqual([null, null, 25_000, null]);
   });
 });
 

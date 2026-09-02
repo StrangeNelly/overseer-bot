@@ -8,7 +8,8 @@ import { SLEEPER_BANDS, SLEEPERS, isTokenizedStock, requiredVolumeUsd } from '@g
  * (apps/server/test/sleeperLogic.test.ts).
  *
  * The pipeline, in order:
- *   dedupe to one pool per TOKEN -> floors -> band bucket -> turnover rank
+ *   dedupe to one pool per TOKEN -> (round 17/22, in sleeperScan) DexScreener
+ *   names and fallback liquidity -> floors -> band bucket -> turnover rank
  *   -> (round 14, in sleeperScan) time-in-band per kept entry.
  */
 
@@ -26,7 +27,18 @@ export interface PoolCandidate {
   mcapUsd: number | null;
   /** Base token price in USD; only the supply inference reads it. */
   priceUsd: number | null;
+  /**
+   * GeckoTerminal's reserve for this pool, already reduced to a reading or null
+   * by listingReserveUsd — a zero or negative reserve arrives here as null.
+   */
   liquidityUsd: number | null;
+  /**
+   * DexScreener's liquidity for this token's best pair, attached by the scan's
+   * enrichment (docs/decisions.md round 22). The FALLBACK reading, consulted
+   * only when GeckoTerminal's reserve is unknown; undefined and null both mean
+   * "no fallback either", which is `lp_unknown` and never `lp_floor`.
+   */
+  dsLiquidityUsd?: number | null;
   vol24Usd: number | null;
   txns24: number | null;
   /** Trades in the last hour; null when the listing carried no h1 block. */
@@ -46,6 +58,33 @@ export interface PoolCandidate {
 export interface Band {
   loUsd: number;
   hiUsd: number;
+}
+
+/**
+ * A liquidity figure the floors may be applied to, or null when there is none.
+ *
+ * Round 22: a reserve that is not finite, is zero, or is NEGATIVE (GeckoTerminal
+ * reports those for some Uniswap v4 pools on this chain) is not a measurement of
+ * depth. Unknown is never a verdict here — such a reading can neither clear a
+ * floor nor fail one.
+ */
+export function usableLiquidityUsd(value: number | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
+ * The liquidity the floors actually run on: GeckoTerminal's reserve when it is a
+ * reading at all, otherwise the DexScreener figure the scan attached for this
+ * token, otherwise null.
+ *
+ * GeckoTerminal wins whenever it has an answer — it is the pool the listing is
+ * about, while DexScreener reports its own best pair — so the fallback only ever
+ * fills a hole. This is also the figure the scan persists and prints, so the row
+ * and the verdict can never describe two different numbers.
+ */
+export function effectiveLiquidityUsd(candidate: PoolCandidate): number | null {
+  return usableLiquidityUsd(candidate.liquidityUsd) ?? usableLiquidityUsd(candidate.dsLiquidityUsd);
 }
 
 /** A candidate that cleared every floor, with the derived figures attached. */
@@ -121,11 +160,15 @@ export function dedupeByToken(candidates: readonly PoolCandidate[]): PoolCandida
  * telemetry). `qualify` and `dropReason` both walk this ladder, so the reason
  * the log prints is by construction the reason the scan acted on.
  *
- * The `*_unknown` four are readings the listing did not carry. They reject the
+ * The `*_unknown` four are readings the scan does not have. They reject the
  * candidate exactly as the matching floor would — an unreadable reserve is not
  * proof of a deep pool — but they are named apart from it so the breakdown can
  * separate missing data from a measured shortfall: fifty `lp_unknown` is an
  * upstream problem, fifty `lp_floor` is the chain.
+ *
+ * `lp_unknown` in particular is the answer only once BOTH sources have missed
+ * (round 22): GeckoTerminal's reserve was unreadable and DexScreener carried no
+ * usable liquidity for the token either.
  *
  * The three that are not floors:
  *   - `band_slots` — qualified, but the band's per-kind keep cut was full;
@@ -162,18 +205,27 @@ export type SleeperDropReason = (typeof DROP_REASONS)[number];
  * `*_unknown` reason so a missing reading is never counted as a measured
  * shortfall. Kept in ONE place because `qualify` reads it — the telemetry
  * cannot drift from the rule it is reporting on.
+ *
+ * Exported since round 22 so the scan can tell the two liquidity answers apart
+ * BEFORE it enriches: a candidate sitting at `lp_unknown` is one whose verdict
+ * the DexScreener lookup may still change, and it must be looked up rather than
+ * dropped.
  */
-function floorFailure(candidate: PoolCandidate, nowMs: number): SleeperDropReason | null {
-  const { mcapUsd, liquidityUsd, vol24Usd, txns24, poolCreatedAt } = candidate;
+export function floorFailure(candidate: PoolCandidate, nowMs: number): SleeperDropReason | null {
+  const { mcapUsd, vol24Usd, txns24, poolCreatedAt } = candidate;
+  // Round 22: the reserve GeckoTerminal reported, or DexScreener's figure when
+  // that was not a reading at all. Never a negative, never a zero.
+  const liquidityUsd = effectiveLiquidityUsd(candidate);
   if (mcapUsd === null || !Number.isFinite(mcapUsd) || mcapUsd <= 0) return 'mcap_unknown';
-  if (liquidityUsd === null || !Number.isFinite(liquidityUsd)) return 'lp_unknown';
+  if (liquidityUsd === null) return 'lp_unknown';
   if (vol24Usd === null || !Number.isFinite(vol24Usd)) return 'volume_unknown';
   if (txns24 === null || !Number.isFinite(txns24)) return 'txns24_unknown';
   if (poolCreatedAt === null) return 'age_floor';
 
-  // GeckoTerminal reports a NEGATIVE reserve_in_usd for some pools (seen live
-  // 2026-09-02 on a launchpad pool); the floor comparison rejects those too,
-  // which is the right answer — a reserve we cannot read is not $10K of depth.
+  // A MEASURED shortfall: this is a pool whose depth we read, and it is not a
+  // market anyone can trade out of. The GeckoTerminal v4 negatives that used to
+  // land here (eight of the 24 in-band drops on 2026-09-02) never reach it now —
+  // they are `lp_unknown` above unless DexScreener supplied a real figure.
   if (liquidityUsd < SLEEPERS.minLiquidityUsd) return 'lp_floor';
 
   // ...and the same floor relative to size (round 14, the FORESKIN case): an
@@ -250,7 +302,9 @@ export function dropReason(
 export function qualify(candidate: PoolCandidate, nowMs: number): QualifiedSleeper | null {
   if (floorFailure(candidate, nowMs) !== null) return null;
 
-  const { mcapUsd, liquidityUsd, vol24Usd, txns24, poolCreatedAt } = candidate;
+  const { mcapUsd, vol24Usd, txns24, poolCreatedAt } = candidate;
+  // The figure the floors were applied to is the figure that gets stored.
+  const liquidityUsd = effectiveLiquidityUsd(candidate);
   // floorFailure has already rejected every one of these; the re-check is what
   // TypeScript cannot carry across the call, not a second rule.
   if (

@@ -272,6 +272,7 @@ export interface GtPoolInfo {
   poolAddress: string;
   priceUsd: number | null;
   fdvUsd: number | null;
+  /** `reserve_in_usd`; null when unknown — see parseReserveUsd for what that is. */
   reserveUsd: number | null;
   vol24Usd: number | null;
   /** buys + sells over 24h; null when the block is missing entirely. */
@@ -289,6 +290,40 @@ export interface GtPoolInfo {
    * conflating it with "we don't know" would turn a missing field into a claim.
    */
   lockedLiquidityPct: number | null;
+}
+
+/**
+ * `reserve_in_usd`, as a reading a caller may act on (docs/decisions.md round
+ * 22).
+ *
+ * GeckoTerminal reports a NEGATIVE reserve for some Uniswap v4 pools on this
+ * chain — nine of them in the 2026-09-02 14:15Z sleeper scan alone ($JOHNDOG at
+ * -68.8% of a $902K cap on $5.5M of daily volume, plus $DEBTCOIN, $CACHE, $AU
+ * and five more). That is the singleton PoolManager's delta accounting reaching
+ * the field, not a pool balance: a negative reserve is not a measurement of
+ * anything, so it reads as UNKNOWN rather than as a pool below every floor.
+ *
+ * ZERO is left standing on THIS path. A graduated pool really can be drained to
+ * nothing, and that reading is the liquidity_floor rule's own evidence
+ * (death.ts) — turning it into "unknown" would delete a real death. The sleeper
+ * listing is the one place that treats 0 as unknown too (listingReserveUsd),
+ * where nothing is lost: a zero reserve could never clear the $10K floor, so
+ * asking the other source costs a drop that was going to happen anyway.
+ */
+export function parseReserveUsd(raw: unknown): number | null {
+  const value = num(raw);
+  return value !== null && value < 0 ? null : value;
+}
+
+/**
+ * The same field for the SLEEPERS LISTING, where any non-positive reserve is
+ * unknown (docs/decisions.md round 22). The scan's answer to an unknown
+ * liquidity is to ask DexScreener for one, never to drop the coin at a floor it
+ * was never measured against.
+ */
+export function listingReserveUsd(raw: unknown): number | null {
+  const value = parseReserveUsd(raw);
+  return value !== null && value > 0 ? value : null;
 }
 
 /**
@@ -311,7 +346,7 @@ export function parsePoolResource(resource: JsonApiResource, poolAddress: string
     poolAddress: poolAddress.toLowerCase(),
     priceUsd: num(a.base_token_price_usd),
     fdvUsd: num(a.fdv_usd) ?? num(a.market_cap_usd),
-    reserveUsd: num(a.reserve_in_usd),
+    reserveUsd: parseReserveUsd(a.reserve_in_usd),
     vol24Usd: num((a.volume_usd as Record<string, unknown> | undefined)?.h24),
     txns24: sumTxns(a, 'h24'),
     poolCreatedAt: created && !Number.isNaN(created.getTime()) ? created : null,
@@ -516,6 +551,11 @@ export interface GtPoolListing {
    * which is what turns this pool's candle closes into market caps.
    */
   priceUsd: number | null;
+  /**
+   * `reserve_in_usd`, null unless it is a positive number (listingReserveUsd):
+   * on this listing a zero or negative reserve is a reading the scan does not
+   * have, never a shallow pool.
+   */
   liquidityUsd: number | null;
   vol24Usd: number | null;
   /** buys + sells over 24h; null when the block is missing entirely. */
@@ -571,7 +611,9 @@ export async function getTopPools(
       // market_cap_usd is null for most of the chain.
       mcapUsd: num(a.fdv_usd) ?? num(a.market_cap_usd),
       priceUsd: num(a.base_token_price_usd),
-      liquidityUsd: num(a.reserve_in_usd),
+      // Round 22: a non-positive reserve here is UNKNOWN, not a thin pool — the
+      // scan resolves it against DexScreener instead of failing it at the floor.
+      liquidityUsd: listingReserveUsd(a.reserve_in_usd),
       vol24Usd: num((a.volume_usd as Record<string, unknown> | undefined)?.h24),
       txns24: sumTxns(a, 'h24'),
       txns1h: sumTxns(a, 'h1'),

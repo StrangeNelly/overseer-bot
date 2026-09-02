@@ -382,7 +382,12 @@ describe('the 15-minute read', () => {
 
 /* ------------------------------------------- tokenized stocks (round 17) */
 
-function dsPair(tokenAddress: string, name: string, symbol: string): DsPair {
+function dsPair(
+  tokenAddress: string,
+  name: string,
+  symbol: string,
+  liquidityUsd: number | null = null,
+): DsPair {
   return {
     tokenAddress,
     pairAddress: null,
@@ -393,7 +398,7 @@ function dsPair(tokenAddress: string, name: string, symbol: string): DsPair {
     socials: null,
     priceUsd: null,
     mcapUsd: null,
-    liquidityUsd: null,
+    liquidityUsd,
     vol24Usd: null,
     txns24: null,
     pairCreatedAt: null,
@@ -482,6 +487,90 @@ describe('the DexScreener name behind is_stock', () => {
     );
     expect(rowFor(calls, '0xqqq')).toMatchObject({ isStock: false, name: null });
     warn.mockRestore();
+  });
+});
+
+/* --------------------------------------- unreadable reserves (round 22) */
+
+/**
+ * The 14:15Z scan on 2026-09-02 dropped eight coins worth $450K–$4.6M at the
+ * liquidity floor on a reading that was never a measurement: GeckoTerminal
+ * reports a NEGATIVE reserve_in_usd for some Uniswap v4 pools here ($JOHNDOG at
+ * -68.8% of its market cap, on $5.5M of 24h volume). The scan now asks
+ * DexScreener for the figure instead of failing the coin against a floor it was
+ * never measured against.
+ */
+describe('a negative GeckoTerminal reserve', () => {
+  /** $JOHNDOG's shape at this scan's band: a reserve of -68.8% of the cap. */
+  const johndog = (over: Partial<GtPoolListing> = {}) =>
+    listing({
+      poolAddress: '0xpooldog',
+      baseTokenAddress: '0xjohndog',
+      poolName: 'JOHNDOG / WETH 1%',
+      liquidityUsd: -55_040,
+      ...over,
+    });
+
+  it('is looked up and kept on the DexScreener figure, which is what gets stored', async () => {
+    vi.mocked(gt.getTopPools).mockImplementation(async (page: number) =>
+      page === 1 ? [johndog()] : [],
+    );
+    vi.mocked(gt.getOhlcv).mockResolvedValue(candles(4));
+    vi.mocked(ds.getBestPairs).mockResolvedValue(
+      new Map([['0xjohndog', dsPair('0xjohndog', 'John Dog', 'JOHNDOG', 25_000)]]),
+    );
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    const { db, calls } = makeDb();
+    await scan(db);
+
+    // Dropping it before the lookup is the defect: the lookup is the only thing
+    // that can decide its liquidity floors.
+    expect(vi.mocked(ds.getBestPairs).mock.calls).toEqual([[['0xjohndog']]]);
+    expect(rowFor(calls, '0xjohndog')).toMatchObject({ liquidityUsd: 25_000, symbol: 'JOHNDOG' });
+    expect(log.mock.calls.map((c) => String(c[0])).some((l) => l.startsWith('sleeper drop:'))).toBe(
+      false,
+    );
+    log.mockRestore();
+  });
+
+  it('drops as lp_unknown with no fallback, counted apart from a measured lp_floor', async () => {
+    vi.mocked(gt.getTopPools).mockImplementation(async (page: number) =>
+      page === 1
+        ? [
+            johndog(),
+            // A pool the scan really did measure, and really is too thin.
+            listing({
+              poolAddress: '0xpoolthin',
+              baseTokenAddress: '0xthin',
+              poolName: 'THIN / WETH 1%',
+              liquidityUsd: 500,
+            }),
+          ]
+        : [],
+    );
+    // DexScreener knows the token but carries no liquidity for it either.
+    vi.mocked(ds.getBestPairs).mockResolvedValue(
+      new Map([['0xjohndog', dsPair('0xjohndog', 'John Dog', 'JOHNDOG')]]),
+    );
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    const { db, calls } = makeDb();
+    await scan(db);
+
+    expect(vi.mocked(ds.getBestPairs).mock.calls).toEqual([[['0xjohndog']]]);
+    expect(rowFor(calls, '0xjohndog')).toBeUndefined();
+
+    const lines = log.mock.calls.map((c) => String(c[0]));
+    // Two drops, two different problems: one upstream gap, one thin pool.
+    expect(lines).toContain('sleeper scan: in-band dropped 2 — lp_unknown 1 · lp_floor 1');
+    expect(lines.filter((l) => l.startsWith('sleeper drop: $JOHNDOG'))).toEqual([
+      'sleeper drop: $JOHNDOG band $50K–$100K mcap $80K vol24 $200K lp unknown txns1h 5 ' +
+        'residency unknown — lp_unknown',
+    ]);
+    // The line the old scan printed said lp -68.8%, as though it had measured it.
+    expect(lines.some((l) => /\blp -/.test(l))).toBe(false);
+    log.mockRestore();
   });
 });
 

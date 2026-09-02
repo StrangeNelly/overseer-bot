@@ -11,8 +11,9 @@ import {
   computeShortResidency,
   dedupeByToken,
   dropReason,
+  effectiveLiquidityUsd,
+  floorFailure,
   needsFullMeasurement,
-  qualify,
   selectSleepers,
   type Band,
   type PoolCandidate,
@@ -150,6 +151,10 @@ interface EnrichedPick extends SleeperPick {
  * whether an entry is a tokenized stock and the stock/coin split has to happen
  * inside the keep cut. GeckoTerminal's pool listing carries only the pool's own
  * name ("QQQ / WETH 1%"), built from symbols, so it cannot answer that.
+ *
+ * Round 22 gives the same call a second job: `liquidity.usd` here is the
+ * FALLBACK liquidity for a candidate whose GeckoTerminal reserve was unreadable,
+ * so the two liquidity floors are decided on a real figure or not at all.
  */
 async function fetchPairs(addresses: readonly string[]): Promise<Map<string, ds.DsPair>> {
   const pairs = new Map<string, ds.DsPair>();
@@ -169,7 +174,8 @@ async function fetchPairs(addresses: readonly string[]): Promise<Map<string, ds.
   if (unnamed > 0) {
     console.warn(
       `sleeper scan: ${unnamed}/${addresses.length} qualified addresses left unnamed — ` +
-        'any tokenized stocks among them are kept and served as coins this scan',
+        'any tokenized stocks among them are kept and served as coins this scan, ' +
+        'and any with an unreadable reserve are dropped as lp_unknown',
     );
   }
   return pairs;
@@ -187,6 +193,30 @@ async function fetchPairsBatch(batch: string[]): Promise<Map<string, ds.DsPair>>
     console.warn('sleeper scan: dexscreener batch failed, retrying once:', err);
     return ds.getBestPairs(batch);
   }
+}
+
+/**
+ * Is this candidate worth a DexScreener lookup?
+ *
+ * Two populations, and only two:
+ *
+ *   - it already clears every floor, so it can be KEPT and the keep cut needs
+ *     its name before it picks (round 17);
+ *   - it is stuck at `lp_unknown` and sits inside a band, so the lookup's
+ *     `liquidity.usd` is the only thing that can decide its liquidity floors
+ *     (round 22). Dropping it here would be the defect this rule exists to fix:
+ *     GeckoTerminal's negative v4 reserves are not shallow pools.
+ *
+ * The band check keeps the second population honest. `lp_unknown` is read before
+ * `out_of_band` on the ladder, so without it every unreadable-reserve pool on
+ * the chain — including the ones whose market cap was never in range — would buy
+ * itself a lookup it can gain nothing from.
+ */
+function needsPairLookup(candidate: PoolCandidate, nowMs: number): boolean {
+  const failure = floorFailure(candidate, nowMs);
+  if (failure === null) return true;
+  if (failure !== 'lp_unknown') return false;
+  return candidate.mcapUsd !== null && bandFor(candidate.mcapUsd) !== null;
 }
 
 /** The kept picks, with the metadata already fetched attached. */
@@ -518,8 +548,17 @@ function usd(value: number | null | undefined): string {
   return `${sign}$${Math.round(abs)}`;
 }
 
+/**
+ * A share of the market cap, for the `lp` field of a drop line. Only ever a
+ * measurement: a numerator that is not a positive, finite figure prints
+ * `unknown`, so the negative GeckoTerminal reserves that motivated round 22 can
+ * never be reported as though the scan had measured -68.8% of a market cap.
+ * Belt and braces — the caller already passes the effective liquidity, which is
+ * null in exactly those cases.
+ */
 function pct(numerator: number | null | undefined, denominator: number | null | undefined): string {
   if (numerator === null || numerator === undefined || !Number.isFinite(numerator)) return 'unknown';
+  if (numerator <= 0) return 'unknown';
   if (denominator === null || denominator === undefined || !Number.isFinite(denominator)) {
     return 'unknown';
   }
@@ -618,7 +657,10 @@ function logDrops(
         `sleeper ${isHidden ? 'hidden' : 'drop'}: ${dropSymbol(candidate, pairs.get(candidate.address))} ` +
           `band ${band === null ? 'unknown' : bandLabel(band)} mcap ${usd(candidate.mcapUsd)} ` +
           `vol24 ${usd(candidate.vol24Usd)} ` +
-          `lp ${pct(candidate.liquidityUsd, candidate.mcapUsd)} ` +
+          // The figure the gates were applied to, which is DexScreener's when
+          // GeckoTerminal's reserve was unreadable — and `unknown` when neither
+          // source had one, never a negative share of the cap (round 22).
+          `lp ${pct(effectiveLiquidityUsd(candidate), candidate.mcapUsd)} ` +
           `txns1h ${candidate.txns1h ?? 'unknown'} ` +
           `residency ${hours(kept?.inBandHours)} — ${reason}`,
       );
@@ -651,15 +693,22 @@ export async function runSleeperScan(db: Db): Promise<SleeperScanResult> {
   const { candidates, pages } = await collect();
   // Names first (round 17): the tokenized-stock rule reads the base token's
   // name, and the keep cut needs the answer before it picks its twelve. Only
-  // candidates that already clear every floor are looked up — the ones that
-  // fail cannot be kept whatever they are called. qualify() is pure and cheap,
-  // so running it here and again inside selectSleepers costs nothing.
+  // candidates the lookup can still change are asked about — see
+  // needsPairLookup. floorFailure() is pure and cheap, so running it here and
+  // again inside selectSleepers costs nothing.
   const deduped = dedupeByToken(candidates);
   const nowMs = scanAt.getTime();
   const pairs = await fetchPairs(
-    deduped.filter((c) => qualify(c, nowMs) !== null).map((c) => c.address),
+    deduped.filter((c) => needsPairLookup(c, nowMs)).map((c) => c.address),
   );
-  const named = deduped.map((c) => ({ ...c, tokenName: pairs.get(c.address)?.name ?? null }));
+  // Both halves of what the lookup bought: the name that decides the keep cut
+  // (round 17), and the liquidity the floors read when GeckoTerminal's reserve
+  // was not a reading at all (round 22).
+  const named = deduped.map((c) => ({
+    ...c,
+    tokenName: pairs.get(c.address)?.name ?? null,
+    dsLiquidityUsd: pairs.get(c.address)?.liquidityUsd ?? null,
+  }));
   const picks = selectSleepers(named, nowMs);
   const enriched = enrich(picks, pairs);
   // Measured against the scan's own clock, so every entry in a scan answers the

@@ -8,7 +8,10 @@ import {
   computeShortResidency,
   dedupeByToken,
   dropReason,
+  effectiveLiquidityUsd,
+  floorFailure,
   inferSupply,
+  usableLiquidityUsd,
   needsFullMeasurement,
   qualify,
   selectSleepers,
@@ -150,6 +153,9 @@ describe('qualify — floors', () => {
 
   it('rejects a negative reserve (GeckoTerminal really does report these)', () => {
     expect(qualify(candidate({ liquidityUsd: -545_308 }), NOW)).toBeNull();
+    // Round 22: refused as a reading the scan does not have, not as a pool it
+    // measured under the floor — the drop line and the count say so.
+    expect(floorFailure(candidate({ liquidityUsd: -545_308 }), NOW)).toBe('lp_unknown');
   });
 
   it('rejects the FORESKIN shape: $10K+ of crumbs against a $1.85M mcap', () => {
@@ -264,6 +270,77 @@ describe('qualify — floors', () => {
     ] as Partial<PoolCandidate>[]) {
       expect(qualify(candidate(missing), NOW)).toBeNull();
     }
+  });
+});
+
+/* ------------------------------------------ the liquidity reading (round 22) */
+
+/**
+ * $JOHNDOG, from the 14:15Z scan on 2026-09-02: GeckoTerminal reported a reserve
+ * of -68.8% of a $902K market cap on $5.5M of 24h volume, and the scan read that
+ * as "below the $10K floor" and dropped it. Eight coins went that way in one
+ * scan ($DEBTCOIN at -116%, $CACHE, $AU, and five more). A negative reserve is
+ * not a measurement, so it is now unknown — and an unknown liquidity is decided
+ * on DexScreener's figure or on nothing at all.
+ */
+describe('unreadable liquidity', () => {
+  const johndog = (over: Partial<PoolCandidate> = {}) =>
+    candidate({
+      address: '0xjohndog',
+      poolName: 'JOHNDOG / WETH 1%',
+      mcapUsd: 902_000,
+      priceUsd: 0.000902,
+      liquidityUsd: -620_576,
+      vol24Usd: 5_500_000,
+      txns24: 12_000,
+      ...over,
+    });
+  const notKept = { kept: false };
+
+  it('reads only a positive, finite figure as liquidity', () => {
+    expect(usableLiquidityUsd(90_000)).toBe(90_000);
+    for (const reading of [null, undefined, 0, -1, -620_576, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(usableLiquidityUsd(reading), String(reading)).toBeNull();
+    }
+  });
+
+  it('falls back to DexScreener only when GeckoTerminal has no reading', () => {
+    // A real reserve is the pool the listing is about; the fallback fills holes.
+    expect(effectiveLiquidityUsd(johndog({ liquidityUsd: 30_000, dsLiquidityUsd: 90_000 }))).toBe(
+      30_000,
+    );
+    expect(effectiveLiquidityUsd(johndog({ dsLiquidityUsd: 90_000 }))).toBe(90_000);
+    expect(effectiveLiquidityUsd(johndog())).toBeNull();
+    // ...and a DexScreener figure that is not a measurement either changes nothing.
+    expect(effectiveLiquidityUsd(johndog({ dsLiquidityUsd: 0 }))).toBeNull();
+    expect(effectiveLiquidityUsd(johndog({ dsLiquidityUsd: -12 }))).toBeNull();
+  });
+
+  it('keeps the coin when DexScreener reports a real pool, and stores THAT figure', () => {
+    const result = qualify(johndog({ dsLiquidityUsd: 90_000 }), NOW);
+    expect(result).not.toBeNull();
+    expect(result?.liquidityUsd).toBe(90_000);
+    expect(result?.band).toEqual({ loUsd: 500_000, hiUsd: 1_000_000 });
+    expect(dropReason(johndog({ dsLiquidityUsd: 90_000 }), NOW, { kept: true, inBandHours: 5 })).toBeNull();
+  });
+
+  it('drops it as lp_unknown — never lp_floor — when no source has a figure', () => {
+    for (const fallback of [undefined, null, 0, -12, Number.NaN]) {
+      const pool = johndog(fallback === undefined ? {} : { dsLiquidityUsd: fallback });
+      expect(floorFailure(pool, NOW), String(fallback)).toBe('lp_unknown');
+      expect(dropReason(pool, NOW, notKept), String(fallback)).toBe('lp_unknown');
+      expect(qualify(pool, NOW)).toBeNull();
+    }
+  });
+
+  it('still calls a MEASURED shortfall lp_floor, fallback or no fallback', () => {
+    // $500 of real depth is the chain answering, not the indexer failing.
+    expect(dropReason(johndog({ liquidityUsd: 500 }), NOW, notKept)).toBe('lp_floor');
+    expect(dropReason(johndog({ liquidityUsd: 500, dsLiquidityUsd: 90_000 }), NOW, notKept)).toBe(
+      'lp_floor',
+    );
+    // ...and the ratio floor still answers on the fallback figure it was given.
+    expect(dropReason(johndog({ dsLiquidityUsd: 12_000 }), NOW, notKept)).toBe('lp_ratio');
   });
 });
 
