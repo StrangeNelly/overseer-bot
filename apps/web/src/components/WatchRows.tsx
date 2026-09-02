@@ -2,7 +2,20 @@ import { useState } from 'react';
 import type { WatchlistEntry } from '@groupie/shared';
 import type { WatchRow } from '../derive';
 import { slotLabel } from '../derive';
-import { avatarHue, fmtAge, fmtUsd, shortAddress } from '../format';
+import { avatarHue, fmtAge, fmtSignedPct, fmtUsd, shortAddress } from '../format';
+
+/**
+ * "watched at $120K · −32% since" — the BUY OPP baseline (round 19): the alert
+ * measures its drawdown from here, so the row says where "here" is. Null until
+ * the first reading after the watch, and for payloads that predate the field.
+ */
+function baselineNote(entry: WatchlistEntry): string | null {
+  const base = entry.mcapAtWatch;
+  if (base == null || !(base > 0)) return null;
+  const now = entry.mcapUsd;
+  const since = now !== null && now > 0 ? ` · ${fmtSignedPct(((now - base) / base) * 100)} since` : '';
+  return `watched at ${fmtUsd(base)}${since}`;
+}
 import { hoverCapable, useAlertBloom } from '../motion';
 import type { WatchProps } from '../watch';
 import { targetFromWatchEntry, watchForCard, watchFor } from '../watch';
@@ -74,7 +87,7 @@ export function WatchRows({
               links={desk ? 'hover' : 'tap'}
               expanded={!desk && openKey === row.entry.address}
               onToggle={onToggle ? () => onToggle(row.entry.address) : undefined}
-              slotNote={slotLabel(row.entry)}
+              slotNote={[slotLabel(row.entry), baselineNote(row.entry)].filter(Boolean).join(' · ')}
               watch={watchForCard(row.card, watch)}
               alerted={alerted}
             />
@@ -158,6 +171,8 @@ function CalllessRow({
           };
 
   const sub = [slotLabel(entry), fmtUsd(entry.mcapUsd)];
+  const baseline = baselineNote(entry);
+  if (baseline) sub.splice(1, 0, baseline);
   if (died) sub.push('alerts resume if it revives');
   else if (entry.liquidityUsd !== null) sub.push(`LP ${fmtUsd(entry.liquidityUsd)}`);
 
