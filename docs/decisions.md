@@ -28,6 +28,13 @@ Running record of decisions made with the owner. Newest at the bottom.
   - Died rows, Ranging cards, Sleepers rows, spotlight cards, list rows, half-sheet rows: all carry WATCH / WATCHING / WATCHING·YOU. Dead coins may be watched (alerts resume automatically on revival).
 - Neutral-framing law unchanged: the board prints numbers ("NARCO +41% in 1h — on watch"), never "buy-opp"/"nuke" labels.
 
+## 2026-09-03 — Resolution honesty + diet (round 17b)
+
+- Live case: `0x020e…1ba3`, called 2026-09-01 17:21Z, sat in FRESH as "indexing…" for 7h+. It is a **Base** contract (DexScreener any-chain lookup: Uniswap v4 pair on Base; GT 404 and DS empty on Robinhood Chain). v1 is HOOD-only, so it could never resolve — and the never-graduated rule only kills it at 48h, while resolution retried every 45s the whole time (resolution is now the dominant GT burst: up to 2 calls per token, 6 per tick).
+- **Wrong-chain detection:** when both Robinhood-Chain lookups miss, ask DexScreener's any-chain token endpoint once; pairs on another chain => the token dies immediately with `death_reason = 'wrong_chain:<chain>'` (the call goes to DIED as "WRONG CHAIN · BASE", no mcap line — nothing was ever measured). Never revival-polled; a repost stays dead. The bot stays silent — the board says it.
+- **Unindexed back-off:** an address found on NO chain stays unresolved but leaves the 45s tier: 45s for its first 15 min (new PONS launches index within minutes), then every 5 min to 1h, then hourly until the existing 48h death (reason stays `never_graduated`). The UI says "not indexed yet · Nh" past the first hour instead of "indexing…".
+- **Batched resolution:** unresolved tokens resolve through GT's `/tokens/multi` 30 per call (the endpoint is already wrapped), one call per tick instead of one per token.
+
 ## 2026-09-02 — Sleepers: stocks filter, short holds, higher bands (round 17)
 
 - Diagnosis behind the ask: the latest scan held 12 coins with 24h+ in band, but 10 of them were Robinhood's **tokenized stocks/ETFs** (QQQ, TSM, PLTR, MRNA...) with no X account — the "X only" default was the only thing hiding them, and they will always dominate the long-hold bands because they are stocks. Residency itself reads GeckoTerminal candle history and reaches back before the bot existed (HOOD: 214h on day one).
