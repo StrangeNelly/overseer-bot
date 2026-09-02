@@ -421,10 +421,11 @@ export function TokenCard({
                   </span>
                 ) : null}
               </span>
+              {/* Chronology reads left to right: called → now (owner, round 17). */}
               <span className="mcaps">
-                <Odometer value={fmtUsd(card.mcapUsd)} />
-                <span className="mcaps-arrow">←</span>
                 {fmtUsd(card.mcapAtCall)}
+                <span className="mcaps-arrow">→</span>
+                <Odometer value={fmtUsd(card.mcapUsd)} />
               </span>
             </>
           )}
