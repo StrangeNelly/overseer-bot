@@ -236,13 +236,25 @@ export interface WatchByAddressRequest {
  */
 export type ProjectStatus = 'active' | 'launched' | 'expired' | 'removed' | 'renamed' | 'suspended';
 
-/** A token that CLAIMS the handle on-chain (PONS socials) but was never posted by the account. */
+/**
+ * A candidate under a tracked account, never pinged:
+ * - 'posted': the account itself posted this address but it has NOT confirmed
+ *   on chain yet (not indexed, or a read failed) — re-checked on a back-off
+ *   until it confirms (then it becomes `launched`) or ages out;
+ * - 'claims': an on-chain launch whose PONS socials name the handle while the
+ *   account never posted it.
+ */
 export interface ProjectCandidate {
+  kind: 'posted' | 'claims';
   address: string;
   symbol: string | null;
   mcapUsd: number | null;
-  /** ISO instant the launch was seen on-chain. */
+  /** ISO instant: the post ('posted') or the on-chain launch ('claims'). */
   at: string;
+  /** The post that carried the address ('posted' only). */
+  tweetUrl: string | null;
+  /** Why the last confirmation attempt did not confirm ('posted' only), null when never tried. */
+  lastReason: string | null;
   links: TradingLinkRow;
 }
 
@@ -274,11 +286,19 @@ export interface ProjectEntry {
     address: string;
     symbol: string | null;
     tokenId: number | null;
-    /** ISO instant of the post. */
+    /** ISO instant of the POST that carried the address. */
     at: string;
+    /**
+     * The token's earliest known creation instant (our own launch listener's
+     * row when it saw the launch, else the first pool's clock); null when
+     * unknown. The board dates the launch from THIS, never from the ping.
+     */
+    tokenCreatedAt: string | null;
     tweetUrl: string | null;
-    /** Whether the chat ping went out (held when the token predated the post by > 10 min). */
+    /** Whether the chat ping actually went out. */
     pinged: boolean;
+    /** Why it did not: the token predated the post by > 10 min ('hijack') or the group muted launch pings ('muted'). */
+    heldReason: 'hijack' | 'muted' | null;
     links: TradingLinkRow;
   } | null;
   /** Tier B: on-chain launches claiming this handle, newest first, never pinged. */
@@ -296,9 +316,14 @@ export interface ProjectEntry {
  */
 export interface ProjectsResponse {
   enabled: boolean;
+  /** Last successful check across the group's still-polled monitors; null when there is nothing left to check. */
   lastCheckAt: string | null;
   capPerGroup: number;
   capPerMember: number;
+  /** Slots actually held (active / renamed / suspended) — launched and expired monitors hold none. */
+  slotsUsed: number;
+  /** ...of which the requesting member holds. */
+  slotsUsedByMe: number;
   projects: ProjectEntry[];
 }
 
