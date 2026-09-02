@@ -64,20 +64,37 @@ export function planRange(cursorBlock: number | null, headBlock: number): RangeP
   };
 }
 
-/** A plan split into provider-sized ranges, in order. */
-export function splitRanges(plan: RangePlan): Array<{ fromBlock: number; toBlock: number }> {
+/** A plan split into provider-sized ranges, in order (see requestBlocksFor). */
+export function splitRanges(
+  plan: RangePlan,
+  requestBlocks: number = DISCOVERY.maxBlocksPerRequest,
+): Array<{ fromBlock: number; toBlock: number }> {
   const out: Array<{ fromBlock: number; toBlock: number }> = [];
-  for (
-    let from = plan.fromBlock;
-    from <= plan.toBlock;
-    from += DISCOVERY.maxBlocksPerRequest
-  ) {
+  const step = Math.max(1, Math.min(DISCOVERY.maxBlocksPerRequest, Math.floor(requestBlocks)));
+  for (let from = plan.fromBlock; from <= plan.toBlock; from += step) {
     out.push({
       fromBlock: from,
-      toBlock: Math.min(plan.toBlock, from + DISCOVERY.maxBlocksPerRequest - 1),
+      toBlock: Math.min(plan.toBlock, from + step - 1),
     });
   }
   return out;
+}
+
+/**
+ * How many blocks one request may span on THIS provider: the configured
+ * ceiling, or — once the client has learned a smaller per-query cap from a
+ * refusal — the most that cap allows within one query's chunk budget. A
+ * request sized any larger would be refused whole, tick after tick, and the
+ * cursor behind it would never move again.
+ */
+export function requestBlocksFor(learnedMaxLogRange: number | null | undefined): number {
+  if (learnedMaxLogRange === null || learnedMaxLogRange === undefined) {
+    return DISCOVERY.maxBlocksPerRequest;
+  }
+  return Math.max(
+    1,
+    Math.min(DISCOVERY.maxBlocksPerRequest, learnedMaxLogRange * DISCOVERY.maxLogChunksPerQuery),
+  );
 }
 
 /** The stored cursor, or null when this deployment has never read a block. */

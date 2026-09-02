@@ -14,7 +14,14 @@ import {
 } from '../src/chain/addresses.js';
 import type { DsPair } from '../src/market/dexscreener.js';
 import type { ChainClient, ChainLog, LogQuery } from '../src/chain/client.js';
-import { METHOD_CU, RequestMeter, chainRpcUrl, createChainClient } from '../src/chain/client.js';
+import {
+  METHOD_CU,
+  RequestMeter,
+  chainRpcUrl,
+  createChainClient,
+  logRangeRefusal,
+  summarizeRpcError,
+} from '../src/chain/client.js';
 
 /**
  * The listener's tick, end to end against a fake chain and a scripted database
@@ -310,6 +317,27 @@ describe('runDiscoveryTick', () => {
     // SAFE_HEAD, not HEAD: initialising past the safe head would step over the
     // headLagBlocks blocks under the tip and never read them.
     expect(find(calls, 'insert:chainCursor')[0]?.values).toMatchObject({ lastBlock: SAFE_HEAD });
+  });
+
+  it('sizes its requests to a provider that caps eth_getLogs, so a catch-up is never refused whole', async () => {
+    const chain = fakeChain([]);
+    // The client learned a 10-block cap (Alchemy's free tier on this chain).
+    chain.maxLogRange = () => 10;
+    // The cursor fell 1,000 blocks behind: 100 seconds of chain, well over the
+    // 400 blocks one query may spend at that cap.
+    const { db, calls } = makeDb({ 'select:chainCursor': [[{ lastBlock: HEAD - 1_000 }]] });
+    await runDiscoveryTick(db, chain);
+    const ranges = rangeQueries(chain);
+    expect(ranges.length).toBeGreaterThan(1);
+    const cap = 10 * DISCOVERY.maxLogChunksPerQuery;
+    for (const q of ranges) {
+      expect((q.toBlock as number) - (q.fromBlock as number) + 1).toBeLessThanOrEqual(cap);
+    }
+    // ...and the whole gap was read this tick, with the cursor following each range.
+    expect(ranges[0]?.fromBlock).toBe(HEAD - 1_000 + 1);
+    expect(ranges[ranges.length - 1]?.toBlock).toBe(SAFE_HEAD);
+    const written = find(calls, 'insert:chainCursor').map((c) => (c.values as { lastBlock: number }).lastBlock);
+    expect(written[written.length - 1]).toBe(SAFE_HEAD);
   });
 
   it('records a launch with its DEPOSIT and its bundle facts', async () => {
@@ -1001,6 +1029,231 @@ describe('RequestMeter', () => {
   });
 });
 
+/* ------------------------------------------- the provider's log-range cap */
+
+/**
+ * 2026-09-02 10:47Z, the first tick after the key was set: every `eth_getLogs`
+ * came back HTTP 400 with THIS body, the listener failed every 20s and the
+ * cursor froze. The text is the production one, character for character —
+ * including the suggested range, which is how the client learns the cap.
+ */
+const FREE_TIER_ERROR = {
+  code: -32600,
+  message:
+    'Under the Free tier plan, you can make eth_getLogs requests with up to a 10 block range. ' +
+    'Based on your parameters, this block range should work: [0x3214ec9, 0x3214ed2]. ' +
+    'Upgrade to PAYG for expanded block range.',
+};
+
+/** ...and a provider that refuses without saying what it would have served. */
+const MUTE_RANGE_ERROR = { code: -32602, message: 'block range is too large' };
+
+/** An API-keyed RPC URL: the string that must never reach a log line. */
+const RPC_URL = 'https://robinhood-mainnet.g.alchemy.com/v2/alch_SECRET';
+
+const jsonResponse = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+const rpcLog = (block: number) => ({
+  address: WETH,
+  topics: [TOPICS.transfer],
+  data: '0x',
+  blockNumber: `0x${block.toString(16)}`,
+  transactionHash: `0x${block.toString(16).padStart(64, '0')}`,
+  logIndex: '0x0',
+});
+
+interface SeenSpan {
+  fromBlock: number | 'earliest';
+  toBlock: number;
+}
+
+describe('eth_getLogs adaptive block range', () => {
+  const realFetch = globalThis.fetch;
+  let fetchMock: ReturnType<typeof vi.fn>;
+  let spans: SeenSpan[];
+
+  /**
+   * A provider that serves at most `cap` blocks per query and answers anything
+   * wider with `error` at HTTP 400 — the exact shape viem turns into an
+   * `HttpRequestError` whose provider text lives in `details`.
+   */
+  const provider = (cap: number, error: unknown) => {
+    spans = [];
+    fetchMock = vi.fn(async (_url: unknown, init: { body: string }) => {
+      const params = JSON.parse(init.body).params[0] as {
+        fromBlock: string;
+        toBlock: string;
+      };
+      const from = params.fromBlock === 'earliest' ? 'earliest' : Number(params.fromBlock);
+      const to = Number(params.toBlock);
+      spans.push({ fromBlock: from, toBlock: to });
+      if (from === 'earliest' || to - from + 1 > cap) return jsonResponse({ error }, 400);
+      return jsonResponse({ jsonrpc: '2.0', id: 1, result: [rpcLog(from)] });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    return createChainClient(RPC_URL)!;
+  };
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  it('learns the suggested range from the refusal and re-issues the query in chunks', async () => {
+    const client = provider(10, FREE_TIER_ERROR);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const logs = await client.getLogs({ address: WETH, fromBlock: 100, toBlock: 129 });
+    // The wide query, refused; then the same 30 blocks as consecutive 10-block
+    // chunks, in order, with nothing skipped and nothing overlapping.
+    expect(spans).toEqual([
+      { fromBlock: 100, toBlock: 129 },
+      { fromBlock: 100, toBlock: 109 },
+      { fromBlock: 110, toBlock: 119 },
+      { fromBlock: 120, toBlock: 129 },
+    ]);
+    // ...and the caller gets ONE concatenated answer, in block order.
+    expect(logs.map((entry) => entry.blockNumber)).toEqual([100, 110, 120]);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(String(log.mock.calls[0]?.[0])).toBe(
+      'chain client: provider caps eth_getLogs at 10 blocks per query',
+    );
+    log.mockRestore();
+  });
+
+  it('halves the chunk when the provider refuses without suggesting a range', async () => {
+    const client = provider(10, MUTE_RANGE_ERROR);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await client.getLogs({ address: WETH, fromBlock: 100, toBlock: 131 });
+    expect(spans).toEqual([
+      { fromBlock: 100, toBlock: 131 }, // 32 blocks, refused
+      { fromBlock: 100, toBlock: 115 }, // halved to 16, refused
+      { fromBlock: 100, toBlock: 109 }, // floor of 10: served
+      { fromBlock: 110, toBlock: 119 },
+      { fromBlock: 120, toBlock: 129 },
+      { fromBlock: 130, toBlock: 131 },
+    ]);
+    expect(log.mock.calls.flat().map(String)).toEqual([
+      'chain client: provider caps eth_getLogs at 16 blocks per query',
+      'chain client: provider caps eth_getLogs at 10 blocks per query',
+    ]);
+    log.mockRestore();
+  });
+
+  it('sends a query that already fits the learned cap exactly once', async () => {
+    const client = provider(10, FREE_TIER_ERROR);
+    await client.getLogs({ address: WETH, fromBlock: 100, toBlock: 129 });
+    spans = [];
+    await client.getLogs({ address: WETH, fromBlock: 200, toBlock: 205 });
+    expect(spans).toEqual([{ fromBlock: 200, toBlock: 205 }]);
+  });
+
+  it('refuses a range that would need more than maxLogChunksPerQuery chunks', async () => {
+    const client = provider(10, FREE_TIER_ERROR);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await client.getLogs({ address: WETH, fromBlock: 100, toBlock: 129 });
+    log.mockRestore();
+    const before = fetchMock.mock.calls.length;
+    const wide = client.getLogs({ address: WETH, fromBlock: 1_000, toBlock: 1_499 });
+    await expect(wide).rejects.toThrow(/500 block\(s\)/);
+    await expect(wide).rejects.toThrow(
+      new RegExp(`${DISCOVERY.maxLogChunksPerQuery}-chunk cap`),
+    );
+    // Nothing was spent and nothing was read: the caller isolates this, the
+    // cursor stays put, and the same range is attempted again next tick.
+    expect(fetchMock.mock.calls.length).toBe(before);
+    // A PLAIN error — no RPC code, no provider text — so no caller mistakes it
+    // for a refusal worth retrying narrower.
+    const err = await wide.catch((e: unknown) => e);
+    expect(isRangeRefusal(err)).toBe(false);
+    expect(logRangeRefusal(err)).toBeNull();
+  });
+
+  it('never chunks an `earliest` hunt', async () => {
+    const client = provider(10, FREE_TIER_ERROR);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await client.getLogs({ address: WETH, fromBlock: 100, toBlock: 129 });
+    log.mockRestore();
+    spans = [];
+    const hunt = client.getLogs({
+      address: PONS_V2_FACTORY,
+      topics: [TOPICS.tokenLaunched],
+      fromBlock: 'earliest',
+      toBlock: 5_000,
+    });
+    await expect(hunt).rejects.toThrow();
+    // ONE attempt, unbounded, straight to the caller's own refusal path
+    // (findTokenLaunch retries it over a bounded window).
+    expect(spans).toEqual([{ fromBlock: 'earliest', toBlock: 5_000 }]);
+    expect(isRangeRefusal(await hunt.catch((e: unknown) => e))).toBe(true);
+  });
+
+  it('reads the cap off the provider text, never off viem message', () => {
+    expect(logRangeRefusal({ details: JSON.stringify(FREE_TIER_ERROR) })).toEqual({
+      suggested: 10,
+    });
+    expect(logRangeRefusal({ code: -32602, details: 'block range is too large' })).toEqual({
+      suggested: null,
+    });
+    expect(logRangeRefusal({ cause: { code: -32600, details: 'block range too wide' } })).toEqual({
+      suggested: null,
+    });
+    // A 429 whose request body happens to name a range is not a range refusal.
+    expect(
+      logRangeRefusal(
+        Object.assign(
+          new Error(
+            'HTTP request failed.\n\nRequest body: {"params":[{"fromBlock":"0x1","toBlock":"0x2"}]} block range',
+          ),
+          { details: 'Too Many Requests', status: 429 },
+        ),
+      ),
+    ).toBeNull();
+    expect(logRangeRefusal({ details: 'unauthorized' })).toBeNull();
+    expect(logRangeRefusal(null)).toBeNull();
+  });
+});
+
+/* --------------------------------------------------------- no keys in logs */
+
+/** viem's HttpRequestError, exactly as it carries the API-keyed URL around. */
+const keyedTransportError = () =>
+  Object.assign(
+    new Error(
+      `HTTP request failed.\n\nStatus: 400\nURL: ${RPC_URL}\n` +
+        'Request body: {"method":"eth_getLogs","params":[{"fromBlock":"0x3214ec9"}]}',
+    ),
+    {
+      name: 'HttpRequestError',
+      status: 400,
+      shortMessage: 'HTTP request failed.',
+      details: JSON.stringify(FREE_TIER_ERROR),
+      metaMessages: ['Status: 400', `URL: ${RPC_URL}`, 'Request body: {"method":"eth_getLogs"}'],
+      url: RPC_URL,
+    },
+  );
+
+describe('summarizeRpcError', () => {
+  it('keeps the status and the provider text, and drops the keyed URL', () => {
+    const summary = summarizeRpcError(keyedTransportError());
+    expect(summary).not.toContain('alch_SECRET');
+    expect(summary).not.toMatch(/https?:\/\//);
+    expect(summary).not.toContain('Request body');
+    expect(summary).toContain('HttpRequestError');
+    expect(summary).toContain('status=400');
+    expect(summary).toContain('Under the Free tier plan');
+  });
+
+  it('still says something useful about an error that is not viem-shaped', () => {
+    expect(summarizeRpcError(new Error('connection terminated'))).toContain(
+      'connection terminated',
+    );
+    expect(summarizeRpcError(null)).toBe('unknown error');
+  });
+});
+
 /* ------------------------------------------------------------- dormancy */
 
 describe('dormant without a key', () => {
@@ -1028,6 +1281,32 @@ describe('dormant without a key', () => {
     expect(handle.running).toBe(false);
     expect(() => handle.stop()).not.toThrow();
     timers.mockRestore();
+  });
+
+  it('logs a failed tick as one redacted line, never the error object', async () => {
+    vi.useFakeTimers();
+    const chain = fakeChain([]);
+    const failure = keyedTransportError();
+    chain.getBlockNumber = async () => {
+      throw failure;
+    };
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { db } = makeDb({ 'select:chainCursor': CURSOR_ROW });
+    const handle = startDiscovery(db, chain);
+    await vi.advanceTimersByTimeAsync(DISCOVERY.pollIntervalMs);
+    handle.stop();
+    const line = errors.mock.calls.flat().map(String).join(' ');
+    expect(line).toContain('discovery tick failed');
+    expect(line).toContain('status=400');
+    // The one thing this line must never carry: the RPC url, which is the key.
+    expect(line).not.toContain('alch_SECRET');
+    expect(line).not.toMatch(/https?:\/\//);
+    // ...and it is a STRING, not the error object a console would expand.
+    expect(errors.mock.calls[0]).toHaveLength(1);
+    errors.mockRestore();
+    logs.mockRestore();
+    vi.useRealTimers();
   });
 
   it('runs TWO separate loops when a client exists, so neither can stall the other', () => {

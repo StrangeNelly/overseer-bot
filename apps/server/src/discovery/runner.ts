@@ -1,6 +1,6 @@
 import type { Db } from '@groupie/db';
 import { DISCOVERY } from '@groupie/shared';
-import type { ChainClient } from '../chain/client.js';
+import { summarizeRpcError, type ChainClient } from '../chain/client.js';
 import { deliverDiscoveryAlerts, retireStaleDiscoveryAlerts } from './alerts.js';
 import {
   pruneDiscovery,
@@ -58,7 +58,10 @@ export function startDiscovery(db: Db, chain: ChainClient | null): DiscoveryHand
     try {
       await runDiscoveryTick(db, chain);
     } catch (err) {
-      console.error('discovery tick failed:', err);
+      // Summarised, never the error object: this is the one log line an RPC
+      // failure reaches, and viem's error carries the API-keyed URL in its
+      // message, metaMessages and url.
+      console.error(`discovery tick failed: ${summarizeRpcError(err)}`);
     } finally {
       chainRunning = false;
     }
@@ -82,7 +85,7 @@ export function startDiscovery(db: Db, chain: ChainClient | null): DiscoveryHand
         console.log(`discovery: ${enriched} enriched, ${refreshed} refreshed, ${alerted} alerted`);
       }
     } catch (err) {
-      console.error('discovery enrichment failed:', err);
+      console.error(`discovery enrichment failed: ${summarizeRpcError(err)}`);
     } finally {
       enriching = false;
     }

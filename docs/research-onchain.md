@@ -256,6 +256,51 @@ to discard the row.
   `[[pairCreated, initialize, poolGraduated, poolRegistered]]`, and the logs are
   routed back to their streams by (address, topic0) — an event signature is not
   unique to a contract, so the address has to be part of the test.
+- **The provider's block-range ceiling is LEARNED, not assumed** (fixed
+  2026-09-02, after the first tick with a live key failed). Alchemy's FREE tier
+  serves `eth_getLogs` over **10 blocks per query** and answers anything wider
+  with HTTP 400 and
+  `{"code":-32600,"message":"Under the Free tier plan, you can make eth_getLogs requests with up to a 10 block range. Based on your parameters, this block range should work: [0x3214ec9, 0x3214ed2]. Upgrade to PAYG…"}`.
+  Every tick asked for ~395 blocks, every tick 400'd, and the cursor froze.
+  `chain/client.ts` now keeps a runtime `maxLogRange`: on a refusal (RPC code
+  -32600/-32602 whose provider `details` mention a range) it learns the
+  SUGGESTED range from the `[0xA, 0xB]` pair, or halves the current chunk (floor
+  10) when the provider only refuses, then re-issues the same query as
+  consecutive chunks run SEQUENTIALLY and concatenated in block order. It logs
+  `chain client: provider caps eth_getLogs at N blocks per query` once, when the
+  learned value changes. PAYG's range is 2,000+ blocks, so on that plan nothing
+  splits at all and `DISCOVERY.maxBlocksPerRequest` (2,000) is the only ceiling.
+  `planRange`/`splitRanges` are untouched — the cursor keeps its tick-sized
+  ranges and the client does the dividing, so a chunked read still advances the
+  cursor exactly one range at a time.
+- **`DISCOVERY.maxLogChunksPerQuery` = 40**, and the free tier does not fit
+  under it for long. A steady-state 20s tick is ~200 blocks of a ~100ms chain =
+  20 chunks × 75 CU = 1,500 CU per tick, ~270K CU/hour, ~195M CU/month against
+  the free tier's 30M — so the free tier reads the stream for about four days a
+  month and then stops. It is a stopgap, not a plan. A 2,000-block catch-up
+  range would be 200 chunks, over the cap: that range throws a PLAIN error
+  (no RPC code, no provider text, so nothing mistakes it for a refusal to retry
+  narrower), the tick isolate logs one line, and **the cursor does not advance
+  past blocks nobody read** — the same range is attempted again next tick. The
+  honest consequence on the free tier: a gap wider than 40 × 10 = 400 blocks
+  (~40 seconds of chain, i.e. two skipped ticks) can never be caught up, because
+  every retry asks for the same too-wide range. That is a second reason the free
+  tier is a stopgap; on PAYG the whole range is one query and the question does
+  not arise.
+  `fromBlock: 'earliest'` hunts (the graduation's `TokenLaunched` lookup) are
+  never chunked: they have no numeric span, and they already have their own
+  bounded-window retry.
+- **No chain error is ever logged as an object.** viem writes the request URL
+  into `message`, `metaMessages` and `url` on every transport failure, and that
+  URL is `https://robinhood-mainnet.g.alchemy.com/v2/<API KEY>` — so
+  `console.warn('…', err)` publishes the key into the deploy logs.
+  `summarizeRpcError(err)` in `chain/client.ts` is the only way a chain error
+  reaches a log line: it emits the error NAME, the HTTP status, the RPC code,
+  the provider's own `details` text and viem's `shortMessage`, scrubs anything
+  URL-shaped out of what is left, and never touches `message`, `metaMessages`,
+  `url` or the request body. Every `console.warn`/`console.error` in
+  `discovery/scan.ts` and `discovery/runner.ts` that can receive a chain error
+  goes through it.
 - **`DISCOVERY.headLagBlocks` = 3.** The range stops short of the head: a block
   at the tip can still be re-orged away, and the cursor is written to the block
   actually read, so a launch decoded out of an orphan would never be re-read.

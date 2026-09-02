@@ -1,5 +1,5 @@
 import { createPublicClient, defineChain, http, type PublicClient } from 'viem';
-import { ROBINHOOD_CHAIN_ID } from '@groupie/shared';
+import { DISCOVERY, ROBINHOOD_CHAIN_ID } from '@groupie/shared';
 
 /**
  * The one on-chain client (docs/research-features-2.md §4: "shared Alchemy
@@ -140,6 +140,14 @@ export interface ChainClient {
    */
   getTransactionLogs(txHash: string): Promise<ChainLog[] | null>;
   meter(): { total: number; windowCount: number; totalCu: number };
+  /**
+   * The widest eth_getLogs span the provider has been seen to accept, learned
+   * from its refusals; null until one has been observed. The tick sizes its
+   * requests from it so a catch-up range never needs more chunks than one
+   * query may spend — without this, a cursor that fell 40 seconds behind on a
+   * capped plan would ask for the same too-wide range forever.
+   */
+  maxLogRange?(): number | null;
 }
 
 function toChainLog(log: {
@@ -180,6 +188,133 @@ function decodeLogRows(rows: unknown): ChainLog[] {
     if (mapped) out.push(mapped);
   }
   return out;
+}
+
+/* ------------------------------------------------------- errors, redacted */
+
+/**
+ * Anything that looks like a URL, gone. The RPC URL CARRIES THE API KEY
+ * (`.../v2/<key>`), and viem writes that URL into `message`, `metaMessages` and
+ * `url` on every transport failure — so a single `console.warn('...', err)`
+ * publishes the key into the deploy logs. Nothing built here prints a URL, and
+ * this is the belt to that braces.
+ */
+function scrubUrls(text: string): string {
+  return text.replace(/\bhttps?:\/\/\S+/gi, '[url redacted]');
+}
+
+/** Provider text can be a whole JSON body; logs get the first 400 characters. */
+function clip(text: string): string {
+  return text.length <= 400 ? text : `${text.slice(0, 400)}...`;
+}
+
+function firstString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim() !== '') return value;
+  }
+  return null;
+}
+
+function firstNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) {
+      return Number(value);
+    }
+  }
+  return null;
+}
+
+/**
+ * A chain error as ONE safe log line.
+ *
+ * What goes in: the error's name, the HTTP status, the JSON-RPC code, the
+ * provider's own `details` text (which is where the useful sentence lives — the
+ * free-tier block-range refusal included) and viem's `shortMessage`.
+ *
+ * What NEVER goes in: `message`, `metaMessages`, `url` or the request body.
+ * viem composes `message` out of the shortMessage PLUS the metaMessages, and one
+ * of those metaMessages is literally `URL: https://…/v2/<API KEY>` — so logging
+ * the error object, or its message, leaks the key. The only exception is an
+ * error carrying none of viem's markers (a plain `new Error(...)` from our own
+ * code, a database failure): there the message is the whole information and
+ * there is no request URL in it, and it is scrubbed anyway.
+ */
+export function summarizeRpcError(err: unknown): string {
+  if (err === null || err === undefined) return 'unknown error';
+  if (typeof err === 'string') return clip(scrubUrls(err));
+  if (typeof err !== 'object') return clip(scrubUrls(String(err)));
+  const e = err as Record<string, unknown>;
+  const cause = (typeof e.cause === 'object' && e.cause !== null
+    ? (e.cause as Record<string, unknown>)
+    : null) ?? null;
+
+  const parts: string[] = [firstString(e.name) ?? 'Error'];
+  const status = firstNumber(e.status, cause?.status);
+  if (status !== null) parts.push(`status=${status}`);
+  const code = firstNumber(e.code, cause?.code);
+  if (code !== null) parts.push(`code=${code}`);
+  const short = firstString(e.shortMessage, cause?.shortMessage);
+  if (short !== null) parts.push(clip(scrubUrls(short)));
+  const details = firstString(e.details, cause?.details);
+  if (details !== null) parts.push(`details=${clip(scrubUrls(details))}`);
+
+  // Not a viem error at all: no url, no metaMessages, no request body — so the
+  // message is safe to print and is the only thing this error has to say.
+  const viemShaped =
+    'shortMessage' in e || 'metaMessages' in e || 'details' in e || 'url' in e || 'status' in e;
+  if (!viemShaped && status === null && code === null) {
+    const message = firstString(e.message);
+    if (message !== null) parts.push(clip(scrubUrls(message)));
+  }
+  return parts.join(' ');
+}
+
+/* ------------------------------------------------ the provider's log ceiling */
+
+/** The narrowest chunk a blind halving will ever try. */
+export const MIN_LOG_CHUNK = 10;
+
+const RANGE_REFUSAL_CODES = [-32600, -32602];
+
+/**
+ * Is this failure the provider refusing the BLOCK RANGE of an `eth_getLogs` —
+ * and did it say what range it would have served?
+ *
+ * The shape Alchemy answers a free-tier key with is an HTTP 400 whose body is
+ * the JSON-RPC error, so viem hands us an `HttpRequestError` with the code
+ * inside `details` rather than on the error object; a provider that answers 200
+ * with a JSON-RPC error gives us the code on the error itself. Both are read.
+ *
+ * `message` is NEVER read (viem prints the request body into it, and that body
+ * names fromBlock/toBlock on a timeout and a 429 alike), so a wide-range read is
+ * only ever narrowed on the provider's own words.
+ */
+export function logRangeRefusal(err: unknown): { suggested: number | null } | null {
+  if (err === null || typeof err !== 'object') return null;
+  const e = err as Record<string, unknown>;
+  const cause = (typeof e.cause === 'object' && e.cause !== null
+    ? (e.cause as Record<string, unknown>)
+    : null) ?? null;
+  const text = [e.details, cause?.details]
+    .filter((part): part is string => typeof part === 'string')
+    .join(' ');
+  if (text === '') return null;
+  const lower = text.toLowerCase();
+  if (!lower.includes('range')) return null;
+  const onError = [e.code, cause?.code].some((code) =>
+    RANGE_REFUSAL_CODES.includes(Number(code)),
+  );
+  const inText = /["']?code["']?\s*:\s*(-32600|-32602)\b/.test(text);
+  if (!onError && !inText) return null;
+  // "…this block range should work: [0x3214ec9, 0x3214ed2]" — an inclusive pair
+  // of block numbers, which is the provider telling us its per-query ceiling.
+  const match = /\[\s*(0x[0-9a-f]+|\d+)\s*,\s*(0x[0-9a-f]+|\d+)\s*\]/i.exec(text);
+  if (match === null) return { suggested: null };
+  const from = Number(match[1]);
+  const to = Number(match[2]);
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return { suggested: null };
+  return { suggested: Math.max(1, to - from + 1) };
 }
 
 /**
@@ -243,6 +378,46 @@ export function createChainClient(rpcUrl: string | null): ChainClient | null {
     }),
   });
 
+  /**
+   * The widest block range this provider will serve for one `eth_getLogs`, as
+   * LEARNED AT RUNTIME — null until it refuses one. It is not a constant
+   * because it is not ours: Alchemy's free tier caps it at 10 blocks and PAYG
+   * at thousands, and the plan can change under a running process (the
+   * 2026-09-02 incident: every tick 400d on a 395-block range the day the key
+   * was first set). The cursor keeps its tick-sized ranges either way; the
+   * splitting happens here, where the refusal is.
+   */
+  let maxLogRange: number | null = null;
+
+  function learnMaxLogRange(blocks: number): void {
+    const learned = Math.max(1, Math.floor(blocks));
+    if (maxLogRange === learned) return;
+    maxLogRange = learned;
+    // Once, on change — this is a plan-shaped fact, not a per-request event.
+    console.log(`chain client: provider caps eth_getLogs at ${learned} blocks per query`);
+  }
+
+  /** ONE eth_getLogs, over exactly the blocks given. Metered by the transport. */
+  async function sendGetLogs(
+    query: LogQuery,
+    fromBlock: number | 'earliest',
+    toBlock: number,
+  ): Promise<unknown> {
+    const from = fromBlock === 'earliest' ? 'earliest' : `0x${fromBlock.toString(16)}`;
+    return client.request({
+      method: 'eth_getLogs',
+      params: [
+        {
+          ...(query.address === undefined ? {} : { address: query.address as never }),
+          ...(query.topics === undefined ? {} : { topics: query.topics as never }),
+          ...(query.blockHash === undefined
+            ? { fromBlock: from as never, toBlock: `0x${toBlock.toString(16)}` as never }
+            : { blockHash: query.blockHash as never }),
+        } as never,
+      ],
+    } as never);
+  }
+
   return {
     async getBlockNumber() {
       return Number(await client.getBlockNumber({ cacheTime: 0 }));
@@ -260,24 +435,56 @@ export function createChainClient(rpcUrl: string | null): ChainClient | null {
       }
     },
     async getLogs(query) {
-      const from =
-        query.fromBlock === 'earliest' ? 'earliest' : `0x${(query.fromBlock ?? 0).toString(16)}`;
-      const logs = await client.request({
-        method: 'eth_getLogs',
-        params: [
-          {
-            ...(query.address === undefined ? {} : { address: query.address as never }),
-            ...(query.topics === undefined ? {} : { topics: query.topics as never }),
-            ...(query.blockHash === undefined
-              ? {
-                  fromBlock: from as never,
-                  toBlock: `0x${(query.toBlock ?? 0).toString(16)}` as never,
-                }
-              : { blockHash: query.blockHash as never }),
-          } as never,
-        ],
-      } as never);
-      return decodeLogRows(logs);
+      // A hash query and an `earliest` hunt have no numeric span to divide, so
+      // they are sent as they are: they either work, or they fall to the
+      // caller's own refusal path (scan.ts retries the graduation hunt over a
+      // bounded window instead).
+      if (query.blockHash !== undefined || query.fromBlock === 'earliest') {
+        return decodeLogRows(await sendGetLogs(query, query.fromBlock ?? 0, query.toBlock ?? 0));
+      }
+
+      const fromBlock = query.fromBlock ?? 0;
+      const toBlock = query.toBlock ?? fromBlock;
+      const span = Math.max(1, toBlock - fromBlock + 1);
+      let chunk = maxLogRange === null ? span : Math.min(span, maxLogRange);
+
+      for (;;) {
+        const chunks = Math.ceil(span / chunk);
+        if (chunks > DISCOVERY.maxLogChunksPerQuery) {
+          // A PLAIN error on purpose: no RPC code, no provider text, so nothing
+          // upstream mistakes it for a range refusal worth retrying. The caller
+          // isolates it, the cursor does NOT advance past blocks nobody read,
+          // and the same range is attempted again next tick.
+          throw new Error(
+            `eth_getLogs range of ${span} block(s) needs ${chunks} chunks at the provider's ` +
+              `${chunk}-block ceiling, over the ${DISCOVERY.maxLogChunksPerQuery}-chunk cap ` +
+              'for one query',
+          );
+        }
+        try {
+          // Sequential, in block order: the chunks are one logical query, and a
+          // burst of parallel requests is exactly what a tier that caps the
+          // range also rate-limits.
+          const out: ChainLog[] = [];
+          for (let start = fromBlock; start <= toBlock; start += chunk) {
+            const end = Math.min(toBlock, start + chunk - 1);
+            out.push(...decodeLogRows(await sendGetLogs(query, start, end)));
+          }
+          return out;
+        } catch (err) {
+          const refusal = logRangeRefusal(err);
+          if (refusal === null) throw err;
+          const next =
+            refusal.suggested !== null && refusal.suggested < chunk
+              ? refusal.suggested
+              : Math.max(MIN_LOG_CHUNK, Math.floor(chunk / 2));
+          // Nothing narrower left to try: the provider refused a range it will
+          // not shrink. The real error goes to the caller rather than a loop.
+          if (next >= chunk) throw err;
+          learnMaxLogRange(next);
+          chunk = next;
+        }
+      }
     },
     async call(to, data, blockTag) {
       try {
@@ -327,5 +534,6 @@ export function createChainClient(rpcUrl: string | null): ChainClient | null {
       }
     },
     meter: () => meter.snapshot(),
+    maxLogRange: () => maxLogRange,
   };
 }

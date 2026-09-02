@@ -19,8 +19,15 @@ import {
   bundleExclusions,
 } from '../chain/addresses.js';
 import { TOTAL_SUPPLY_CALLDATA, computeLaunchBlockShare } from '../chain/bundle.js';
-import type { ChainClient, ChainLog } from '../chain/client.js';
-import { planRange, readCursor, splitRanges, touchCursor, writeCursor } from '../chain/cursor.js';
+import { summarizeRpcError, type ChainClient, type ChainLog } from '../chain/client.js';
+import {
+  planRange,
+  readCursor,
+  requestBlocksFor,
+  splitRanges,
+  touchCursor,
+  writeCursor,
+} from '../chain/cursor.js';
 import { dataWord, topicAddress, unitsToNumber, wordToBigInt } from '../chain/decode.js';
 import { sumV2MintQuote, v4DepositFromTx, v4NativeDeposit } from '../chain/reserve.js';
 import * as ds from '../market/dexscreener.js';
@@ -313,8 +320,8 @@ export async function findTokenLaunch(
   } catch (err) {
     if (!isRangeRefusal(err)) {
       console.warn(
-        `discovery: launch lookup failed for ${tokenAddress} (not a range refusal, not retried):`,
-        err,
+        `discovery: launch lookup failed for ${tokenAddress} (not a range refusal, not retried): ` +
+          summarizeRpcError(err),
       );
       return null;
     }
@@ -326,7 +333,7 @@ export async function findTokenLaunch(
         toBlock: headBlock,
       });
     } catch (err) {
-      console.warn(`discovery: launch lookup failed for ${tokenAddress}:`, err);
+      console.warn(`discovery: launch lookup failed for ${tokenAddress}: ${summarizeRpcError(err)}`);
       return null;
     }
   }
@@ -381,7 +388,9 @@ async function readGraduationBundle(
       toBlock: launch.launchBlock + DISCOVERY.bundleBlockSpan,
     });
   } catch (err) {
-    console.warn(`discovery: graduation bundle read failed for ${tokenAddress}:`, err);
+    console.warn(
+      `discovery: graduation bundle read failed for ${tokenAddress}: ${summarizeRpcError(err)}`,
+    );
     return null;
   }
   const sinks = new Set([launch.curve.toLowerCase()]);
@@ -605,7 +614,9 @@ async function collectGraduations(
       graduation.tokenAddress,
       headBlock,
     ).catch((err) => {
-      console.warn(`discovery: graduation bundle failed for ${graduation.tokenAddress}:`, err);
+      console.warn(
+        `discovery: graduation bundle failed for ${graduation.tokenAddress}: ${summarizeRpcError(err)}`,
+      );
       return null;
     });
     out.push({
@@ -728,7 +739,9 @@ async function collectLaunches(
     if (!verdict.keep) continue;
 
     const bundle = await readBundleFacts(chain, candidate).catch((err) => {
-      console.warn(`discovery: bundle read failed for ${candidate.tokenAddress}:`, err);
+      console.warn(
+        `discovery: bundle read failed for ${candidate.tokenAddress}: ${summarizeRpcError(err)}`,
+      );
       return null;
     });
     keptTokens.add(candidate.tokenAddress);
@@ -996,7 +1009,12 @@ export async function runDiscoveryTick(db: Db, chain: ChainClient): Promise<Disc
     );
   }
   const clock = new BlockClock(chain);
-  for (const range of splitRanges(plan)) {
+  // Requests are sized to what the provider has been seen to accept: on a plan
+  // that caps eth_getLogs at N blocks, one request spans at most N times the
+  // chunk budget, so a catch-up can always be read — slowly, but never refused
+  // whole and never stuck.
+  const requestBlocks = requestBlocksFor(chain.maxLogRange?.());
+  for (const range of splitRanges(plan, requestBlocks)) {
     detected += await processRange(db, chain, clock, head, range);
     // The cursor is written to the block actually READ, never to the head: a
     // tick that covered half the gap must resume from the middle.

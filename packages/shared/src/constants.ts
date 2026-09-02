@@ -288,6 +288,17 @@ export const DISCOVERY = {
   /** ...and one tick never asks for more than this many of those ranges. */
   maxRangesPerTick: 4,
   /**
+   * The most CHUNKS one logical `eth_getLogs` may be split into when the
+   * provider caps its block range (chain/client.ts learns that cap from the
+   * refusal). Alchemy's free tier serves 10 blocks per query, so a steady-state
+   * 20s range (~200 blocks of a ~100ms chain) is 20 chunks and fits, while a
+   * 2,000-block catch-up range would be 200 and does not: that range is refused
+   * whole and re-read next tick rather than quietly turned into a burst of 200
+   * billed requests. On PAYG the cap is thousands of blocks and nothing splits
+   * at all.
+   */
+  maxLogChunksPerQuery: 40,
+  /**
    * The launch block plus this many after it: the window the bundle facts are
    * read over (round 20: "the launch block and the first few blocks").
    */
