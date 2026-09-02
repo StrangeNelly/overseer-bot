@@ -22,9 +22,14 @@ guess about which token belongs to which account.
   them in 8.5 minutes, and the owner's own example already has a **$31K impostor LEGS token**
   on-chain carrying legs.fun + @legsdotfun as its socials while the real account has posted no CA.
 - Free, definitive primitive: PONS v2 tokens carry creator-declared socials IMMUTABLY on-chain
-  (`socials()` selector 0x53cd512a; `getTokenInfo()`), and `PonsV2LaunchFactory.getLaunchedToken
-  (address)` (0x3cf28b5a) returns deployer + exists. overseer already sees every launch seconds
-  after it happens (the discovery listener).
+  (`socials()` selector 0x53cd512a), and `PonsV2LaunchFactory.getLaunchedToken(address)`
+  (0x3cf28b5a) returns deployer + exists. overseer already sees every launch seconds after it
+  happens (the discovery listener). **Layout VERIFIED on a public RPC 2026-09-03:** `socials()`
+  returns FIVE ABI strings — index 0 the X/Twitter URL, index 3 the website, the rest usually
+  empty (Stride 0x446d7659…6d7e → `["https://x.com/playstridexyz","","","https://playstride.xyz/",""]`).
+  A NON-PONS token REVERTS on it (Cummingtonite, launched on long.xyz), which is the normal
+  answer for most of the chain and is read as "not a PONS v2 token", never as a failure.
+  `getTokenInfo()` (0x1a0c2ba4) reverts on both and is not used.
 - Hijack case, stated not judged: the @vladtenev takeover (2026-07-23, ~650 ETH) — the token was
   created 46 min BEFORE the post; every "own post + resolves" rule would ping. Mitigation: print
   token age and launch-block bundle share; hold the ping to board-only when the token predates the
@@ -41,10 +46,22 @@ with rule count. Empty checks ARE billed ($0.00012/call; $0.00015 per tweet retu
 | 20 | 2 | $11/mo | $6/mo | $10/mo | $9–30/mo (per post returned) |
 | 50 | 4–5 | $23–28/mo | $15/mo | $12–21/mo | $22–75/mo |
 
-- Primary: **twitterapi.io filter rules in POLL mode** (their webhook echoes our API key to the
-  configured URL, adds unauthenticated ingress, documents no retry). Self-polling their
-  advanced_search (512-char query ≈ 25 handles in one call) is cheaper still ($6.5/mo at 60s) but
-  the docs page 404'd — UNVERIFIED query-length cap.
+**WHAT SHIPPED BILLS DIFFERENTLY.** The build polls `advanced_search`, not filter rules: the unit
+is a SEARCH SHARD, sized by `XWATCH.searchQueryMaxChars` (480, leaving room for the ` since_time:`
+suffix inside the documented 512) — about 25 ordinary handles in ONE call. So the whole watchlist
+of a group (cap 12) is one call per poll: at `XWATCH.pollSeconds` = 60 that is 43,200 calls a
+month ≈ **$5.20/mo**, plus $0.00015 per post returned (a handful of posts a day per handle, i.e.
+cents); at 120s it halves. THE POLL IS NOT THE WHOLE BILL: the profile rotation re-reads every
+tracked account (`/twitter/user/info`, one call per monitor) every
+`XWATCH.refreshProfileMinutes` = 30, which at a full group of 12 handles is 12 × 2 × 730 ≈ 17,500
+calls a month ≈ **$2.10/mo** — so a capped group at 60 s costs about **$7/mo all in** (≈ $4.30 at
+120 s polling, the rotation being unaffected by the poll cadence). A handle lookup is also spent
+per `/overseer track`, and one per pending-confirmation row is NOT (that ladder reads the chain and
+GeckoTerminal, never X). The rule table above is what the WEBHOOK path would have cost and is kept
+for the adapter a webhook deployment would need. A truncated page (more than
+`XWATCH.maxPagesPerPoll` = 10 pages of results in one interval) costs up to ten calls for that
+shard, and the runner then HOLDS its cursor and re-reads that window on the next poll — so a
+sustained truncation is the one shape that can multiply the poll's share of this bill.
 - Fallback: **SocialData search monitor** — the only vendor that explicitly documents replies and
   quotes ("typically within 30 seconds", each tweet delivered once, no backfill).
 - Escape hatch: **official X API recent search on pay-per-use** ($0.005 per post returned, 450
@@ -54,7 +71,7 @@ with rule count. Empty checks ARE billed ($0.00012/call; $0.00015 per tweet retu
 - Disqualified: Apify (50-tweet minimum per run ≈ $864/mo at 60s), Sorsa (quota plans, no push),
   crypto-native tiers (TweetStream $199/mo, 1322 $250/mo) unless the group wants image OCR and
   pinned-tweet events — the only ones that ship them.
-- Latency post → ping: rule interval (mean 30 s at 60 s) + our 30 s result poll + one batched RPC
+- Latency post → ping: our 60 s poll (mean 30 s wait) + one batched RPC
   confirm (5–15 s) + send ≈ **60–150 s p50, ~3 min p90**. Snipers act in 19 s; we are the
   CONFIRMED CA with a links row, and the copy must say so.
 - UNVERIFIED, load-bearing: whether twitterapi.io `from:` rules deliver REPLIES (a CA dropped as a
@@ -69,7 +86,16 @@ ponsfamily.com/launchpad/0x…, app.long.xyz/tokens/0x…, launch.o1.exchange/to
 dexscreener.com/robinhood/0x…); (3) passes the EVM address check (EIP-55 on mixed case, the
 shared extractor); (4) CONFIRMS on Robinhood Chain in one batched RPC — `eth_getCode` non-empty,
 `symbol()`/`decimals()` answer, not a known quote/router/factory (chain/addresses.ts); (5) the
-token's first pool is under 24 h old. Resolution failure ⇒ no message, board row only.
+token's EARLIEST EVIDENCE (our own discovery launch row, else the PONS `TokenLaunched` block,
+else the first pool) is under 24 h old.
+
+**A resolution failure is a QUEUE, not silence** (build fix, 2026-09-03): the post is written down
+as a `launch_candidates` row of kind `posted` and re-confirmed on the round-17b ladder (45 s for
+15 min, then 5 min for 6 h, then hourly) until it confirms — then it takes the normal fire path —
+or until the post passes the 24 h launch window ('aged_out'). Only three rejections skip the
+queue: a known quote/router/factory/burn address, evidence older than 24 h, and an address with
+no bytecode that has already been retried past the fast rung. A pending row shows on the board
+under its project with the post, its time and the last reason.
 
 **Tier B — board only, never chat.** A new PONS launch whose on-chain `socials()` twitter field
 cites a tracked handle: "claims @handle · not posted by the account". Escalates to Tier A if the

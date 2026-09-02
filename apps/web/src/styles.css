@@ -3325,6 +3325,288 @@ a {
   }
 }
 
+/* ---------- upcoming (round 23) ----------
+   The pre-launch X accounts the group tracks. Same clothes as Discovery — a
+   cyan analytical surface with no P&L anywhere, because nothing here has a call
+   to be a multiple of — but the row is an ACCOUNT, so the identity column
+   carries a handle and a bio where a coin would carry a symbol, and everything
+   the row has to say that a 48px line cannot hold hangs underneath it. */
+
+.upc-grid {
+  padding: 14px 14px 6px;
+}
+
+.app-desk .upc-grid {
+  padding: 18px 28px 14px;
+}
+
+.upc-rows {
+  display: flex;
+  flex-direction: column;
+}
+
+/* No call and no price, so no P&L direction: the edge is the neutral hairline,
+   and the block below the head belongs to the row it hangs from. */
+.row-upc {
+  border-left-color: var(--badge-border);
+  padding-bottom: 6px;
+}
+
+.row-upc:last-child {
+  border-bottom: 0;
+}
+
+/* The account's display name beside its handle — secondary by construction:
+   the handle is the identity a monitor is keyed on (x_user_id behind it), and
+   a display name can change tomorrow. */
+.upc-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 400 10px var(--font-mono);
+  color: var(--dim);
+}
+
+/* ACTIVE / LAUNCHED / EXPIRED / RENAMED / SUSPENDED. Dim and neutral by law:
+   a launch is not a win and a suspension is not a verdict. */
+.badge-status {
+  color: var(--dim);
+  border-color: var(--badge-border);
+  letter-spacing: 0.6px;
+}
+
+/* The followers/age/last-post column sits where a sparkline would: a pre-launch
+   account has no chart, and these three are the only numbers it has. */
+.upc-meta {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 210px;
+  text-align: right;
+  font: 400 9.5px var(--font-mono);
+  color: var(--dimmer);
+  font-variant-numeric: tabular-nums;
+}
+
+.upc-meta-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* X and UNTRACK. `.row-head > *` turns pointer events off for the whole head
+   (the row is one tap target elsewhere); these two are controls, so the
+   container turns them back on. */
+.row-head > .upc-actions {
+  pointer-events: auto;
+}
+
+.upc-actions {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.upc-actions .pill {
+  min-height: 20px;
+  padding: 2px 6px;
+  font-size: 8.5px;
+}
+
+/* Who added it, and why they said they did. The note is the member's own words,
+   printed verbatim and dimmer than the fact beside it. */
+.upc-foot {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 12px 4px 38px;
+  font: 400 9.5px var(--font-mono);
+  color: var(--dimmer);
+}
+
+.upc-note {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dim);
+}
+
+/* The monitor fired: the account posted a contract that resolved on chain. The
+   one line on this surface that gets the cyan hairline, because it is the only
+   thing the surface exists to produce. */
+.upc-launched {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin: 2px 12px 6px 38px;
+  padding: 6px 10px;
+  border: 1px solid var(--badge-border-cyan);
+  border-radius: 8px;
+  background: var(--zone-bg);
+}
+
+.upc-launched-line {
+  font: 500 10.5px var(--font-mono);
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* When the POST landed, beside when the TOKEN was created. Dimmer than the
+   launch line: the post is our trigger, the chain's clock is the fact. */
+.upc-launched-when {
+  font: 400 9.5px var(--font-mono);
+  color: var(--dimmer);
+  font-variant-numeric: tabular-nums;
+}
+
+/* "The @ no longer answers for the account you added." A fact about the monitor,
+   in the same indent as everything else hanging off the row head. */
+.upc-status-note {
+  margin: 0;
+  padding: 0 12px 2px 38px;
+  font: 400 9.5px var(--font-mono);
+  color: var(--dim);
+}
+
+/* Nothing is being polled because nothing is left to poll. A note, not the
+   stall frame: no watcher is misbehaving, so it gets no border and no fill. */
+.upc-idle {
+  margin: 8px 14px 0;
+  font: 400 10px var(--font-mono);
+  color: var(--dimmer);
+}
+
+.app-desk .upc-idle {
+  margin: 10px 28px 0;
+  font-size: 10.5px;
+}
+
+/* The hijack case: the token predated the post, so the chat stayed quiet. A
+   note about US, not about the coin, so it is the dimmest thing on the line. */
+.badge-held {
+  color: var(--dimmer);
+  border-color: var(--badge-border);
+  letter-spacing: 0.6px;
+}
+
+.upc-links {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 3px 4px;
+  margin-left: auto;
+}
+
+.upc-links .pill {
+  min-height: 20px;
+  padding: 2px 5px;
+  font-size: 8.5px;
+}
+
+/* Tier B — a launch that names this handle on chain and the account never
+   posted. Nested under the row it claims, in the dimmest voice here. */
+.upc-cands {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 12px 4px 38px;
+}
+
+.upc-cand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-left: 1px dashed var(--badge-border);
+  font: 400 9.5px var(--font-mono);
+  color: var(--dimmer);
+}
+
+.upc-cand-sym {
+  flex: 0 0 auto;
+  color: var(--dim);
+}
+
+.upc-cand-line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Why the last confirmation attempt did not confirm. Dimmest thing on the
+   dimmest row: it is a statement about our reading, not about the token. */
+.upc-cand-why {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dimmer);
+  opacity: 0.85;
+}
+
+/* The add field: web parity for `/overseer track @handle [note]`. */
+.upc-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.upc-field {
+  flex: 0 1 190px;
+  min-height: 34px;
+  min-width: 0;
+}
+
+.upc-field-note {
+  flex: 1 1 160px;
+}
+
+.upc-add {
+  flex: 0 0 auto;
+}
+
+.upc-invalid {
+  margin: 0;
+  font: 400 9.5px var(--font-mono);
+  color: var(--dim);
+}
+
+/* A phone gives the identity column the room: the three numbers drop under the
+   handle instead of squeezing it, and the nested blocks lose the left indent. */
+@media (max-width: 700px) {
+  .upc-meta {
+    width: 120px;
+    font-size: 9px;
+  }
+
+  .upc-form {
+    flex-wrap: wrap;
+  }
+
+  .upc-foot,
+  .upc-launched,
+  .upc-cands {
+    margin-left: 12px;
+    padding-left: 10px;
+  }
+
+  .upc-foot,
+  .upc-status-note {
+    padding-left: 12px;
+  }
+}
+
 /* ---------- rail summaries ---------- */
 
 .summary-line {

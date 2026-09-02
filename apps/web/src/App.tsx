@@ -6,6 +6,8 @@ import type {
   BoardWindow,
   DiscoveryFilters,
   DiscoveryResponse,
+  ProjectEntry,
+  ProjectsResponse,
   RangeBoardResponse,
   RangeDurationHours,
   SleeperDurationHours,
@@ -30,11 +32,14 @@ import {
   fetchRange,
   fetchSleepers,
   fetchTelegramLoginAvailable,
+  fetchUpcoming,
   markDead,
   restoreCall,
   setWatch,
   setWatchByAddress,
   telegramLoginUrl,
+  trackProject,
+  untrackProject,
 } from './api';
 import { readCachedBoard, writeCachedBoard } from './cache';
 import { Board } from './components/Board';
@@ -51,6 +56,14 @@ import {
   parseDiscoveryHours,
 } from './discovery';
 import type { DiscoveryHours } from './discovery';
+import { Upcoming } from './components/Upcoming';
+import {
+  UPCOMING_FRAME_TAIL,
+  UPCOMING_POLL_MS,
+  applyUntracked,
+  deriveUpcomingSummary,
+  upcomingCountOf,
+} from './upcoming';
 import { MiniBoard } from './components/MiniBoard';
 import { Pulse } from './components/Pulse';
 import { DEFAULT_CONTROLS, Ranging, resolveBand, sanitizeRangeControls } from './components/Ranging';
@@ -560,6 +573,20 @@ export default function App() {
   const [discoveryServerAt, setDiscoveryServerAt] = useState<number | null>(null);
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const [discoveryLoading, setDiscoveryLoading] = useState(false);
+  /**
+   * UPCOMING (round 23) — the tracked X accounts. Like Discovery it is a poller's
+   * snapshot with no live frame behind it, so it lives in memory and carries the
+   * two instants its stall verdict is read against.
+   */
+  const [upcoming, setUpcoming] = useState<ProjectsResponse | null>(null);
+  const [upcomingFetchedAt, setUpcomingFetchedAt] = useState<number | null>(null);
+  const [upcomingServerAt, setUpcomingServerAt] = useState<number | null>(null);
+  const [upcomingError, setUpcomingError] = useState<string | null>(null);
+  const [upcomingLoading, setUpcomingLoading] = useState(false);
+  const [trackPending, setTrackPending] = useState(false);
+  /** Monitors whose DELETE is in flight, and the ones it has optimistically removed. */
+  const [untrackPending, setUntrackPending] = useState<ReadonlySet<number>>(NO_VERDICTS);
+  const [untracked, setUntracked] = useState<ReadonlySet<number>>(NO_VERDICTS);
 
   const slug = boot.kind === 'ready' ? boot.slug : null;
   const slugRef = useRef<string | null>(null);
@@ -610,6 +637,12 @@ export default function App() {
   sleepersRef.current = sleepers;
   const discoveryRef = useRef<DiscoveryResponse | null>(null);
   discoveryRef.current = discovery;
+  const upcomingSeqRef = useRef(0);
+  const upcomingRef = useRef<ProjectsResponse | null>(null);
+  upcomingRef.current = upcoming;
+  /** Read by the load that settles optimistic removals against what is in flight. */
+  const untrackPendingRef = useRef(untrackPending);
+  untrackPendingRef.current = untrackPending;
   /** True once the server has answered: the cache never outranks a real payload. */
   const paintedRef = useRef(false);
 
@@ -819,6 +852,42 @@ export default function App() {
     [],
   );
 
+  const loadUpcoming = useCallback(async (options: { silent?: boolean } = {}) => {
+    const currentSlug = slugRef.current;
+    if (!currentSlug) return false;
+    // Latest-wins, exactly like the board and the other views.
+    const seq = ++upcomingSeqRef.current;
+    if (!options.silent) setUpcomingLoading(true);
+    try {
+      const { body: data, serverAt } = await fetchUpcoming(currentSlug);
+      if (seq !== upcomingSeqRef.current) return false;
+      setUpcoming(data);
+      // Stamped from the client clock at the instant the response landed: it
+      // dates THIS payload, which is what the stall verdict is measured from.
+      // The server's own instant rides along so that verdict can read the
+      // server's `lastCheckAt` against the server's clock, not this device's.
+      setUpcomingFetchedAt(Date.now());
+      setUpcomingServerAt(serverAt);
+      setUpcomingError(null);
+      // The payload IS the list now: an optimistic removal that this response
+      // has already answered stops being an overlay. One still in flight keeps
+      // its own, because this read cannot have seen a request that is still open.
+      setUntracked((prev) => {
+        if (prev.size === 0) return prev;
+        const pendingNow = untrackPendingRef.current;
+        const next = new Set([...prev].filter((id) => pendingNow.has(id)));
+        return next.size === prev.size ? prev : next;
+      });
+      return true;
+    } catch (err) {
+      if (seq !== upcomingSeqRef.current) return false;
+      setUpcomingError(describe(err));
+      return false;
+    } finally {
+      if (!options.silent && seq === upcomingSeqRef.current) setUpcomingLoading(false);
+    }
+  }, []);
+
   /** Fixed for the life of the page: the launch payload only exists in the webview. */
   const inTelegram = useMemo(() => tgInitData() !== null, []);
   const layout = useLayoutMode(inTelegram);
@@ -827,6 +896,14 @@ export default function App() {
   const rangingActive = section === 'ranging';
   const sleepersActive = section === 'sleepers';
   const discoveryActive = section === 'discovery';
+  const upcomingActive = section === 'upcoming';
+  /**
+   * A full VIEW is open — one of the four surfaces that replace the board rather
+   * than sitting beside it. On desktop that is what decides whether the right
+   * rail exists at all, and therefore whether its summary cards are worth
+   * polling for.
+   */
+  const viewOpen = rangingActive || sleepersActive || discoveryActive || upcomingActive;
   const rangeHours = rangeControls.hours;
   const customBand = rangeControls.presetIndex === null;
 
@@ -875,9 +952,8 @@ export default function App() {
   // exists once the board has painted, and it is replaced entirely while RANGING
   // or SLEEPERS owns the view. Polling for a card nobody is looking at is a
   // request every two minutes that no pixel is waiting for.
-  const discoveryNeeded =
-    discoveryActive ||
-    (layout === 'desktop' && board !== null && section !== 'ranging' && section !== 'sleepers');
+  const railMounted = layout === 'desktop' && board !== null && !viewOpen;
+  const discoveryNeeded = discoveryActive || railMounted;
   useEffect(() => {
     if (!slug || !discoveryNeeded) return;
     // A failed chip reload snaps the flags back to the payload on screen; that
@@ -905,6 +981,27 @@ export default function App() {
     }, DISCOVERY_POLL_MS);
     return () => window.clearInterval(id);
   }, [slug, discoveryNeeded, loadDiscovery]);
+
+  /**
+   * UPCOMING follows Discovery exactly (round 23): the X watcher polls on the
+   * server and publishes no frame, so the open view — or the desktop rail card —
+   * is kept current by a two-minute poll of its own, and by the focus handler
+   * below. "Needed" means MOUNTED, not "the window is wide".
+   */
+  const upcomingNeeded = upcomingActive || railMounted;
+  useEffect(() => {
+    if (!slug || !upcomingNeeded) return;
+    void loadUpcoming();
+  }, [slug, upcomingNeeded, loadUpcoming]);
+
+  useEffect(() => {
+    if (!slug || !upcomingNeeded) return;
+    const id = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      void loadUpcoming({ silent: true });
+    }, UPCOMING_POLL_MS);
+    return () => window.clearInterval(id);
+  }, [slug, upcomingNeeded, loadUpcoming]);
 
   const scheduleRefetch = useCallback(() => {
     if (debounceRef.current !== null) return;
@@ -964,6 +1061,7 @@ export default function App() {
           silent: true,
         });
       }
+      if (upcomingNeeded) void loadUpcoming({ silent: true });
     };
     window.addEventListener('focus', onFocus);
     document.addEventListener('visibilitychange', onFocus);
@@ -977,9 +1075,11 @@ export default function App() {
     loadRange,
     loadSleepers,
     loadDiscovery,
+    loadUpcoming,
     rangingNeeded,
     sleepersNeeded,
     discoveryNeeded,
+    upcomingNeeded,
   ]);
 
   // Keeps every "3h" on the board honest without a refetch.
@@ -1274,6 +1374,94 @@ export default function App() {
   );
 
   /**
+   * Track an X account from the web (docs/decisions.md round 23) — the same
+   * thing `/overseer track @handle` does, and the same refusals: a cap that is
+   * full, a handle already tracked, a handle X does not know. Not optimistic:
+   * the server owns both caps and is the only thing that can resolve a handle,
+   * so the only honest row is the one it hands back on the refetch.
+   *
+   * Resolves true only when the monitor was actually created, which is the
+   * field's cue to clear itself.
+   */
+  const onTrack = useCallback(
+    async (handle: string, note: string): Promise<boolean> => {
+      const currentSlug = slugRef.current;
+      if (!currentSlug) return false;
+      setTrackPending(true);
+      setActionError(null);
+      try {
+        await trackProject(currentSlug, note ? { handle, note } : { handle });
+        await loadUpcoming({ silent: true });
+        return true;
+      } catch (err) {
+        // 409 (capped / already tracked) and 404 (no such account) both arrive
+        // with the server's own sentence; describe() surfaces it verbatim.
+        setActionError(`Could not track @${handle}. ${describe(err)}`);
+        return false;
+      } finally {
+        setTrackPending(false);
+      }
+    },
+    [loadUpcoming],
+  );
+
+  /**
+   * ...and remove one, which any member may do. This one IS optimistic — the row
+   * disappears the moment the request goes out, because there is no cap to
+   * arbitrate and nothing else on screen depends on it. A failure puts it back
+   * and says why.
+   */
+  const onUntrack = useCallback(
+    async (entry: ProjectEntry) => {
+      const currentSlug = slugRef.current;
+      if (!currentSlug) return;
+      const id = entry.id;
+      setUntrackPending((prev) => {
+        const next = new Set(prev);
+        next.add(id);
+        return next;
+      });
+      setUntracked((prev) => {
+        const next = new Set(prev);
+        next.add(id);
+        return next;
+      });
+      setActionError(null);
+      try {
+        await untrackProject(currentSlug, id);
+        // The refetch is what makes it real. A load that PAINTED has replaced
+        // the overlay with the server's own list, so the overlay comes down; one
+        // that was superseded (or failed) leaves it up until the next read.
+        const painted = await loadUpcoming({ silent: true });
+        if (painted) {
+          setUntracked((prev) => {
+            if (!prev.has(id)) return prev;
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+          });
+        }
+      } catch (err) {
+        setUntracked((prev) => {
+          if (!prev.has(id)) return prev;
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+        setActionError(`Could not untrack @${entry.handle}. ${describe(err)}`);
+      } finally {
+        setUntrackPending((prev) => {
+          if (!prev.has(id)) return prev;
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }
+    },
+    [loadUpcoming],
+  );
+
+  /**
    * Hand this board to the system browser, already signed in: the server mints
    * a one-time link off our Mini App session and Telegram opens it outside the
    * webview (docs/decisions.md round 7).
@@ -1383,6 +1571,22 @@ export default function App() {
   const discoverySummary = useMemo(
     () => deriveDiscoverySummary(discovery, discoveryFetchedAt, discoveryServerAt),
     [discovery, discoveryFetchedAt, discoveryServerAt],
+  );
+
+  /**
+   * UPCOMING as the reader's own actions have left it: the server's payload with
+   * the monitors they have just removed taken out. Everything that draws — the
+   * view, the chip count, the rail card — reads this, so a row cannot linger in
+   * one place after disappearing from another.
+   */
+  const upcomingView = useMemo<ProjectsResponse | null>(
+    () => (upcoming === null ? null : applyUntracked(upcoming, untracked)),
+    [upcoming, untracked],
+  );
+  const upcomingCount = useMemo(() => upcomingCountOf(upcomingView), [upcomingView]);
+  const upcomingSummary = useMemo(
+    () => deriveUpcomingSummary(upcomingView, upcomingFetchedAt, upcomingServerAt),
+    [upcomingView, upcomingFetchedAt, upcomingServerAt],
   );
 
   // The two analytical views (design pass 2, 3B/3C): controls panel plus
@@ -1501,6 +1705,27 @@ export default function App() {
     />
   );
 
+  const upcomingBody = (
+    <Upcoming
+      data={upcomingView}
+      loading={upcomingLoading}
+      error={upcomingError}
+      onRetry={() => void loadUpcoming()}
+      onTrack={onTrack}
+      trackPending={trackPending}
+      onUntrack={(entry) => void onUntrack(entry)}
+      untrackPending={untrackPending}
+      fetchedAt={upcomingFetchedAt}
+      serverAt={upcomingServerAt}
+      // A launched token gets the same WATCH pill as every other coin in the
+      // app (round 16) — and this payload has no watch state, so it comes off
+      // the board's own watchlist by address.
+      watchlist={view?.watchlist ?? undefined}
+      watch={watchProps}
+      now={now}
+    />
+  );
+
   const rangingPanel = (
     <div className="view">
       <ViewHeader
@@ -1563,6 +1788,22 @@ export default function App() {
     </div>
   );
 
+  const upcomingPanel = (
+    <div className="view">
+      <ViewHeader
+        title="UPCOMING"
+        sub={UPCOMING_FRAME_TAIL}
+        right={
+          <span className="view-note">
+            the account&rsquo;s own post — a token that merely names a handle never pings
+          </span>
+        }
+        onBack={() => setSection('fresh')}
+      />
+      {upcomingBody}
+    </div>
+  );
+
   // The keys are load-bearing: the mobile tab bodies all sit in one child slot,
   // so without them React updates a single Zone in place and the tab-in
   // cross-fade never replays.
@@ -1618,6 +1859,21 @@ export default function App() {
       }
     >
       {discoveryBody}
+    </Zone>
+  );
+
+  const upcomingTab = (
+    <Zone
+      key="upcoming"
+      tone="cyan"
+      headline="UPCOMING"
+      count={upcomingCount}
+      className="zone-tab"
+      /* Same rule as the Sleepers and Discovery bands: at 375px the trust frame
+         owns this line alone — the add field lives in the panel below. */
+      note={UPCOMING_FRAME_TAIL}
+    >
+      {upcomingBody}
     </Zone>
   );
 
@@ -1772,12 +2028,8 @@ export default function App() {
               3h scan) — the board windows don't apply there, so the chips go
               visibly inert instead of lying about being pressable. */}
           <div
-            className={rangingActive || sleepersActive || discoveryActive ? 'wins-inert' : undefined}
-            title={
-              rangingActive || sleepersActive || discoveryActive
-                ? 'Board time windows don’t apply to this tab'
-                : undefined
-            }
+            className={viewOpen ? 'wins-inert' : undefined}
+            title={viewOpen ? 'Board time windows don’t apply to this tab' : undefined}
           >
             <WindowSwitcher value={boardWindow} onChange={onWindowChange} />
           </div>
@@ -1817,13 +2069,15 @@ export default function App() {
 
         {view ? (
           desktop ? (
-            section === 'ranging' || section === 'sleepers' || section === 'discovery' ? (
+            viewOpen ? (
               <div className="desk-view">
                 {section === 'sleepers'
                   ? sleepersPanel
                   : section === 'discovery'
                     ? discoveryPanel
-                    : rangingPanel}
+                    : section === 'upcoming'
+                      ? upcomingPanel
+                      : rangingPanel}
               </div>
             ) : (
               <DesktopBoard
@@ -1839,6 +2093,7 @@ export default function App() {
                 rangeSummary={rangeSummary}
                 sleepersSummary={sleepersSummary}
                 discoverySummary={discoverySummary}
+                upcomingSummary={upcomingSummary}
                 onOpenTab={setSection}
                 alertedAddress={alertedAddress}
               />
@@ -1861,6 +2116,8 @@ export default function App() {
               sleepers={sleepersTab}
               discoveryCount={discoveryCount}
               discovery={discoveryTab}
+              upcomingCount={upcomingCount}
+              upcoming={upcomingTab}
             />
           )
         ) : boardError ? (

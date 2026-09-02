@@ -42,6 +42,8 @@ const CONFIG: Config = {
   tgOauthClientSecret: null,
   alchemyApiKey: null,
   alchemyRpcUrl: null,
+  xApiKey: null,
+  xApiBase: null,
   devAuthUserId: null,
 };
 

@@ -15,6 +15,7 @@ import { createOauthRoutes } from './oauth.js';
 import { createRangeRoutes } from './range.js';
 import { createSleeperRoutes } from './sleepers.js';
 import { createSseRoutes } from './sse.js';
+import { createUpcomingRoutes, type XWatchApi } from './upcoming.js';
 
 /** serveStatic resolves `root` against the CWD, which is apps/server. */
 const WEB_DIST_ROOT = '../web/dist';
@@ -71,6 +72,9 @@ export function createApi(
   botApi: Api,
   config: Config,
   discovery: { running: boolean } = { running: false },
+  // Round 23, same contract and the same default: no watcher here means
+  // /upcoming answers enabled:false rather than an empty list.
+  xwatch: XWatchApi = { running: false, watcher: null },
 ): Hono<ApiEnv> {
   const app = new Hono<ApiEnv>();
 
@@ -92,6 +96,8 @@ export function createApi(
   // The discovery zones answer `enabled:false` — not an empty stream — wherever
   // no listener is running here (docs/decisions.md rounds 18 and 20).
   app.route('/', createDiscoveryRoutes(db, discovery));
+  // UPCOMING: the group's tracked pre-launch X accounts (round 23).
+  app.route('/', createUpcomingRoutes(db, xwatch));
   app.route('/', createSseRoutes(db));
   // Mini App -> browser handoff. The mint sits under /api/g/:slug/* so it picks
   // up the csrf + requireMember middleware above; the redeem is a PUBLIC GET on

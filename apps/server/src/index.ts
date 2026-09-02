@@ -18,6 +18,8 @@ import { chainRpcUrl, createChainClient } from './chain/client.js';
 import { loadConfig } from './config.js';
 import { startDiscovery } from './discovery/runner.js';
 import { startPoller } from './poller/scheduler.js';
+import { createTweetWatcher } from './xwatch/twitterapi.js';
+import { startXWatch } from './xwatch/runner.js';
 
 // Load the repo-root .env regardless of cwd; a missing file is a no-op
 // (deployments inject env vars directly).
@@ -41,10 +43,24 @@ const webOnly =
 // Alchemy key it is dormant anyway (startDiscovery says so once and returns).
 // Started BEFORE the API and the bot because both have to tell members the
 // truth about it: the board's `enabled`, and `/overseer alerts`.
-const discovery = startDiscovery(db, webOnly ? null : createChainClient(chainRpcUrl(config)));
+const chain = webOnly ? null : createChainClient(chainRpcUrl(config));
+const discovery = startDiscovery(db, chain);
 
-const bot = createBot(config, db, discovery.running);
-const api = createApi(db, bot.api, config, discovery);
+// The X launch monitor (docs/decisions.md round 23) obeys the same guardrail as
+// the chain listener, for the same reason: it writes shared rows and posts into
+// the chat, so exactly one instance runs it. Absent an X key it is dormant
+// anyway (startXWatch says so once and returns). The watcher itself is created
+// whether or not the runner starts, because `/overseer track` and the POST
+// route resolve a handle through it — a WEB_ONLY box can still curate the list.
+const tweetWatcher = createTweetWatcher(config);
+const xwatchRunner = startXWatch(db, webOnly ? null : tweetWatcher, chain);
+const xwatch = { enabled: xwatchRunner.running, watcher: tweetWatcher };
+
+const bot = createBot(config, db, discovery.running, xwatch);
+const api = createApi(db, bot.api, config, discovery, {
+  running: xwatchRunner.running,
+  watcher: tweetWatcher,
+});
 
 const server = serve({ fetch: api.fetch, port: config.port }, (info) => {
   console.log(`api listening on :${info.port}${webOnly ? ' (WEB_ONLY: no bot, no poller)' : ''}`);
@@ -70,7 +86,8 @@ if (!webOnly) {
       {
         command: 'overseer',
         description:
-          'board · watch <ca> · dead <coin> · undead <coin> · watchlist · alerts · set',
+          'board · watch <ca> · dead <coin> · undead <coin> · watchlist · ' +
+          'track @handle · untrack · tracking · alerts · set',
       },
     ])
     .catch((err) => console.warn('setMyCommands failed:', err));
@@ -92,6 +109,7 @@ async function shutdown() {
   stopPoller();
   stopAlertDelivery();
   discovery.stop();
+  xwatchRunner.stop();
   if (!webOnly) await bot.stop();
   await closeServer();
   await client.end().catch(() => {});

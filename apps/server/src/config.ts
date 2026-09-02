@@ -48,6 +48,21 @@ export interface Config {
    */
   alchemyRpcUrl: string | null;
   /**
+   * twitterapi.io key for the X launch monitor (docs/decisions.md round 23).
+   * Its ABSENCE is the feature flag, exactly like the Alchemy key: no key means
+   * the watcher never starts, nothing polls, and /upcoming answers
+   * `enabled:false` — a zone that says it is off rather than an empty one that
+   * looks like nobody is tracking anything.
+   */
+  xApiKey: string | null;
+  /**
+   * Base URL override for that provider — the documented default is
+   * https://api.twitterapi.io; a test double or a fallback vendor with the same
+   * shape goes here. Never logged (the key is a header, but a base URL somebody
+   * pasted a key into would be).
+   */
+  xApiBase: string | null;
+  /**
    * DEV ONLY: browse the board as this Telegram user id without initData (no
    * Telegram webview, no membership check). Non-null ONLY when ENABLE_DEV_AUTH
    * is exactly 'true' and NODE_ENV is not 'production', so this one field is
@@ -81,6 +96,8 @@ export function loadConfig(): Config {
     tgOauthClientSecret: process.env.TG_OAUTH_CLIENT_SECRET?.trim() || null,
     alchemyApiKey: process.env.ALCHEMY_API_KEY?.trim() || null,
     alchemyRpcUrl: process.env.ALCHEMY_RPC_URL?.trim() || null,
+    xApiKey: process.env.X_API_KEY?.trim() || null,
+    xApiBase: process.env.X_API_BASE?.trim() || null,
     devAuthUserId: devAuthArmed ? optionalInt('DEV_AUTH_USER_ID') : null,
   };
 }

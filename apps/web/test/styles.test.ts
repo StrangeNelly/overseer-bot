@@ -37,7 +37,14 @@ describe('row-head stacking', () => {
   it('finds the blocks it is asserting about', () => {
     // The matcher is the risk here: a selector that stopped existing (or was
     // renamed) would make every assertion below vacuously true.
-    for (const selector of ['.row-hit', '.row-dead', '.rail-dead', '.bin-btn', '.row-hoverlinks']) {
+    for (const selector of [
+      '.row-hit',
+      '.row-dead',
+      '.rail-dead',
+      '.bin-btn',
+      '.row-hoverlinks',
+      '.upc-actions',
+    ]) {
       expect(declarationsFor(selector), selector).not.toBe('');
     }
   });
@@ -63,6 +70,16 @@ describe('row-head stacking', () => {
     const bin = declarationsFor('.bin-btn');
     expect(bin).toContain('position: relative');
     expect(bin).toContain('z-index: 1');
+  });
+
+  it('lifts the UPCOMING controls too — X and UNTRACK sit in a row head', () => {
+    // Round 23: the head turns pointer events off for its children so the row is
+    // one target elsewhere; these two are controls, so the container turns them
+    // back on and lifts them out of the ladder's floor.
+    const actions = declarationsFor('.upc-actions');
+    expect(actions).toContain('position: relative');
+    expect(actions).toContain('z-index: 1');
+    expect(declarationsFor('.row-head > .upc-actions')).toContain('pointer-events: auto');
   });
 
   it('leaves the hover strip above both of them', () => {

@@ -265,7 +265,13 @@ export const alerts = pgTable(
     // plain text in Postgres (this enum is a TypeScript claim, not a CHECK), so
     // widening it needs no migration — but the delivery path does branch on the
     // null token id above, which does.
-    type: text('type', { enum: ['nuke', 'buy_opp', 'launch', 'graduation'] }).notNull(),
+    // ...and 'x_launch' in round 23: a tracked X account posted a contract
+    // address that confirmed on chain. Like the discovery family it carries no
+    // token cooldown — one message per monitor, ever — but unlike it there IS a
+    // tokens row (the ping auto-watches the coin), so token_id is set.
+    type: text('type', {
+      enum: ['nuke', 'buy_opp', 'launch', 'graduation', 'x_launch'],
+    }).notNull(),
     firedAt: timestamp('fired_at', { withTimezone: true }).notNull().defaultNow(),
     /** Market cap at fire time; details carries the peak/drop that triggered it. */
     mcapUsd: doublePrecision('mcap_usd'),
@@ -284,6 +290,13 @@ export const alerts = pgTable(
     uniqueIndex('alerts_discovery_pool_uq')
       .on(t.groupId, t.type, sql`(${t.details} ->> 'pool')`)
       .where(sql`${t.type} in ('launch', 'graduation')`),
+    // Round 23's dedupe, at the same level and for the same reason: the launch
+    // ping is "one message per monitor, ever", and (handle, address) is what
+    // identifies it — the tweet id is not, because a deleted-and-reposted
+    // announcement of the same contract is the same news.
+    uniqueIndex('alerts_x_launch_uq')
+      .on(t.groupId, t.type, sql`(${t.details} ->> 'handle')`, sql`(${t.details} ->> 'address')`)
+      .where(sql`${t.type} = 'x_launch'`),
   ],
 );
 
@@ -584,6 +597,15 @@ export const discoveryAlertDecisions = pgTable(
   ],
 );
 
+/**
+ * The X launch monitor (docs/decisions.md round 23): a pre-launch account the
+ * group is watching, and what happened to it.
+ *
+ * `x_user_id` is stored AT ADD TIME and never repointed: X handles are
+ * transferable, so a monitor whose stored id no longer answers to the handle is
+ * a monitor whose subject has gone — said out loud as 'renamed'/'suspended'
+ * rather than silently followed to a stranger.
+ */
 export const launchMonitors = pgTable(
   'launch_monitors',
   {
@@ -594,10 +616,132 @@ export const launchMonitors = pgTable(
     xHandle: text('x_handle').notNull(), // stored lowercase, no leading @
     addedBy: bigint('added_by', { mode: 'number' }).notNull(),
     addedAt: timestamp('added_at', { withTimezone: true }).notNull().defaultNow(),
-    status: text('status', { enum: ['active', 'launched', 'expired', 'removed'] })
+    status: text('status', {
+      // 'renamed'  — the handle now answers to a DIFFERENT x_user_id.
+      // 'suspended' — the provider no longer finds the account at all.
+      enum: ['active', 'launched', 'expired', 'removed', 'renamed', 'suspended'],
+    })
       .notNull()
       .default('active'),
+    /** The account's numeric X id, read once when the monitor was added. */
+    xUserId: text('x_user_id'),
+    displayName: text('display_name'),
+    avatarUrl: text('avatar_url'),
+    bio: text('bio'),
+    /** Latest follower count, and the one at add time — the delta is the curve. */
+    followers: integer('followers'),
+    followersAtAdd: integer('followers_at_add'),
+    accountCreatedAt: timestamp('account_created_at', { withTimezone: true }),
+    /** Free text the adder attached (`/overseer track @handle <note>`). */
+    note: text('note'),
+    /**
+     * The chat message that added this monitor — the launch ping replies to it,
+     * so the answer lands where the question was asked. NULL when the monitor
+     * was added from the web, and then the ping is a fresh message.
+     */
+    addedMessageId: bigint('added_message_id', { mode: 'number' }),
+    /** Our last successful provider check of this account. */
+    lastCheckedAt: timestamp('last_checked_at', { withTimezone: true }),
+    /** The account's most recent post we have SEEN (the expiry clock reads it). */
+    lastPostAt: timestamp('last_post_at', { withTimezone: true }),
+    /** ...and its id, so provider redelivery of the same post is a no-op. */
+    lastTweetId: text('last_tweet_id'),
+    /** Which provider rule shard this handle is polled in (255-char shards). */
+    providerRuleId: text('provider_rule_id'),
+    /**
+     * Tier A's result. `launch_pinged` false with a launch recorded means the
+     * board has it and the chat does not — the hijack hold (the token predated
+     * the post), or a group that muted the ping.
+     */
+    launchedAddress: text('launched_address'),
+    launchedTokenId: integer('launched_token_id').references(() => tokens.id),
+    launchedAt: timestamp('launched_at', { withTimezone: true }),
+    launchTweetId: text('launch_tweet_id'),
+    launchTweetUrl: text('launch_tweet_url'),
+    launchPinged: boolean('launch_pinged').notNull().default(false),
+    /**
+     * WHY the chat was not told, when a launch was recorded and `launch_pinged`
+     * is false: the token predated the post ('hijack') or the group muted the
+     * ping ('muted'). Null when it pinged — and null on the rows that never
+     * launched at all.
+     */
+    launchedHoldReason: text('launched_hold_reason', { enum: ['hijack', 'muted'] }),
+    /**
+     * The token's EARLIEST known creation instant (docs/decisions.md round 23):
+     * our own discovery launch/graduation row when the listener saw it, else the
+     * PONS TokenLaunched block, else the first pool's clock. The board dates the
+     * launch from this, and the hijack hold is measured against it — never
+     * against the moment we happened to notice.
+     */
+    launchedTokenCreatedAt: timestamp('launched_token_created_at', { withTimezone: true }),
+    /**
+     * Every profile-refresh ATTEMPT, figure or not. The refresh pass takes the
+     * oldest (nulls first), so one unreadable account cannot hold the front of
+     * the queue while the rest of the watchlist goes stale.
+     */
+    profileRefreshedAt: timestamp('profile_refreshed_at', { withTimezone: true }),
+    /** When this monitor expires unless the account posts (last post + 60d). */
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
   },
-  // X handles are case-insensitive; enforce that at the DB level too.
-  (t) => [uniqueIndex('launch_monitors_group_handle_uq').on(t.groupId, sql`lower(${t.xHandle})`)],
+  (t) => [
+    // X handles are case-insensitive; enforce that at the DB level too.
+    uniqueIndex('launch_monitors_group_handle_uq').on(t.groupId, sql`lower(${t.xHandle})`),
+    // The board reads one group's monitors; the runner reads every polled one.
+    index('launch_monitors_group_status_idx').on(t.groupId, t.status),
+    index('launch_monitors_status_idx').on(t.status),
+  ],
+);
+
+/**
+ * A token under a tracked account that is NOT (yet) a launch — board only, and
+ * nothing in this table can ever ping (docs/decisions.md round 23).
+ *
+ * TWO KINDS, and the difference is who spoke:
+ *
+ * - 'claims' (Tier B) — an on-chain launch whose creator-declared socials name
+ *   a tracked handle. A claim is not an announcement: six handles had two or
+ *   three different tokens claiming them inside 8.5 minutes, and the owner's
+ *   own example already has an impostor.
+ * - 'posted' — the ACCOUNT ITSELF posted this address and it has not confirmed
+ *   on chain yet (not indexed, a read failed, no client). The row IS the retry
+ *   queue: `next_attempt_at` carries the round-17b ladder and `attempts` counts
+ *   the tries, so a post whose token indexes four minutes later still fires
+ *   instead of being lost to one silent miss.
+ */
+export const launchCandidates = pgTable(
+  'launch_candidates',
+  {
+    id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
+    monitorId: integer('monitor_id')
+      .notNull()
+      .references(() => launchMonitors.id, { onDelete: 'cascade' }),
+    tokenAddress: text('token_address').notNull(), // stored lowercase
+    symbol: text('symbol'),
+    seenAt: timestamp('seen_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Which of the two rows above this is. Defaulted so Tier B reads unchanged. */
+    kind: text('kind', { enum: ['claims', 'posted'] })
+      .notNull()
+      .default('claims'),
+    /** The post that carried the address, and when it said it ('posted' only). */
+    postId: text('post_id'),
+    postUrl: text('post_url'),
+    postedAt: timestamp('posted_at', { withTimezone: true }),
+    /** Confirmation attempts so far, and when the next one is due. */
+    attempts: integer('attempts').notNull().default(0),
+    /**
+     * NULL means the queue is finished with this row: it confirmed, it aged out,
+     * or the rejection was definitive. A pending row always carries one.
+     */
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }),
+    /** Why the last attempt did not confirm — printed on the board verbatim. */
+    lastReason: text('last_reason'),
+  },
+  (t) => [
+    // One row per (monitor, token): the scan replays recent launches, and a
+    // second sighting of the same claim is not a second candidate. A 'claims'
+    // row the account then posts itself is UPGRADED to 'posted' in place.
+    uniqueIndex('launch_candidates_monitor_token_uq').on(t.monitorId, t.tokenAddress),
+    // The retry queue's own read: due rows, oldest first.
+    index('launch_candidates_next_attempt_idx').on(t.nextAttemptAt),
+  ],
 );

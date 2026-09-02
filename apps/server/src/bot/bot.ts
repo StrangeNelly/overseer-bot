@@ -16,9 +16,11 @@ import {
   extractEvmAddresses,
   ROBINHOOD_CHAIN_ID,
   WATCH_CAP_PER_MEMBER,
+  XWATCH,
   watchCapMessage,
   type AlertSettings,
   type DiscoverySettings,
+  type XWatchSettings,
 } from '@groupie/shared';
 import { publish } from '../events.js';
 import { clampLaunchMinEth, discoverySettingsOf } from '../discovery/settings.js';
@@ -32,6 +34,7 @@ import {
 import {
   alertSettingsOf,
   clampAlertSetting,
+  fmtElapsed,
   fmtUsd,
   shortAddress,
   tokenLabel,
@@ -40,6 +43,9 @@ import { pollTokenNow } from '../poller/scheduler.js';
 import { memberDisplayName, rememberMemberName } from '../api/membership.js';
 import { findGroupCall, markCallDead, restoreCall } from '../verdict.js';
 import type { Config } from '../config.js';
+import type { TweetWatcher } from '../xwatch/client.js';
+import { countSlots, listMonitors, trackMonitor, untrackMonitor } from '../xwatch/monitors.js';
+import { xwatchSettingsOf } from '../xwatch/settings.js';
 import { ingestMessage, upsertToken } from './ingest.js';
 
 type GroupRow = typeof groups.$inferSelect;
@@ -439,9 +445,191 @@ async function handleWatchlist(
   );
 }
 
+/* ------------------------------------------------ X launch monitor (round 23) */
+
+/**
+ * What the bot needs to run `track`/`untrack`/`tracking`: whether the watcher
+ * is live IN THIS PROCESS, and the provider seam the add step resolves a handle
+ * against. Both null/false on a deployment without an X key, and the replies
+ * say so rather than accepting a handle nothing will ever check.
+ */
+export interface XWatchDeps {
+  enabled: boolean;
+  watcher: TweetWatcher | null;
+}
+
+const XWATCH_OFF: XWatchDeps = { enabled: false, watcher: null };
+
+/** `1.9K`, `12.4K`, `640` — a follower count at the precision it deserves. */
+export function fmtCount(value: number | null | undefined): string | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1).replace(/\.0$/, '')}K`;
+  return String(Math.round(value));
+}
+
+/**
+ * The X-monitor half of `/overseer alerts`. Its own line, like discovery's: a
+ * different family (one message per monitor, ever, replying to the message that
+ * asked for it) and a different off switch.
+ */
+export function xwatchSummary(s: XWatchSettings, enabled: boolean): string {
+  if (!enabled) return 'Launch monitor: off (not configured)';
+  return (
+    `Launch monitor: ping ${s.launchPing ? 'on' : 'off (board only)'} · ` +
+    `${XWATCH.capPerGroup} handles per group, ${XWATCH.capPerMember} per member. ` +
+    `Tune: /overseer set launchping on|off`
+  );
+}
+
+/** `/overseer track @handle [note]` — one line back, whatever happens. */
+export async function handleTrack(
+  db: Db,
+  ctx: Context,
+  group: GroupRow,
+  args: string[],
+  userId: number,
+  xwatch: XWatchDeps,
+): Promise<void> {
+  const handle = args[0];
+  if (!handle) {
+    await ctx.reply('Usage: /overseer track @handle [note]');
+    return;
+  }
+  if (!xwatch.enabled || xwatch.watcher === null) {
+    await ctx.reply('The launch monitor is off on this deployment (no X key).');
+    return;
+  }
+  const outcome = await trackMonitor(db, xwatch.watcher, {
+    groupId: group.id,
+    userId,
+    handle,
+    note: args.slice(1).join(' ') || null,
+    // The ping replies to THIS message — the answer lands where the question
+    // was asked, and a monitor added from the board has no message to reply to.
+    messageId: ctx.message?.message_id ?? null,
+  });
+  if (!outcome.ok) {
+    switch (outcome.reason) {
+      case 'invalid':
+        await ctx.reply('That is not an X handle. Usage: /overseer track @handle [note]');
+        return;
+      case 'disabled':
+        // Unreachable (the guard above answers first), and kept so the switch
+        // stays exhaustive over the outcome union.
+        await ctx.reply('The launch monitor is off on this deployment (no X key).');
+        return;
+      case 'not_found':
+        await ctx.reply(`X has no account ${handle.startsWith('@') ? handle : `@${handle}`}.`);
+        return;
+      case 'suspended':
+        await ctx.reply(`${handle.startsWith('@') ? handle : `@${handle}`} is suspended on X.`);
+        return;
+      case 'provider':
+        // Not "no such account": we could not ask, and saying otherwise would
+        // be a claim about somebody's account.
+        await ctx.reply('Could not reach X just now — try again in a minute.');
+        return;
+      case 'duplicate':
+        await ctx.reply(
+          `Already tracking @${handle.replace(/^@/, '').toLowerCase()} (${outcome.status}).`,
+        );
+        return;
+      case 'cap_group':
+        await ctx.reply(
+          `This group already tracks ${outcome.cap} accounts — /overseer untrack @handle to free one.`,
+        );
+        return;
+      case 'cap_member':
+        await ctx.reply(
+          `You already track ${outcome.cap} accounts — /overseer untrack @handle to free one.`,
+        );
+        return;
+    }
+  }
+  // The board names the adder; a command is the moment the chat hands us a name
+  // for a member who may never have posted a call.
+  await rememberMemberName(
+    db,
+    group.id,
+    userId,
+    ctx.from && !ctx.from.is_bot ? displayName(ctx.from) : null,
+  );
+  const followers = fmtCount(outcome.monitor.followers);
+  await ctx.reply(
+    `Tracking @${outcome.monitor.xHandle}${followers === null ? '' : ` (${followers} followers)`}. ` +
+      `${outcome.heldByMember} of ${XWATCH.capPerMember} slots used.`,
+  );
+}
+
+export async function handleUntrack(
+  db: Db,
+  ctx: Context,
+  group: GroupRow,
+  args: string[],
+): Promise<void> {
+  const handle = args[0];
+  if (!handle) {
+    await ctx.reply('Usage: /overseer untrack @handle');
+    return;
+  }
+  const stopped = await untrackMonitor(db, group.id, { handle });
+  const printed = handle.startsWith('@') ? handle : `@${handle}`;
+  await ctx.reply(stopped ? `Stopped tracking @${stopped.xHandle}.` : `${printed} wasn't tracked.`);
+}
+
+/** Telegram caps a message at 4096 chars; the list is capped well under it. */
+const TRACKING_MAX_LINES = 30;
+
+/** One line per monitor: handle · followers · status · added by · age. */
+export async function handleTracking(
+  db: Db,
+  ctx: Context,
+  group: GroupRow,
+  xwatch: XWatchDeps,
+): Promise<void> {
+  const rows = await listMonitors(db, group.id);
+  if (rows.length === 0) {
+    await ctx.reply('Tracking nothing yet. /overseer track @handle to follow a pre-launch account.');
+    return;
+  }
+  const nowMs = Date.now();
+  // Who ADDED it, not what the X account calls itself: the same two sources the
+  // board's slot holders come from, asked once per distinct member.
+  const adders = new Map<number, string | null>();
+  for (const row of rows.slice(0, TRACKING_MAX_LINES)) {
+    const userId = Number(row.addedBy);
+    if (adders.has(userId)) continue;
+    adders.set(userId, await memberDisplayName(db, group.id, userId));
+  }
+  const lines = rows.slice(0, TRACKING_MAX_LINES).map((row) => {
+    const followers = fmtCount(row.followers);
+    const adder = adders.get(Number(row.addedBy));
+    return [
+      `@${row.xHandle}`,
+      followers === null ? null : `${followers} followers`,
+      row.status,
+      adder ? `added by ${adder}` : null,
+      `${fmtElapsed(nowMs - row.addedAt.getTime())} ago`,
+    ]
+      .filter((part): part is string => part !== null)
+      .join(' · ');
+  });
+  if (rows.length > TRACKING_MAX_LINES) lines.push(`+${rows.length - TRACKING_MAX_LINES} more`);
+  // SLOTS, not rows: a launched or expired monitor is still listed and still
+  // costs nobody a slot, so the count against the cap has to be the same one
+  // the cap itself is enforced on.
+  const used = countSlots(rows).used;
+  const header = xwatch.enabled
+    ? `Tracking ${used}/${XWATCH.capPerGroup}:`
+    : `Tracking ${used}/${XWATCH.capPerGroup} (monitor off — no X key):`;
+  await ctx.reply(`${header}\n${lines.join('\n')}`);
+}
+
 const SET_USAGE =
   'Usage: /overseer set nuke <pct 5-95> <minutes 5-60> · /overseer set buyopp <pct 5-95> · ' +
-  '/overseer set launch <eth, 0 mutes> · /overseer set grads on|off';
+  '/overseer set launch <eth, 0 mutes> · /overseer set grads on|off · ' +
+  '/overseer set launchping on|off';
 
 /** A decimal argument — ETH thresholds are not whole numbers. */
 function parseDecimal(raw: string | undefined): number | null {
@@ -467,7 +655,7 @@ function parseToggle(raw: string | undefined): boolean | null {
 async function mergeSettings(
   db: Db,
   groupId: number,
-  key: 'alerts' | 'discovery',
+  key: 'alerts' | 'discovery' | 'xwatch',
   patch: Record<string, unknown>,
 ): Promise<unknown> {
   const current = sql`case when jsonb_typeof(${groups.settings}) = 'object' then ${groups.settings} else '{}'::jsonb end`;
@@ -497,6 +685,7 @@ export async function handleSet(
   group: GroupRow,
   args: string[],
   discoveryEnabled: boolean,
+  xwatch: XWatchDeps = XWATCH_OFF,
 ): Promise<void> {
   const what = args[0]?.toLowerCase();
   const pct = parseWholeNumber(args[1]);
@@ -525,6 +714,22 @@ export async function handleSet(
     }
     const settings = await mergeSettings(db, group.id, 'discovery', { gradsOn: on });
     await ctx.reply(discoverySetReply(discoverySettingsOf(settings), discoveryEnabled));
+    return;
+  }
+  // Round 23: the launch ping. The write happens whether or not the watcher
+  // runs here — a group configuring before the key lands is doing something
+  // reasonable — and the reply says which of those two worlds it is in.
+  if (what === 'launchping' || what === 'ping') {
+    const on = parseToggle(args[1]);
+    if (on === null) {
+      await ctx.reply(SET_USAGE);
+      return;
+    }
+    const settings = await mergeSettings(db, group.id, 'xwatch', { launchPing: on });
+    const summary = xwatchSummary(xwatchSettingsOf(settings), true);
+    await ctx.reply(
+      xwatch.enabled ? summary : `${summary}\n(The launch monitor is off on this deployment.)`,
+    );
     return;
   }
 
@@ -566,6 +771,7 @@ export async function handleGroupieCommand(
   rawArgs: string,
   userId: number,
   discoveryEnabled: boolean,
+  xwatch: XWatchDeps = XWATCH_OFF,
 ): Promise<boolean> {
   const args = rawArgs.trim().split(/\s+/).filter(Boolean);
   switch (args[0]?.toLowerCase()) {
@@ -587,14 +793,26 @@ export async function handleGroupieCommand(
     case 'watchlist':
       await handleWatchlist(db, ctx, group, userId);
       return false;
+    // Round 23. A handle argument is never a contract address, so none of the
+    // three consumes one and the message still falls through to ingestion.
+    case 'track':
+      await handleTrack(db, ctx, group, args.slice(1), userId, xwatch);
+      return false;
+    case 'untrack':
+      await handleUntrack(db, ctx, group, args.slice(1));
+      return false;
+    case 'tracking':
+      await handleTracking(db, ctx, group, xwatch);
+      return false;
     case 'alerts':
       await ctx.reply(
         `${alertsSummary(alertSettingsOf(group.settings))}\n\n` +
-          discoverySummary(discoverySettingsOf(group.settings), discoveryEnabled),
+          `${discoverySummary(discoverySettingsOf(group.settings), discoveryEnabled)}\n\n` +
+          xwatchSummary(xwatchSettingsOf(group.settings), xwatch.enabled),
       );
       return false;
     case 'set':
-      await handleSet(db, ctx, group, args.slice(1), discoveryEnabled);
+      await handleSet(db, ctx, group, args.slice(1), discoveryEnabled, xwatch);
       return false;
     default: {
       // The t.me deep link opens the board inside Telegram; the plain URL is
@@ -615,7 +833,12 @@ export async function handleGroupieCommand(
  * `/overseer alerts` can say "off (not configured)" instead of quoting
  * thresholds nothing will ever act on (round 18/20 review).
  */
-export function createBot(config: Config, db: Db, discoveryEnabled = false): Bot {
+export function createBot(
+  config: Config,
+  db: Db,
+  discoveryEnabled = false,
+  xwatch: XWatchDeps = XWATCH_OFF,
+): Bot {
   const bot = new Bot(config.botToken);
 
   // Being added to / removed from a group is the entire onboarding flow.
@@ -656,6 +879,7 @@ export function createBot(config: Config, db: Db, discoveryEnabled = false): Bot
         ctx.match,
         ctx.from.id,
         discoveryEnabled,
+        xwatch,
       );
     }
     if (!consumedAddress) await next();

@@ -32,8 +32,12 @@ export function startAlertDelivery(db: Db, api: Api): () => void {
         // a plain send; watched-but-never-called tokens have no call row, and a
         // discovery alert (rounds 18/20) has no token at all, so it is always a
         // fresh message.
+        // An alert that names its OWN reply target keeps it (round 23: the
+        // launch ping answers the message that added the monitor, and there is
+        // no call row to find it from). Everything else threads onto the call.
+        const named = event.replyToMessageId ?? null;
         const call =
-          event.tokenId === null
+          named !== null || event.tokenId === null
             ? undefined
             : (
                 await db
@@ -41,12 +45,13 @@ export function startAlertDelivery(db: Db, api: Api): () => void {
                   .from(calls)
                   .where(and(eq(calls.groupId, event.groupId), eq(calls.tokenId, event.tokenId)))
               )[0];
+        const replyTo = named ?? call?.messageId ?? null;
         await api.sendMessage(group.chatId, event.message, {
           link_preview_options: { is_disabled: true },
-          ...(call
+          ...(replyTo !== null
             ? {
                 reply_parameters: {
-                  message_id: call.messageId,
+                  message_id: replyTo,
                   allow_sending_without_reply: true,
                 },
               }

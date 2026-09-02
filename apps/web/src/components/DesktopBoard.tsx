@@ -4,6 +4,13 @@ import { WATCH_CAP_PER_MEMBER, fmtDurationHours } from '@groupie/shared';
 import { deriveInPlay, mySlots } from '../derive';
 import { DISCOVERY_DORMANT_LINE, feedStatusText } from '../discovery';
 import type { DiscoverySummary } from '../discovery';
+import {
+  UPCOMING_DORMANT_LINE,
+  checkStatusText,
+  summaryCountsText,
+  summaryNewestText,
+} from '../upcoming';
+import type { UpcomingSummary } from '../upcoming';
 import { fmtAge, fmtHours, fmtUsd } from '../format';
 import type { DeadProps } from '../dead';
 import { deadForCard } from '../dead';
@@ -85,6 +92,7 @@ interface DesktopBoardProps {
   rangeSummary: RangeSummary | null;
   sleepersSummary: SleepersSummary | null;
   discoverySummary: DiscoverySummary | null;
+  upcomingSummary: UpcomingSummary | null;
   onOpenTab: (section: SectionKey) => void;
   /** 3G: the address a watch-move announcement just named. */
   alertedAddress: string | null;
@@ -151,6 +159,7 @@ export function DesktopBoard({
   rangeSummary,
   sleepersSummary,
   discoverySummary,
+  upcomingSummary,
   onOpenTab,
   alertedAddress,
 }: DesktopBoardProps) {
@@ -569,6 +578,50 @@ export function DesktopBoard({
                 ]
                   .filter((line): line is string => line !== null)
                   .join(' · ')}
+              </p>
+            </>
+          )}
+        </Zone>
+
+        {/*
+          ...and UPCOMING under Discovery (docs/decisions.md round 23): the same
+          kind of door, one step further from the board — these are accounts,
+          not coins, and none of them has launched anything yet.
+        */}
+        <Zone
+          tone="cyan"
+          headline="UPCOMING"
+          count={upcomingSummary && upcomingSummary.enabled ? upcomingSummary.tracked : null}
+          headExtra={
+            <button type="button" className="zone-open" onClick={() => onOpenTab('upcoming')}>
+              open view ▸
+            </button>
+          }
+        >
+          {upcomingSummary === null ? (
+            <p className="summary-line">open the view to track a pre-launch account</p>
+          ) : !upcomingSummary.enabled ? (
+            // The same honest line the view itself shows: a dormant watcher
+            // never renders as a set of accounts nobody has posted from.
+            <p className="summary-line">{UPCOMING_DORMANT_LINE}</p>
+          ) : (
+            <>
+              <p className="summary-line">
+                <strong>{summaryCountsText(upcomingSummary)}</strong>
+                {` · ${summaryNewestText(upcomingSummary, now)}`}
+              </p>
+              {/* A watcher that has stopped checking leads: the counts under it
+                  are whatever the last successful poll left behind. */}
+              <p className="zone-foot">
+                {checkStatusText({
+                  enabled: upcomingSummary.enabled,
+                  lastCheckAt: upcomingSummary.lastCheckAt,
+                  hasActive: upcomingSummary.hasActive,
+                  hasMonitors: upcomingSummary.hasMonitors,
+                  fetchedAt: upcomingSummary.fetchedAt,
+                  now,
+                  serverAt: upcomingSummary.serverAt,
+                }) ?? `${upcomingSummary.capPerGroup} monitors per group · the account's own post pings`}
               </p>
             </>
           )}

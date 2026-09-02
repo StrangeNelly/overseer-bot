@@ -9,7 +9,13 @@ export type BoardSectionKey = keyof BoardResponse['sections'];
  * a Sleepers row has no call to file under. Ranging and Sleepers each have their
  * own endpoint and their own controls, but they ride the same strip.
  */
-export type SectionKey = BoardSectionKey | 'watch' | 'ranging' | 'sleepers' | 'discovery';
+export type SectionKey =
+  | BoardSectionKey
+  | 'watch'
+  | 'ranging'
+  | 'sleepers'
+  | 'discovery'
+  | 'upcoming';
 
 // Reviving sits SECOND, right after Fresh: the owner asked for a comeback
 // banner, and a coin that just clawed its way out of rug probation is the most
@@ -37,6 +43,11 @@ export const SECTIONS = [
   { key: 'ranging', label: 'Ranging', short: 'RNG', tone: 'cyan' },
   { key: 'sleepers', label: 'Sleepers', short: 'SLPRS', tone: 'cyan' },
   { key: 'discovery', label: 'Discovery', short: 'DSCVR', tone: 'cyan' },
+  // Round 23: pre-launch X accounts. It sits with the other two uncurated
+  // surfaces because nothing on it is a call either — it is a list of accounts
+  // the group is waiting on, and the only thing it promises is a ping when one
+  // of them posts a contract itself.
+  { key: 'upcoming', label: 'Upcoming', short: 'UPCMG', tone: 'cyan' },
 ] as const satisfies readonly {
   key: SectionKey;
   label: string;

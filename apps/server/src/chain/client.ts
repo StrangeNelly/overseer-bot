@@ -62,6 +62,7 @@ export interface LogQuery {
 export const METHOD_CU: Readonly<Record<string, number>> = {
   eth_getLogs: 75,
   eth_call: 26,
+  eth_getCode: 26,
   eth_getBlockByNumber: 16,
   eth_getTransactionByHash: 17,
   eth_getTransactionReceipt: 15,
@@ -124,6 +125,16 @@ export interface ChainClient {
    * that as unknown.
    */
   call(to: string, data: string, blockTag?: number): Promise<string | null>;
+  /**
+   * The deployed bytecode at an address — '0x' for an EOA or an address nothing
+   * was ever deployed to, and null when the node could not be asked.
+   *
+   * OPTIONAL on the interface so a client built for the log listener alone
+   * (and every test double of one) stays valid; round 23's confirmation reads
+   * it and treats an absent method exactly like a failed read — unknown, which
+   * is silence, never a claim that the address is not a contract.
+   */
+  getCode?(address: string): Promise<string | null>;
   /**
    * The native value a transaction carried, in wei — the only place a
    * native-ETH v4 deposit is written down, since native ETH moves no ERC-20
@@ -592,6 +603,20 @@ export function createChainClient(rpcUrl: string | null): ChainClient | null {
       } catch {
         // A revert (no such function, self-destructed token) is an answer, not
         // a failure: the caller reads null as "unknown".
+        return null;
+      }
+    },
+    async getCode(address) {
+      try {
+        const code = await client.request({
+          method: 'eth_getCode',
+          params: [address as never, 'latest' as never],
+        } as never);
+        return typeof code === 'string' ? code : null;
+      } catch {
+        // A node that would not answer is UNKNOWN, never "no code there": the
+        // caller's next step is a claim about a contract, so it must not be
+        // reached on a failure.
         return null;
       }
     },

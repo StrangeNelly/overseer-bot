@@ -47,8 +47,16 @@ export type GroupieEvent =
       type: 'alert_fired';
       groupId: number;
       tokenId: number | null;
-      alertType: 'nuke' | 'buy_opp' | 'launch' | 'graduation';
+      alertType: 'nuke' | 'buy_opp' | 'launch' | 'graduation' | 'x_launch';
       message: string;
+      /**
+       * Round 23: the message to REPLY to, when the alert has one of its own.
+       * A launch ping answers the chat message that added the monitor — which
+       * is not the coin's call message (there is no call), so it cannot be
+       * looked up from the token the way a watchlist alert's is. Null or absent
+       * means a fresh message.
+       */
+      replyToMessageId?: number | null;
     };
 
 const emitter = new EventEmitter();

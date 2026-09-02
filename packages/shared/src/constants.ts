@@ -589,6 +589,113 @@ export function requiredVolumeUsd(mcapUsd: number): number {
   return 170 * mcapUsd ** 0.4114;
 }
 
+/**
+ * The X launch monitor (docs/decisions.md round 23, docs/research-x-monitor.md).
+ *
+ * A tracked account's OWN post carrying an address that CONFIRMS on Robinhood
+ * Chain is the only thing that pings — never "a token cites the handle", which
+ * the chain measurement showed is worthless (101 of 166 X-linked launches in one
+ * 8-minute window pointed at someone else's tweet, and the owner's own example
+ * already has a $31K impostor).
+ */
+export const XWATCH = {
+  /**
+   * The ONE cadence knob: how often the runner asks the provider for new posts.
+   *
+   * One search call per shard per poll, and a shard holds ~25 handles, so at 60s
+   * a group's whole watchlist costs 43,200 calls/month — about $5.20 at
+   * twitterapi.io's $0.00012 per call, plus $0.00015 per post returned. Doubling
+   * this halves that bill and doubles the post -> ping latency.
+   */
+  pollSeconds: 60,
+  /**
+   * twitterapi.io caps a FILTER RULE's `value` at 255 characters (verified
+   * against their API reference 2026-09-03), which is ~12-14 `from:` handles.
+   * This build polls `advanced_search` instead (see xwatch/twitterapi.ts), so
+   * the number below is unused by the shipped adapter and kept for the rule
+   * adapter a webhook deployment would need.
+   */
+  ruleValueMaxChars: 255,
+  /**
+   * ...and what the SEARCH path actually shards to: the query also carries a
+   * ` since_time:<10 digits>` suffix, so the handle terms get 480 of the
+   * documented 512 characters — one query for about 25 handles.
+   */
+  searchQueryMaxChars: 480,
+  /**
+   * Pages one poll will read per shard before it stops and leaves the rest.
+   *
+   * The provider serves NEWEST FIRST, so a page that stops at this bound has an
+   * unread OLDER stretch behind it and the runner holds its cursor rather than
+   * stepping over the gap (xwatch/runner.ts) — the whole window is re-read next
+   * poll. Ten pages is what keeps that re-read rare: a busy minute costs a few
+   * more calls once instead of stalling the cursor every poll.
+   */
+  maxPagesPerPoll: 10,
+  /**
+   * Addresses one post can put on the confirmation queue. A launch announcement
+   * carries one contract; a post carrying a dozen address-shaped strings is a
+   * thread of somebody else's coins, and queueing all of them would spend the
+   * chain budget on noise. The FIRST few are kept (the detector reads text
+   * before links), and the monitor fires on the first that confirms.
+   */
+  maxAddressesPerPost: 3,
+  /** Candidates served per monitor, newest first — a popular handle attracts impostors. */
+  candidatesPerMonitor: 10,
+  /**
+   * How far back a poll looks when it has no cursor, and the floor under every
+   * post the detector will consider. A restart — or a freshly tracked handle —
+   * must never replay yesterday's contract address into the chat.
+   */
+  lookbackMinutes: 10,
+  /** Handles one group may track, and how many of those one member may hold. */
+  capPerGroup: 12,
+  capPerMember: 3,
+  /** A monitor with no post for this long expires (the account went quiet). */
+  expireDays: 60,
+  /**
+   * A confirmed address whose EARLIEST EVIDENCE (our own launch row, else the
+   * PONS launch block, else the first pool) is older than this is not a launch
+   * the post announced; the ping is not sent and the candidate stops retrying.
+   */
+  launchMaxPoolAgeHours: 24,
+  /**
+   * The hijack hold (the @vladtenev case, 2026-07-23: the token existed 46
+   * minutes before the post). A token created more than this long before the
+   * post is recorded on the board with NO chat message — the account may not be
+   * the account any more, and a ping is a claim.
+   */
+  hijackHoldMinutes: 10,
+  /** No successful poll for this long and the board says the watcher is stalled. */
+  stallMinutes: 10,
+  /** How often a tracked account's profile (followers, name, bio) is re-read. */
+  refreshProfileMinutes: 30,
+  /** Profiles re-read per housekeeping pass, oldest refresh first. */
+  profilesPerPass: 20,
+  /**
+   * The housekeeping tick. It is the FASTEST RUNG of the pending-confirmation
+   * ladder (POLL_TIERS.freshSeconds) because that queue is what needs it; the
+   * profile, expiry and Tier-B passes inside it keep their own slower clocks.
+   */
+  housekeepingSeconds: 45,
+  /** Pending confirmations retried per housekeeping tick. */
+  pendingPerPass: 20,
+  /**
+   * Null `socials()` answers before Tier B stops asking about an address.
+   *
+   * A revert and a TRANSPORT FAILURE arrive as the same null from ChainClient,
+   * and retiring on the first one would let a single RPC hiccup hide a real
+   * claim for the rest of the process's life. Three says "this token has no
+   * socials()", which is most of the chain and costs three calls, once.
+   */
+  tierBNullReadsToRetire: 3,
+} as const;
+
+/** groups.settings.xwatch defaults. Round 23 ships with the launch ping ON. */
+export const XWATCH_DEFAULTS = {
+  launchPing: true,
+} as const;
+
 /** Snapshot age tiers (docs/plan.md: snapshots are pruned by age tiers). */
 export const SNAPSHOT_RETENTION = {
   /** Older than this: thinned to one row per bucket per token. */

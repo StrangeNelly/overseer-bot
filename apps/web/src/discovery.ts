@@ -18,6 +18,7 @@
 
 import { DISCOVERY } from '@groupie/shared';
 import type { DiscoveryEntry, DiscoveryFilters, DiscoveryResponse } from '@groupie/shared';
+import { stallLine } from './feedStall';
 import { ageMs, fmtAge, fmtEth, fmtUsd, shortAddress } from './format';
 
 /** The two windows the owner asked for. 24h is the default view. */
@@ -205,20 +206,9 @@ export function subline(entry: DiscoveryEntry, now: number): string {
  * The listener's own health, from `lastTickAt` (contract: the last successful
  * block read). Null means the feed is reading normally and has nothing to say.
  *
- * The verdict is made against the PAYLOAD, never against the wall clock:
- * `fetchedAt` is the client instant the response landed, and the gap between the
- * tick and that instant is the only thing that says anything about the listener.
- * A `now` that has run away from `fetchedAt` — a backgrounded tab, a laptop that
- * slept, a clock that jumped — ages the response, not the chain, so an old
- * payload says nothing about a stall at all rather than blaming the listener for
- * our own silence.
- *
- * `serverAt` is the server's own instant for the same response (its `Date`
- * header). `lastTickAt` is a server timestamp, so the lag is measured against
- * that clock when it is known: a device running ten minutes ahead of the server
- * would otherwise print a permanent stall over a listener ticking every 20s.
- * Only the freshness gate uses this device's clock, and both of its operands
- * come from it.
+ * The rule itself — judge the lag against the PAYLOAD and against the SERVER's
+ * clock, never against this device's — lives in `./feedStall`, which the X
+ * launch monitor's own status line shares (round 23).
  *
  * A dormant deployment is a different sentence entirely (DISCOVERY_DORMANT_LINE)
  * and is handled where the zones are drawn, so `enabled` false is silent here.
@@ -230,17 +220,17 @@ export function feedStatusText(
   now: number,
   serverAt: number | null = null,
 ): string | null {
-  if (!enabled) return null;
-  // An unparseable stamp is the same fact as a missing one: there is no read we
-  // can name. It must not become a stall claim with an em dash for an age.
-  const lag = ageMs(lastTickAt, serverAt ?? fetchedAt ?? now);
-  if (lag === null) return DISCOVERY_WAITING_LINE;
-  if (fetchedAt === null || now - fetchedAt >= DISCOVERY_PAYLOAD_FRESH_MS) return null;
-  if (lag < DISCOVERY_STALL_MS) return null;
-  // The printed age advances from the server's instant by the time elapsed on
-  // this device since the payload landed, so it ticks without inheriting skew.
-  const serverNow = serverAt !== null ? serverAt + (now - fetchedAt) : now;
-  return `feed stalled · last read ${fmtAge(lastTickAt, serverNow)} ago`;
+  return stallLine({
+    enabled,
+    at: lastTickAt,
+    fetchedAt,
+    now,
+    serverAt,
+    stallMs: DISCOVERY_STALL_MS,
+    freshMs: DISCOVERY_PAYLOAD_FRESH_MS,
+    waitingLine: DISCOVERY_WAITING_LINE,
+    noun: 'read',
+  });
 }
 
 /**

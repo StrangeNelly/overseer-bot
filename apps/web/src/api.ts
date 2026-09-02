@@ -6,11 +6,14 @@ import type {
   DiscoveryResponse,
   HandoffResponse,
   MeResponse,
+  ProjectEntry,
+  ProjectsResponse,
   RangeBoardResponse,
   RangeDurationHours,
   SleeperDurationHours,
   SleepersResponse,
   TelegramLoginAvailability,
+  TrackProjectRequest,
   WatchByAddressRequest,
 } from '@groupie/shared';
 
@@ -216,6 +219,39 @@ export function fetchDiscovery(
   // must read it against the server's clock, never this device's.
   return requestTimed<DiscoveryResponse>(`${groupPath(slug)}/discovery?${params.toString()}`, {
     signal,
+  });
+}
+
+/**
+ * UPCOMING: the pre-launch X accounts this group tracks (docs/decisions.md round
+ * 23). `enabled` false means no X provider key on this deployment — the watcher
+ * is dormant and the view says so rather than drawing an empty list.
+ *
+ * Timed: `lastCheckAt` in the body is a server timestamp, and the stall verdict
+ * must read it against the server's clock, never this device's.
+ */
+export function fetchUpcoming(slug: string, signal?: AbortSignal): Promise<Timed<ProjectsResponse>> {
+  return requestTimed<ProjectsResponse>(`${groupPath(slug)}/upcoming`, { signal });
+}
+
+/**
+ * Track an X account — the web half of `/overseer track @handle [note]`. 201
+ * with the new row, 409 when a cap is full or the handle is already tracked,
+ * 404 when the handle does not resolve on X. Every one of those carries the
+ * server's own sentence, which is what the banner prints.
+ */
+export function trackProject(slug: string, body: TrackProjectRequest): Promise<ProjectEntry> {
+  return request<ProjectEntry>(`${groupPath(slug)}/upcoming`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+/** ...and its reversal (`/overseer untrack @handle`): 204, any member. */
+export function untrackProject(slug: string, id: number): Promise<void> {
+  return request<void>(`${groupPath(slug)}/upcoming/${encodeURIComponent(String(id))}`, {
+    method: 'DELETE',
   });
 }
 
