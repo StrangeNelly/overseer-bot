@@ -202,8 +202,10 @@ export function discoverySummary(d: DiscoverySettings, enabled: boolean): string
   if (!enabled) return 'Discovery: off (not configured)';
   const launch =
     d.launchMinEth > 0 ? `launches ≥${d.launchMinEth} ETH` : 'launches muted';
+  // Round 22: graduations are board-only unless a group opts in, so the OFF
+  // state says where they still are rather than implying they are gone.
   return (
-    `Discovery: ${launch} · graduations ${d.gradsOn ? 'on' : 'off'} · ` +
+    `Discovery: ${launch} · graduations ${d.gradsOn ? 'on' : 'board only'} · ` +
     `max ${d.alertsPerHour}/h (the rest stay on the board). ` +
     `Tune: /overseer set launch <eth> (0 mutes) · /overseer set grads on|off`
   );

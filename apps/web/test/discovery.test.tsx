@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { DISCOVERY } from '@groupie/shared';
 import type { DiscoveryEntry, DiscoveryResponse } from '@groupie/shared';
 import { Discovery } from '../src/components/Discovery';
+import { fmtUsd } from '../src/format';
 import {
   DEFAULT_DISCOVERY_HOURS,
   DISCOVERY_DORMANT_LINE,
   DISCOVERY_WAITING_LINE,
+  GRADUATION_FLOOR_NOTE,
   asOfText,
   bundleText,
   deriveDiscoverySummary,
@@ -156,6 +159,15 @@ describe('Discovery — a launch row prints the facts, not a verdict', () => {
     expect(raw).not.toContain('launch block under 25%');
   });
 
+  it('says the graduation floor in the footnote, chips or no chips', () => {
+    expect(render(payload())).toContain('graduations under $15K are hidden');
+    // Round 22's floor is not one of the three chips: turning them all off does
+    // not turn it off, and the footnote keeps saying so.
+    expect(
+      render(payload({ filters: { xWeb: false, noBundles: false, noStocks: false } })),
+    ).toContain(GRADUATION_FLOOR_NOTE);
+  });
+
   it('dates a stale reading on the row itself', () => {
     const html = render(
       payload({ launches: [entry({ dataAsOf: new Date(NOW - 3 * HOUR).toISOString() })] }),
@@ -243,14 +255,24 @@ describe('discovery helpers — the stored controls', () => {
 
   it('names exactly the filters the payload applied', () => {
     expect(filtersSentence(payload())).toBe(
-      'showing only coins with an X account and a website, launch block under 25%, no tokenized stocks',
+      'showing only coins with an X account and a website, launch block under 25%, no tokenized stocks · graduations under $15K are hidden',
     );
     expect(
       filtersSentence(payload({ filters: { xWeb: false, noBundles: true, noStocks: false } })),
-    ).toBe('showing launch block under 25%');
+    ).toBe('showing launch block under 25% · graduations under $15K are hidden');
+  });
+
+  it('names the graduation floor even on the RAW stream — it is a floor, not a chip', () => {
+    // Round 22: with every chip off the sentence would otherwise promise a
+    // stream the payload does not contain.
     expect(
       filtersSentence(payload({ filters: { xWeb: false, noBundles: false, noStocks: false } })),
-    ).toBe('no filters applied — this is the raw stream');
+    ).toBe('no filters applied — this is the raw stream · graduations under $15K are hidden');
+    // The number is read off the shared constant, so the text cannot drift from
+    // the figure the server cut on.
+    expect(GRADUATION_FLOOR_NOTE).toBe(
+      `graduations under ${fmtUsd(DISCOVERY.graduationMinMcapUsd)} are hidden`,
+    );
   });
 
   it('snaps the chips back to the payload when a reload fails', () => {

@@ -16,6 +16,7 @@
  *    USDG-quoted pool never prints its ETH-equivalent as if it were the deposit.
  */
 
+import { DISCOVERY } from '@groupie/shared';
 import type { DiscoveryEntry, DiscoveryFilters, DiscoveryResponse } from '@groupie/shared';
 import { ageMs, fmtAge, fmtEth, fmtUsd, shortAddress } from './format';
 
@@ -243,19 +244,33 @@ export function feedStatusText(
 }
 
 /**
+ * The round-22 graduation floor, in words, read off the constant so the number
+ * in the sentence can never drift from the number the server cut on.
+ */
+export const GRADUATION_FLOOR_NOTE = `graduations under ${fmtUsd(
+  DISCOVERY.graduationMinMcapUsd,
+)} are hidden`;
+
+/**
  * What the footnote says the PAYLOAD did — never what the chips are asking for.
  *
  * Each filter is now its own query flag, so the sentence names exactly the ones
  * that survived: a chip that is still lit while its filter was dropped is the
  * failure this line exists to make impossible.
+ *
+ * The graduation floor is named on BOTH branches, the raw-stream one included:
+ * it is a floor rather than a chip (docs/decisions.md round 22), so "no filters
+ * applied" would otherwise promise a stream the payload does not contain.
  */
 export function filtersSentence(data: DiscoveryResponse): string {
   const applied: string[] = [];
   if (data.filters.xWeb) applied.push('only coins with an X account and a website');
   if (data.filters.noBundles) applied.push(`launch block under ${Math.round(data.bundleMaxPct)}%`);
   if (data.filters.noStocks) applied.push('no tokenized stocks');
-  if (applied.length === 0) return 'no filters applied — this is the raw stream';
-  return `showing ${applied.join(', ')}`;
+  if (applied.length === 0) {
+    return `no filters applied — this is the raw stream · ${GRADUATION_FLOOR_NOTE}`;
+  }
+  return `showing ${applied.join(', ')} · ${GRADUATION_FLOOR_NOTE}`;
 }
 
 /**

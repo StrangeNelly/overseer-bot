@@ -374,6 +374,20 @@ to discard the row.
   `data_as_of` is what the board prints as "read 3h ago"),
   `enrichIntervalMs` 30s (enrichment runs on its OWN loop, so a DexScreener
   batch or a GT back-off can never delay the next block range).
+- **`DISCOVERY.graduationMinMcapUsd` = 15,000** (round 22). A graduation whose
+  latest reading is under it is not served in the GRADUATED zone and never earns
+  a chat message. Read at SERVE time off `discovery_events.mcap_usd` — one WHERE
+  clause on the graduation query only — so a coin that climbs back over the floor
+  simply reappears, and `reenrichMinutes` (10) is what keeps the reading current
+  enough for that to mean anything. It is a FLOOR, not one of the three filter
+  chips: `xweb=0&bundles=0&stocks=0` still respects it, and the zone footnote
+  says "graduations under $15K are hidden" so the cut is never silent. A NULL
+  reading is not under the floor — unknown is not a verdict — and launches are
+  untouched, since a new pool legitimately opens under $15K.
+- **Graduation CHAT alerts are off by default** (round 22, owner):
+  `DISCOVERY_DEFAULTS.gradsOn` is `false`, so graduations are a board surface
+  unless a group opts in with `/overseer set grads on`. `/overseer alerts` reads
+  "graduations board only" in that state. Launch alerts are unchanged.
 
 ## Rates observed (2026-09-02, one 3,000-block ≈ 5-minute window)
 

@@ -287,8 +287,13 @@ export const DISCOVERY_DEFAULTS = {
    * so 5 is the floor rather than an aspiration. 0 mutes launch alerts.
    */
   launchMinEth: 5,
-  /** Whether filtered graduations are posted to the chat (round 20: wanted). */
-  gradsOn: true,
+  /**
+   * Whether filtered graduations are posted to the chat. Round 20 wanted them;
+   * round 22's owner call is that they are a BOARD surface — the GRADUATED zone
+   * carries the whole stream and the chat stays quiet unless a group opts in
+   * with `/overseer set grads on`.
+   */
+  gradsOn: false,
   /** Chat messages per hour across BOTH kinds; the overflow stays board-only. */
   alertsPerHour: 3,
   /**
@@ -319,6 +324,19 @@ export const DISCOVERY = {
    * chat threshold sits on top of this, never under it.
    */
   boardMinEth: 0.5,
+  /**
+   * A graduation whose LATEST reading is under this is not served in the
+   * GRADUATED zone and never earns a chat message (docs/decisions.md round 22,
+   * owner: "make sure they are removed from the list if they go back down below
+   * 15k"). A FLOOR, not a filter chip: it applies whatever the three filter
+   * flags say, and it is read at SERVE time off `discovery_events.mcap_usd`, so
+   * a coin that climbs back over it simply reappears.
+   *
+   * UNKNOWN IS NEVER A VERDICT: a null reading is not "under the floor" — a
+   * graduation we have no mcap for stays visible and prints "mcap unknown".
+   * Launches are untouched: their gate is the opening deposit, not the mcap.
+   */
+  graduationMinMcapUsd: 15_000,
   /** A pool older than this when we first see it is a backfill, not a launch. */
   maxDetectionAgeMinutes: 10,
   /** Default window of the discovery zones, in hours, and its ceiling. */

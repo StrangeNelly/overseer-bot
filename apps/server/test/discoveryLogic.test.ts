@@ -33,7 +33,7 @@ import {
   wordToBigInt,
   wordToSignedBigInt,
 } from '../src/chain/decode.js';
-import { passesDiscoveryFilters } from '../src/discovery/filters.js';
+import { passesDiscoveryFilters, passesGraduationFloor } from '../src/discovery/filters.js';
 import {
   decideLaunch,
   launchAlertQualifies,
@@ -510,6 +510,24 @@ describe('passesDiscoveryFilters', () => {
   });
 });
 
+describe('passesGraduationFloor (round 22)', () => {
+  it('drops a graduation under the floor and keeps one at it', () => {
+    expect(DISCOVERY.graduationMinMcapUsd).toBe(15_000);
+    expect(passesGraduationFloor({ kind: 'graduation', mcapUsd: 14_999 })).toBe(false);
+    expect(passesGraduationFloor({ kind: 'graduation', mcapUsd: 15_000 })).toBe(true);
+    expect(passesGraduationFloor({ kind: 'graduation', mcapUsd: 250_000 })).toBe(true);
+  });
+
+  it('does NOT hide a graduation we have no reading for', () => {
+    expect(passesGraduationFloor({ kind: 'graduation', mcapUsd: null })).toBe(true);
+  });
+
+  it('never touches a launch, however small', () => {
+    expect(passesGraduationFloor({ kind: 'launch', mcapUsd: 1_200 })).toBe(true);
+    expect(passesGraduationFloor({ kind: 'launch', mcapUsd: null })).toBe(true);
+  });
+});
+
 /* ---------------------------------------------------------------- settings */
 
 describe('discovery settings', () => {
@@ -521,6 +539,12 @@ describe('discovery settings', () => {
     });
     expect(discoverySettingsOf(null)).toEqual(discoverySettingsOf({}));
     expect(discoverySettingsOf('nonsense')).toEqual(discoverySettingsOf({}));
+  });
+
+  it('leaves graduations OFF until a group opts in (round 22)', () => {
+    expect(DISCOVERY_DEFAULTS.gradsOn).toBe(false);
+    expect(discoverySettingsOf({}).gradsOn).toBe(false);
+    expect(discoverySettingsOf({ discovery: { gradsOn: true } }).gradsOn).toBe(true);
   });
 
   it('merges only the keys it understands, and keeps 0 as the mute', () => {

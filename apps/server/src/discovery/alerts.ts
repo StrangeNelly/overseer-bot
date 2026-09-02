@@ -3,7 +3,7 @@ import { alerts, discoveryAlertDecisions, discoveryEvents, groups, type Db } fro
 import { DISCOVERY, DISCOVERY_DEFAULTS, type DiscoveryAlertType } from '@groupie/shared';
 import { publish } from '../events.js';
 import { tokenLabel } from '../poller/alertLogic.js';
-import { passesDiscoveryFilters } from './filters.js';
+import { passesDiscoveryFilters, passesGraduationFloor } from './filters.js';
 import { launchAlertQualifies } from './launchLogic.js';
 import { discoveryMessage } from './message.js';
 import { discoverySettingsOf } from './settings.js';
@@ -122,12 +122,25 @@ export async function insertDiscoveryAlert(
 export function qualifiesForChat(
   row: Pick<
     EventRow,
-    'kind' | 'twitterUrl' | 'websiteUrl' | 'isStock' | 'launchBlockPct' | 'initialLiquidityEth'
+    | 'kind'
+    | 'twitterUrl'
+    | 'websiteUrl'
+    | 'isStock'
+    | 'launchBlockPct'
+    | 'initialLiquidityEth'
+    | 'mcapUsd'
   >,
   settings: { launchMinEth: number; gradsOn: boolean },
 ): boolean {
   if (!passesDiscoveryFilters(row, DISCOVERY_DEFAULTS.bundleMaxPct)) return false;
-  if (row.kind === 'graduation') return settings.gradsOn;
+  if (row.kind === 'graduation') {
+    // Round 22: a graduation that has fallen back under the floor is not news,
+    // and the board is not showing it either. An UNKNOWN reading changes
+    // nothing here — it is not evidence of anything, so the group's own
+    // graduation switch stays the only question.
+    if (!passesGraduationFloor(row)) return false;
+    return settings.gradsOn;
+  }
   return launchAlertQualifies(row.initialLiquidityEth, settings.launchMinEth);
 }
 

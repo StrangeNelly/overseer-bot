@@ -173,6 +173,7 @@ function testApp(db: Db, running: boolean): Hono<ApiEnv> {
 
 const LAUNCH_ADDRESS = '0xdd050541fc432d4ce93f3286246a3bd086440ccd';
 const GRAD_ADDRESS = '0x446d76590389b371fbbf53a5d9649522d1946d7e';
+const GRAD_ADDRESS_2 = '0x9f2c1c9b6f4a1e2d3c4b5a69788796a5b4c3d2e1';
 const TICK_AT = new Date('2026-09-02T12:04:00.000Z');
 
 function eventRow(over: Partial<typeof discoveryEvents.$inferSelect> = {}) {
@@ -387,6 +388,71 @@ describe('GET /api/g/:slug/discovery', () => {
     );
   });
 
+  /* ------------------------------------------ round 22: the graduation floor */
+
+  const grad = (over: Partial<typeof discoveryEvents.$inferSelect> = {}) =>
+    eventRow({ id: 2, kind: 'graduation', tokenAddress: GRAD_ADDRESS, ...over });
+
+  it('drops a graduation that has fallen back under the floor, and keeps the one at it', async () => {
+    const { db } = makeDb(
+      routeScript(
+        [],
+        [
+          grad({ mcapUsd: 12_000 }),
+          grad({ id: 3, tokenAddress: GRAD_ADDRESS_2, mcapUsd: DISCOVERY.graduationMinMcapUsd }),
+        ],
+      ),
+    );
+    const body = (await (
+      await testApp(db, true).request(`/api/g/${SLUG}/discovery`)
+    ).json()) as DiscoveryResponse;
+    // AT the floor is on the board; a dollar under it is not.
+    expect(body.graduations.map((e) => e.address)).toEqual([GRAD_ADDRESS_2]);
+  });
+
+  it('applies the floor with every chip off too — a floor is not a filter chip', async () => {
+    const { db, calls } = makeDb(
+      routeScript(
+        [],
+        [grad({ mcapUsd: 12_000 }), grad({ id: 3, tokenAddress: GRAD_ADDRESS_2, mcapUsd: 40_000 })],
+      ),
+    );
+    const body = (await (
+      await testApp(db, true).request(`/api/g/${SLUG}/discovery?xweb=0&bundles=0&stocks=0`)
+    ).json()) as DiscoveryResponse;
+    expect(body.filters).toEqual({ xWeb: false, noBundles: false, noStocks: false });
+    expect(body.graduations.map((e) => e.address)).toEqual([GRAD_ADDRESS_2]);
+    expect(whereSql(find(calls, 'select:discoveryEvents')[1])).toContain('"mcap_usd"');
+  });
+
+  it('never hides a graduation whose mcap we could not read — unknown is not a verdict', async () => {
+    const { db } = makeDb(routeScript([], [grad({ mcapUsd: null })]));
+    const body = (await (
+      await testApp(db, true).request(`/api/g/${SLUG}/discovery`)
+    ).json()) as DiscoveryResponse;
+    expect(body.graduations.map((e) => e.address)).toEqual([GRAD_ADDRESS]);
+  });
+
+  it('leaves LAUNCHES alone: a new pool legitimately opens under the floor', async () => {
+    const { db, calls } = makeDb(routeScript([eventRow({ mcapUsd: 12_000 })]));
+    const body = (await (
+      await testApp(db, true).request(`/api/g/${SLUG}/discovery`)
+    ).json()) as DiscoveryResponse;
+    expect(body.launches).toHaveLength(1);
+    expect(whereSql(find(calls, 'select:discoveryEvents')[0])).not.toContain('"mcap_usd"');
+  });
+
+  it('renders the floor on the GRADUATION query only, at the shared constant', async () => {
+    const { db, calls } = makeDb(routeScript([eventRow()], [grad()]));
+    await testApp(db, true).request(`/api/g/${SLUG}/discovery`);
+    const [launchQuery, gradQuery] = find(calls, 'select:discoveryEvents');
+    expect(whereSql(launchQuery)).not.toContain('"mcap_usd"');
+    const rendered = dialect.sqlToQuery(gradQuery!.where!);
+    expect(rendered.sql).toContain('"mcap_usd" is null or');
+    expect(rendered.params).toContain(DISCOVERY.graduationMinMcapUsd);
+    expect(DISCOVERY.graduationMinMcapUsd).toBe(15_000);
+  });
+
   it('asks only for the kind requested', async () => {
     const { db, calls } = makeDb(routeScript([eventRow()]));
     await testApp(db, true).request(`/api/g/${SLUG}/discovery?kind=launch`);
@@ -443,6 +509,23 @@ describe('qualifiesForChat', () => {
     expect(qualifiesForChat(eventRow({ twitterUrl: null }), DEFAULT_DISCOVERY)).toBe(false);
     expect(qualifiesForChat(eventRow({ isStock: true }), DEFAULT_DISCOVERY)).toBe(false);
     expect(qualifiesForChat(eventRow({ launchBlockPct: 40 }), DEFAULT_DISCOVERY)).toBe(false);
+  });
+
+  it('refuses a graduation that has fallen back under the floor (round 22)', () => {
+    const under = eventRow({ kind: 'graduation', initialLiquidityEth: null, mcapUsd: 12_000 });
+    expect(qualifiesForChat(under, DEFAULT_DISCOVERY)).toBe(false);
+    const over = eventRow({ kind: 'graduation', initialLiquidityEth: null, mcapUsd: 20_000 });
+    expect(qualifiesForChat(over, DEFAULT_DISCOVERY)).toBe(true);
+  });
+
+  it('leaves an UNKNOWN mcap exactly where it was: the toggle is the only question', () => {
+    const unknown = eventRow({ kind: 'graduation', initialLiquidityEth: null, mcapUsd: null });
+    expect(qualifiesForChat(unknown, DEFAULT_DISCOVERY)).toBe(true);
+    expect(qualifiesForChat(unknown, { launchMinEth: 5, gradsOn: false })).toBe(false);
+  });
+
+  it('never applies the floor to a launch — a new pool opens small', () => {
+    expect(qualifiesForChat(eventRow({ mcapUsd: 12_000 }), DEFAULT_DISCOVERY)).toBe(true);
   });
 });
 
@@ -554,6 +637,40 @@ describe('deliverDiscoveryAlerts', () => {
     expect(find(calls, 'insert:decisions')[0]?.values).toMatchObject({ outcome: 'filtered' });
     // Nothing was attempted against `alerts` at all.
     expect(find(calls, 'insert:alerts')).toHaveLength(0);
+  });
+
+  /**
+   * Round 22, owner: graduations are a BOARD surface. The default is off, so a
+   * graduation that passes every filter and is minutes old still says nothing in
+   * the chat until the group has opted in.
+   */
+  const GRAD_EVENT = () => eventRow({ kind: 'graduation', initialLiquidityEth: null });
+
+  it('files a FILTERED decision for a graduation until the group opts in', async () => {
+    const { db, calls } = makeDb(scriptFor([GRAD_EVENT()]));
+    const events = await capture(() => deliverDiscoveryAlerts(db));
+    expect(events).toEqual([]);
+    expect(find(calls, 'insert:decisions')[0]?.values).toMatchObject({ outcome: 'filtered' });
+    expect(find(calls, 'insert:alerts')).toHaveLength(0);
+  });
+
+  it('...and posts it once /overseer set grads on has written the opt-in', async () => {
+    const { db } = makeDb(
+      scriptFor([GRAD_EVENT()], { settings: { discovery: { gradsOn: true } } }),
+    );
+    const events = await capture(() => deliverDiscoveryAlerts(db));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ alertType: 'graduation' });
+  });
+
+  it('still refuses an opted-in graduation that has fallen under the floor', async () => {
+    const { db, calls } = makeDb(
+      scriptFor([eventRow({ kind: 'graduation', initialLiquidityEth: null, mcapUsd: 12_000 })], {
+        settings: { discovery: { gradsOn: true } },
+      }),
+    );
+    expect(await deliverDiscoveryAlerts(db)).toBe(0);
+    expect(find(calls, 'insert:decisions')[0]?.values).toMatchObject({ outcome: 'filtered' });
   });
 
   it('short-circuits a group with alertsPerHour 0 BEFORE building a message', async () => {
@@ -703,11 +820,14 @@ describe('/overseer set launch | grads', () => {
     const off = makeDb({ 'update:groups': [[{ settings: { discovery: { gradsOn: false } } }]] });
     const [reply] = await set(off.db, ['grads', 'off']);
     expect(patchOf(find(off.calls, 'update:groups')[0])).toEqual({ gradsOn: false });
-    expect(reply).toContain('graduations off');
+    // Round 22: OFF is where graduations live by default, so the reply says
+    // where they still are rather than implying they are gone.
+    expect(reply).toContain('graduations board only');
 
-    const on = makeDb({ 'update:groups': [[{ settings: {} }]] });
-    await set(on.db, ['grads', 'on']);
+    const on = makeDb({ 'update:groups': [[{ settings: { discovery: { gradsOn: true } } }]] });
+    const [onReply] = await set(on.db, ['grads', 'on']);
     expect(patchOf(find(on.calls, 'update:groups')[0])).toEqual({ gradsOn: true });
+    expect(onReply).toContain('graduations on');
   });
 
   it('STILL writes the setting when the feed is off, but says the feed is off', async () => {
@@ -783,7 +903,11 @@ describe('discoverySummary', () => {
   it('names the threshold, the toggle and the cap', () => {
     const text = discoverySummary(discoverySettingsOf({}), true);
     expect(text).toContain('launches ≥5 ETH');
-    expect(text).toContain('graduations on');
+    // Round 22: the default is board-only, and the line says so in those words.
+    expect(text).toContain('graduations board only');
+    expect(discoverySummary({ launchMinEth: 5, gradsOn: true, alertsPerHour: 3 }, true)).toContain(
+      'graduations on',
+    );
     expect(text).toContain('max 3/h');
     expect(text).toContain('/overseer set launch');
     expect(text).toContain('/overseer set grads on|off');

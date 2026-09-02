@@ -17,6 +17,7 @@ import {
   type DiscoveryResponse,
 } from '@groupie/shared';
 import { readLastTickAt } from '../chain/cursor.js';
+import { passesGraduationFloor } from '../discovery/filters.js';
 import type { ApiEnv } from './membership.js';
 
 /**
@@ -178,6 +179,16 @@ function filterConditions(filters: DiscoveryFilters): SQL[] {
   return parts;
 }
 
+/**
+ * The round-22 floor, as SQL, for the GRADUATION query only (see
+ * discovery/filters.ts for the rule). Kept out of `filterConditions` on
+ * purpose: those three are chips a member can turn off, and this one is a floor
+ * that survives `xweb=0&bundles=0&stocks=0`. A launch query never gets it.
+ */
+function graduationFloorCondition(): SQL {
+  return sql`(${discoveryEvents.mcapUsd} is null or ${discoveryEvents.mcapUsd} >= ${DISCOVERY.graduationMinMcapUsd})`;
+}
+
 export function createDiscoveryRoutes(
   db: Db,
   discovery: { running: boolean },
@@ -224,7 +235,13 @@ export function createDiscoveryRoutes(
           .select()
           .from(discoveryEvents)
           .where(
-            and(eq(discoveryEvents.kind, kind), gte(discoveryEvents.at, since), ...conditions),
+            and(
+              eq(discoveryEvents.kind, kind),
+              gte(discoveryEvents.at, since),
+              ...conditions,
+              // Round 22: only the graduation query carries the mcap floor.
+              ...(kind === 'graduation' ? [graduationFloorCondition()] : []),
+            ),
           )
           .orderBy(sql`${discoveryEvents.at} desc`)
           .limit(SERVE_LIMIT),
@@ -246,6 +263,10 @@ export function createDiscoveryRoutes(
     const userId = c.get('userId');
 
     for (const row of rows) {
+      // The WHERE above already excluded these; this is the same rule stated
+      // once more where the payload is actually built, so a row that reaches
+      // here by any other path still cannot be served under the floor.
+      if (!passesGraduationFloor(row)) continue;
       const list = row.kind === 'launch' ? body.launches : body.graduations;
       if (list.length >= SERVE_LIMIT) continue;
       const address = row.tokenAddress.toLowerCase();
