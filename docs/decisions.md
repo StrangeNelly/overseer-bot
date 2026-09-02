@@ -28,6 +28,14 @@ Running record of decisions made with the owner. Newest at the bottom.
   - Died rows, Ranging cards, Sleepers rows, spotlight cards, list rows, half-sheet rows: all carry WATCH / WATCHING / WATCHING·YOU. Dead coins may be watched (alerts resume automatically on revival).
 - Neutral-framing law unchanged: the board prints numbers ("NARCO +41% in 1h — on watch"), never "buy-opp"/"nuke" labels.
 
+## 2026-09-03 — Graduation alerts, filtered (round 20, owner)
+
+- Owner, on the discovery list: graduation alerts are wanted, but the raw count may be too high — "strip it down to show only the ones with an X account and website", and "if we could somehow not show coins that have been heavily bundled, even better".
+- **Stream:** PONS graduations from the on-chain event (PoolGraduated on the verified PONS v2 factory/hook — signature from the verified ABI), through the shared on-chain client (Alchemy). Enriched via DexScreener batch (socials, website, mcap, liquidity, LP lock) — DS is cheap; zero GeckoTerminal.
+- **Filters (default ON, each a fact on the row):** (1) an X account AND a website present; (2) not heavily bundled — measured from the launch: the share of supply bought in the launch block (and the first few blocks) and how many wallets took it, read from the curve's Transfer logs; a graduation whose launch block absorbed ≥ the threshold (start 25% of supply) is hidden, and every visible row prints "launch block 12% · 9 wallets" so the number is never a hidden verdict; (3) not a tokenized stock. Thresholds live in constants, tunable later via `/overseer set`.
+- **Surfaces:** a GRADUATED board zone/tab (last 24h, filtered; the rows carry mcap, LP + lock %, X/web pills, launch-block share, WATCH) — always on, silent. Chat: one terse alert per passing graduation — "$SYM graduated · $84K mcap · LP $22K (locked 100%) · launch block 12% / 9 wallets · X · web" — with a per-hour cap (start 3/h; the rest stay board-only) and `/overseer set grads off` as the mute. Neutral wording throughout.
+- **Bundle:** with round 18 (Uniswap launches share the client, the enrichment and the same filters) into one "discovery" build after round 19 lands. Owner action required first: a free Alchemy account + app key for Robinhood Chain (Railway var), verified against the chain before build.
+
 ## 2026-09-03 — BUY OPP measures from the watch, not the peak (round 19, owner)
 
 - Owner: the buy-opp alert was firing off the coin's high ("down from its all time high"); the 30% drawdown must be measured from **the market cap when the coin was added to the watchlist**. Rationale accepted: a retrace from a peak nobody was watching is trivia; a drawdown from the member's own entry point is the opportunity they asked to hear about.
