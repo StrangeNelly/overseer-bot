@@ -1,8 +1,8 @@
 import { and, eq, gte, inArray, isNotNull, isNull, lt, max, ne, sql } from 'drizzle-orm';
-import { calls, snapshots, tokens, watches, type Db } from '@groupie/db';
+import { calls, snapshots, tokens, type Db } from '@groupie/db';
 import { THRESHOLDS } from '@groupie/shared';
 import { publish } from '../events.js';
-import { markTokenDead } from './markDead.js';
+import { markTokenDead, releaseWatches } from './markDead.js';
 import {
   hideVerdict,
   isProbationExpired,
@@ -318,20 +318,11 @@ async function runExpiryPass(db: Db, hiddenTokens: TokenRow[], nowMs: number): P
       publish({ type: 'call_binned', tokenId: token.id, callId: call.id, groupId: call.groupId });
     }
 
-    // A permanent rug frees its watch slots (round 15 review). The alert
-    // engine skips dead-phase tokens, so these watches could never fire again
-    // — but they would still count against their adders' 3-slot cap, with the
-    // card they could be unwatched from gone from every board. Every group's
-    // watch goes: the rug is a fact about the token, not about one group. A
-    // member who believes in the comeback can re-watch after the revival.
-    const released = await db
-      .update(watches)
-      .set({ active: false })
-      .where(and(eq(watches.tokenId, token.id), eq(watches.active, true)))
-      .returning({ groupId: watches.groupId });
-    for (const groupId of new Set(released.map((w) => w.groupId))) {
-      publish({ type: 'watch_changed', tokenId: token.id, groupId });
-    }
+    // A permanent rug frees its watch slots (round 15 review) — the same
+    // release the wrong-chain death runs, from the one helper both call.
+    // Unconditional here, like the bin above: a token that died of something
+    // else mid-probation still ends this pass as a permanent rug.
+    await releaseWatches(db, token.id);
 
     expired += 1;
     console.log(

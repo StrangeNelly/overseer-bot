@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import type { BoardCard } from '@groupie/shared';
+import { wrongChainOf, type BoardCard } from '@groupie/shared';
 import {
   RUNNER_MULTIPLE,
   isDied,
@@ -18,6 +18,7 @@ import {
   fmtMultiple,
   fmtRetrace,
   fmtSignedPct,
+  fmtUnresolvedNote,
   fmtUsd,
   multipleTone,
   shortAddress,
@@ -145,6 +146,11 @@ function fullTime(iso: string | null): string | undefined {
  * the column existed) says "last seen" instead of making the claim.
  */
 function deathMcap(card: BoardCard): string {
+  // Round 17b: a wrong-chain card has no money line to print at all — the
+  // address never traded on this chain, so there is no price to have died at
+  // and none to have "last seen". It says where the coin actually is instead.
+  const chain = wrongChainOf(card.deathReason);
+  if (chain) return `on ${chain.charAt(0).toUpperCase()}${chain.slice(1)}, not Robinhood Chain`;
   return card.mcapAtDeath !== null
     ? `${fmtUsd(card.mcapAtDeath)} at death`
     : `${fmtUsd(card.mcapUsd)} last seen`;
@@ -189,7 +195,12 @@ export function TokenCard({
   const reduced = useReducedMotion();
   const title = card.symbol ? `$${card.symbol}` : shortAddress(card.address);
   const died = isDied(card);
-  const unresolved = isUnresolved(card);
+  // Death wins, always (round 17b review). A wrong-chain card has no market
+  // numbers by definition, and a never-graduated one lost its, so both look
+  // "unresolved" to the derivation — and the row would print "indexing…" under
+  // a WRONG CHAIN badge. Every branch below reads this one flag, so the sub-line
+  // and the number column cannot disagree about which the card is.
+  const unresolved = !died && isUnresolved(card);
   const reviving = isReviving(card, now);
   const stale = isStale(card, now);
   const edge = statusEdge(card, now);
@@ -404,7 +415,7 @@ export function TokenCard({
           {unresolved ? (
             <>
               <span className="mult mult-null">—</span>
-              <span className="mcaps mcaps-null">indexing…</span>
+              <span className="mcaps mcaps-null">{fmtUnresolvedNote(card.calledAt, now)}</span>
             </>
           ) : died ? (
             <>

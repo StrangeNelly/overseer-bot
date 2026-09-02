@@ -128,6 +128,36 @@ export const POLL_TIERS = {
   deadRecentHours: 48,
   /** Confirmed dead and past that window: daily revival check. */
   deadSeconds: 86_400,
+  /**
+   * Round 17b, the unresolved back-off. An address nothing has indexed is the
+   * one tier that can retry forever without ever learning anything: the live
+   * case sat in FRESH for 8h at 45 seconds a try because it was a Base
+   * contract. New PONS launches index within minutes, so the fast tier only has
+   * to cover those minutes:
+   *
+   *   - `freshSeconds` for the first `unresolvedFastMinutes`,
+   *   - `activeSeconds` until `unresolvedSlowHours`,
+   *   - `idleSeconds` from there to the existing 48h never_graduated death.
+   *
+   * The middle tier runs to SIX hours rather than one (round 17b review): a CA
+   * pasted before its pool exists — a pre-launch call, which the group does
+   * make — takes its first reading, and therefore its mcap-at-call, whenever
+   * the tier next fires. Five minutes stale is a baseline worth having; an hour
+   * stale is the moat quietly mismeasured.
+   *
+   * Measured from first_seen_at, not from the last poll — the question being
+   * asked is "how long has nobody indexed this", and the answer must not reset
+   * because a poll was late.
+   */
+  unresolvedFastMinutes: 15,
+  unresolvedSlowHours: 6,
+  /**
+   * A wrong-chain verdict is permanent, so it waits longer than the fast tier
+   * does: an address pasted before its Robinhood pool exists that also has a
+   * twin on another chain (CREATE2 / omnichain deploys) must be given an hour
+   * for the pool to open and index before "not here" can mean anything.
+   */
+  wrongChainMinMinutes: 60,
 } as const;
 
 /**

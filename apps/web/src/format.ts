@@ -3,7 +3,7 @@
  * above, never scientific notation, and an em dash for every missing value.
  */
 
-import { SLEEPERS } from '@groupie/shared';
+import { SLEEPERS, wrongChainOf } from '@groupie/shared';
 
 const DASH = '—';
 
@@ -164,11 +164,32 @@ export function fmtSignedPct(pct: number | null | undefined): string {
 /**
  * Death reason as the board prints it: `liquidity_floor` -> `LIQ FLOOR`.
  * Unknown reasons still read as a label rather than a raw column value.
+ *
+ * `wrong_chain:base` carries its chain (round 17b) and would otherwise read
+ * "WRONG CHAIN:BASE" — the separator is the one the badges use elsewhere.
  */
 export function fmtDeathReason(reason: string | null | undefined): string | null {
   if (typeof reason !== 'string' || reason.length === 0) return null;
+  const chain = wrongChainOf(reason);
+  if (chain) return `WRONG CHAIN · ${chain.toUpperCase()}`;
   if (reason === 'liquidity_floor') return 'LIQ FLOOR';
   return reason.replace(/_/g, ' ').toUpperCase();
+}
+
+/**
+ * What an unresolved card says where a market cap would be (round 17b).
+ *
+ * "indexing…" is true for the first hour — new launches take minutes to appear
+ * — but an address still unindexed after that is very probably never going to
+ * be, and the card must stop implying that data is on its way.
+ */
+export function fmtUnresolvedNote(
+  calledAt: string | null | undefined,
+  now: number = Date.now(),
+): string {
+  const age = ageMs(calledAt, now);
+  if (age === null || age < 3_600_000) return 'indexing…';
+  return `not indexed yet · ${fmtAge(calledAt, now)}`;
 }
 
 /**

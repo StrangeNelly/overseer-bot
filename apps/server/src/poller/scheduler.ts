@@ -2,15 +2,18 @@ import { and, eq, gte, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { calls, snapshots, tokens, watches, type Db } from '@groupie/db';
 import {
   IDLE_AFTER_HOURS,
+  isWrongChainDeath,
   POLL_TIERS,
+  ROBINHOOD_SLUG,
   SLEEPERS,
   SNAPSHOT_RETENTION,
   THRESHOLDS,
+  wrongChainReason,
 } from '@groupie/shared';
 import { publish } from '../events.js';
 import * as ds from '../market/dexscreener.js';
 import * as gt from '../market/geckoterminal.js';
-import { mcapAtTimestamp, resolveToken } from '../market/resolve.js';
+import { mcapAtTimestamp, resolveToken, resolveTokens, type Resolution } from '../market/resolve.js';
 import type { MarketSnapshot } from '../market/types.js';
 import { runAlertPass } from './alerts.js';
 import {
@@ -19,13 +22,18 @@ import {
   isRevived,
   type LiquidityReading,
 } from './death.js';
-import { markTokenDead } from './markDead.js';
+import { markTokenDead, releaseWatches } from './markDead.js';
 import { runProbationSweep } from './rugSweep.js';
 import { runSleeperScan } from './sleeperScan.js';
 
 const TICK_MS = 15_000;
-/** Caps per tick, sized to GeckoTerminal's 25-30/min budget. */
-const MAX_RESOLUTIONS_PER_TICK = 6;
+/**
+ * Not a budget either (round 17b): resolution is batched through
+ * `/tokens/multi`, so this is that endpoint's own ceiling. The whole tier costs
+ * at most three calls a tick however many addresses are waiting — the old cap
+ * of 6 was a budget, and it bought up to 12 calls.
+ */
+const MAX_RESOLUTIONS_PER_TICK = gt.TOKENS_MULTI_MAX;
 /**
  * Not a budget: the curve tier is batched, so this is the multi-pool endpoint's
  * own ceiling. A token held back is a token polled late by a whole tick.
@@ -234,13 +242,55 @@ async function loadCandidates(db: Db): Promise<Candidate[]> {
  * An unreadable or missing died_at means an old row we cannot date — treated as
  * long dead, which is the conservative (cheaper) answer. Exported for tests.
  */
-export function deadPollSeconds(diedAt: Date | null, nowMs: number): number {
+export function deadPollSeconds(
+  diedAt: Date | null,
+  nowMs: number,
+  deathReason?: string | null,
+): number {
+  // Round 17b (and its review): a wrong-chain corpse has no market on THIS
+  // chain, so nothing a re-read could learn and no comeback to catch — but the
+  // dead poll does more than read a market. It sweeps calls created after the
+  // death onto the death record, and a call from a second group would otherwise
+  // sit in FRESH forever if the bot's immediate poll on it ever failed. So the
+  // corpse keeps the CHEAPEST ordinary cadence (daily, never the fresh-death
+  // one): pollDead's wrong-chain branch spends no market call at all.
+  if (isWrongChainDeath(deathReason)) return POLL_TIERS.deadSeconds;
   const at = diedAt?.getTime();
   if (at === undefined || !Number.isFinite(at)) return POLL_TIERS.deadSeconds;
   const hoursDead = (nowMs - at) / 3_600_000;
   return hoursDead < POLL_TIERS.deadRecentHours
     ? POLL_TIERS.deadRecentSeconds
     : POLL_TIERS.deadSeconds;
+}
+
+/**
+ * How often to retry an address nothing has indexed yet (docs/decisions.md
+ * round 17b), measured from when we FIRST saw it.
+ *
+ * A resolution attempt is the most expensive poll we make (up to three market
+ * calls for the batch it rides in) and the only one that can repeat forever
+ * learning nothing: the live case was a Base contract, which could not resolve
+ * on Robinhood Chain at any cadence. New PONS launches index within minutes, so
+ * only those minutes need the fast tier; after that the retry is a formality
+ * until the 48h never_graduated rule ends it.
+ *
+ * The middle tier is the pre-launch paste's tier (round 17b review): a CA
+ * posted hours before its pool opens resolves at whatever cadence is running
+ * then, and mcap-at-call is measured from that first reading. Five minutes of
+ * that is a baseline worth keeping, so it holds for six hours before the coin
+ * drops to hourly.
+ *
+ * An unreadable first_seen_at is treated as brand new — the fast tier is the
+ * conservative answer for a row we cannot date, since the whole point of the
+ * fast window is not to miss a launch. Exported for tests.
+ */
+export function resolveIntervalSeconds(firstSeenAt: Date | null, nowMs: number): number {
+  const seen = firstSeenAt?.getTime();
+  if (seen === undefined || !Number.isFinite(seen)) return POLL_TIERS.freshSeconds;
+  const minutes = (nowMs - seen) / 60_000;
+  if (minutes < POLL_TIERS.unresolvedFastMinutes) return POLL_TIERS.freshSeconds;
+  if (minutes < POLL_TIERS.unresolvedSlowHours * 60) return POLL_TIERS.activeSeconds;
+  return POLL_TIERS.idleSeconds;
 }
 
 /**
@@ -260,8 +310,18 @@ export function isDue(c: Candidate, nowMs: number): boolean {
   if (!c.called && !c.watched && !c.reviveRequested) return false;
   const last = c.token.lastPolledAt?.getTime() ?? 0;
   if (c.token.phase === 'dead') {
+    // A wrong-chain corpse is in here too, on the daily tier deadPollSeconds
+    // gives it: its poll reads no market (pollDead returns before either
+    // source), it only sweeps and stamps. A repost still wakes it for the same
+    // reason — the flag has to be consumed, and consuming it is free.
     if (c.reviveRequested) return true;
-    return nowMs - last >= deadPollSeconds(c.token.diedAt, nowMs) * 1000;
+    return nowMs - last >= deadPollSeconds(c.token.diedAt, nowMs, c.token.deathReason) * 1000;
+  }
+  if (c.token.phase === 'unresolved') {
+    // Round 17b: its own back-off, and deliberately not the activity tiers —
+    // a watch or a re-mention cannot make an unindexed address index faster,
+    // and there is no market data for either to be fresh about.
+    return nowMs - last >= resolveIntervalSeconds(c.token.firstSeenAt, nowMs) * 1000;
   }
   const quietHours = (nowMs - c.lastActivityMs) / 3_600_000;
   // A watch is a standing request for minute-scale alerts, so a watched token
@@ -472,9 +532,81 @@ async function checkDeath(
   if (reason) await markTokenDead(db, token, reason);
 }
 
-async function pollUnresolved(db: Db, token: TokenRow, opts: PollOpts): Promise<void> {
-  const resolved = await resolveToken(token.address);
+/**
+ * Is this address simply on the WRONG CHAIN (docs/decisions.md round 17b, as
+ * revised by its review)?
+ *
+ * Asked only when both Robinhood-Chain lookups have already missed, and NEVER
+ * before the row is `wrongChainMinMinutes` old: a pool minutes old is a pool
+ * GeckoTerminal has not indexed yet (~40s-3min), DexScreener never indexes
+ * curve tokens at all, and a CA is often pasted before its pool exists. Judging
+ * earlier would kill a same-address multi-chain deploy — the CREATE2/omnichain
+ * pattern, i.e. exactly the team most likely to already be trading on Base —
+ * permanently, on the strength of an hour the pool had not had yet.
+ *
+ * After that window the question is asked on EVERY failed attempt rather than
+ * once. A verdict ends the asking by itself (the token is dead), so all a retry
+ * can cost is one cheap DexScreener call at the back-off's own cadence — and it
+ * buys back every token whose single chance would have fallen on a DS blip.
+ *
+ * Two ways to be silent, both meaning "no verdict": DexScreener knows the
+ * address on Robinhood Chain too (so this chain is simply behind), or it knows
+ * nothing anywhere (unknown data is never death evidence — the token goes on
+ * to the back-off and, eventually, the 48h rule). A failed lookup is not a
+ * verdict either; it falls through to the next attempt.
+ *
+ * An undatable first_seen_at is treated as brand new, the same answer
+ * resolveIntervalSeconds gives it: a row we cannot date is not a row to kill.
+ */
+async function diedOnAnotherChain(db: Db, token: TokenRow): Promise<boolean> {
+  const seen = token.firstSeenAt?.getTime();
+  if (seen === undefined || !Number.isFinite(seen)) return false;
+  if (Date.now() - seen < POLL_TIERS.wrongChainMinMinutes * 60_000) return false;
+  let chains: Set<string>;
+  try {
+    chains = await ds.findChainsFor(token.address);
+  } catch (err) {
+    console.warn(`any-chain lookup failed for ${token.address}:`, err);
+    return false;
+  }
+  if (chains.size === 0 || chains.has(ROBINHOOD_SLUG)) return false;
+  // Several foreign chains is a token deployed on several: the first DexScreener
+  // listed is the one named, and the label's job is only to say "not here".
+  const chain = [...chains][0]!;
+  // Guarded on the EVIDENCE, not merely on "not already dead": the verdict was
+  // reached for a row that read as unresolved, and a concurrent poll (the bot's
+  // immediate one on the same paste) can have resolved it since. No rows back
+  // means someone else got there first — no death, and the caller stamps as it
+  // would for any other silent attempt.
+  //
+  // mcap_at_death lands null on its own: markTokenDead copies the token's
+  // cached mcap, and an address that never traded here has never had one.
+  const killed = await markTokenDead(db, token, wrongChainReason(chain), {
+    requirePhase: 'unresolved',
+  });
+  if (!killed) return false;
+  // A death with no comeback path: nothing here can ever revive, so the watch
+  // slots it holds are handed back exactly as a permanent rug's are.
+  await releaseWatches(db, token.id);
+  console.log(`token ${token.address} is on ${chain}, not Robinhood Chain`);
+  return true;
+}
+
+/**
+ * `pre` is the tick's batched resolution for this address. Absent (the bot's
+ * immediate polls) the address is resolved on its own — the same endpoints, one
+ * address wide.
+ */
+async function pollUnresolved(
+  db: Db,
+  token: TokenRow,
+  opts: PollOpts,
+  pre?: Resolution,
+): Promise<void> {
+  const attempt = pre ?? (await resolveToken(token.address));
+  const resolved = attempt.token;
   if (!resolved) {
+    if (attempt.unknownOnChain && (await diedOnAnotherChain(db, token))) return;
     await db.update(tokens).set({ lastPolledAt: new Date() }).where(eq(tokens.id, token.id));
     // An unresolved token has no liquidity verdict to reach — only the 48h rule.
     await checkDeath(db, token, null, []);
@@ -701,6 +833,32 @@ export async function pollDead(
   opts: PollOpts,
   curvePools?: Map<string, gt.GtPoolInfo>,
 ): Promise<void> {
+  // Round 17b: a wrong-chain corpse has no market here to re-read, so it asks
+  // nothing of either source — the market READ is what it skips, never the
+  // sweep. It still runs (daily, per deadPollSeconds, plus the bot's immediate
+  // poll on a repost) to do the two things it owes: consume the revive request
+  // (never leave one standing) and put any call created after the death onto
+  // the token's death record, so no board can show it as live. Without the tick
+  // side of that, a first call from ANOTHER group whose immediate poll failed
+  // would sit in FRESH forever.
+  if (isWrongChainDeath(token.deathReason)) {
+    await db
+      .update(calls)
+      .set({ reviveRequested: false })
+      .where(and(eq(calls.tokenId, token.id), eq(calls.reviveRequested, true)));
+    await db
+      .update(calls)
+      .set({
+        status: 'died',
+        diedAt: token.diedAt ?? new Date(),
+        deathReason: token.deathReason,
+        mcapAtDeath: token.mcapAtDeath,
+      })
+      .where(and(eq(calls.tokenId, token.id), eq(calls.status, 'active')));
+    await db.update(tokens).set({ lastPolledAt: new Date() }).where(eq(tokens.id, token.id));
+    return;
+  }
+
   const wasCurve = deadReadsCurve(token);
   let snap: MarketSnapshot | null = null;
   let pool: gt.GtPoolInfo | null = null;
@@ -871,19 +1029,31 @@ async function isolate(db: Db, batch: TokenRow[], run: () => Promise<void>): Pro
     await run();
   } catch (err) {
     console.error(`poll failed for ${batch.map((t) => t.address).join(', ')}:`, err);
-    try {
-      await db
-        .update(tokens)
-        .set({ lastPolledAt: new Date() })
-        .where(
-          inArray(
-            tokens.id,
-            batch.map((t) => t.id),
-          ),
-        );
-    } catch (stampErr) {
-      console.error('failed to stamp lastPolledAt after poll error:', stampErr);
-    }
+    await stampBatch(db, batch);
+  }
+}
+
+/**
+ * Push a whole batch onto its next tier interval. The stamp is what a failed
+ * poll owes the budget: without it the same tokens are due again in 15 seconds,
+ * at the head of every tick, for as long as the failure lasts.
+ *
+ * Never throws — it runs on paths that are already handling an error.
+ */
+async function stampBatch(db: Db, batch: TokenRow[]): Promise<void> {
+  if (batch.length === 0) return;
+  try {
+    await db
+      .update(tokens)
+      .set({ lastPolledAt: new Date() })
+      .where(
+        inArray(
+          tokens.id,
+          batch.map((t) => t.id),
+        ),
+      );
+  } catch (stampErr) {
+    console.error('failed to stamp lastPolledAt after poll error:', stampErr);
   }
 }
 
@@ -915,8 +1085,44 @@ export async function runTick(db: Db): Promise<void> {
     })
     .slice(0, MAX_DEAD_POLLS_PER_TICK);
 
-  for (const c of unresolved) {
-    await isolate(db, [c.token], () => pollUnresolved(db, c.token, TICK_POLL));
+  // Resolution shares ONE `/tokens/multi` call (docs/decisions.md round 17b),
+  // and the per-token handling behind it is unchanged.
+  //
+  // A failed batch defers the whole tier AND stamps it (round 17b review): the
+  // realistic throw is the 429 that just parked the budgeter, and an unstamped
+  // batch is due again 15 seconds later — so a single dud would buy a GT grant
+  // per cooldown cycle for as long as the 429s last. Nothing else is written:
+  // the wrong-chain check is not spent by a stamp any more, it simply runs on
+  // the next attempt.
+  //
+  // An address the batch OMITS (a stage of resolveTokens failed under it) is
+  // stamped like a failed batch: nothing was learned about it, but retrying at
+  // tick rate would spend a fresh /tokens/multi grant every 15s for as long as
+  // the failing stage stays down. Its own tier interval is the honest retry.
+  if (unresolved.length > 0) {
+    const batch = unresolved.map((c) => c.token);
+    let resolutions: Map<string, Resolution> | undefined;
+    try {
+      resolutions = await resolveTokens(batch.map((t) => t.address));
+    } catch (err) {
+      console.warn('resolution batch failed, deferring:', err);
+      await stampBatch(db, batch);
+    }
+    if (resolutions) {
+      const omitted: TokenRow[] = [];
+      for (const token of batch) {
+        const pre = resolutions.get(token.address);
+        if (!pre) {
+          omitted.push(token);
+          continue;
+        }
+        await isolate(db, [token], () => pollUnresolved(db, token, TICK_POLL, pre));
+      }
+      if (omitted.length > 0) {
+        console.warn(`resolution: ${omitted.length} address(es) omitted by a failed stage, deferring`);
+        await stampBatch(db, omitted);
+      }
+    }
   }
   if (curve.length > 0) {
     const batch = curve.map((c) => c.token);

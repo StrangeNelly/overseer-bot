@@ -29,6 +29,7 @@ interface RawPair {
   dexId?: string;
   pairAddress?: string;
   baseToken?: { address?: string; symbol?: string; name?: string };
+  quoteToken?: { address?: string };
   priceUsd?: string;
   marketCap?: number;
   fdv?: number;
@@ -86,6 +87,40 @@ export async function getBestPairs(addresses: string[]): Promise<Map<string, DsP
     if (pair) out.set(pair.tokenAddress, pair);
   }
   return out;
+}
+
+/**
+ * Which chains DexScreener has pairs for, ANY chain (docs/decisions.md round
+ * 17b) — the one question `/tokens/v1/{chain}/...` cannot answer.
+ *
+ * Asked only when both Robinhood-Chain lookups have already missed, and only
+ * past the fast window — a token that resolves here never costs this call, and
+ * the caller owns both of those rules. `/latest/dex/tokens`
+ * answers `{ pairs: [...] }` — `pairs: null` for an address it has never seen,
+ * which comes back as an EMPTY SET. Empty is "DexScreener knows nothing", never
+ * "the token is fake": the caller owns that distinction.
+ *
+ * A pair counts only when the requested address is one of its two tokens —
+ * matched case-insensitively, since chains disagree about address casing.
+ */
+export async function findChainsFor(address: string): Promise<Set<string>> {
+  const res = await fetch(`${BASE}/latest/dex/tokens/${address}`, {
+    headers: { accept: 'application/json' },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) throw new Error(`dexscreener ${res.status}`);
+  const body = (await res.json()) as { pairs?: RawPair[] | null } | null;
+  const wanted = address.toLowerCase();
+  const chains = new Set<string>();
+  for (const raw of body?.pairs ?? []) {
+    const chainId = typeof raw.chainId === 'string' ? raw.chainId.trim().toLowerCase() : '';
+    if (chainId.length === 0) continue;
+    const base = raw.baseToken?.address?.toLowerCase();
+    const quote = raw.quoteToken?.address?.toLowerCase();
+    if (base !== wanted && quote !== wanted) continue;
+    chains.add(chainId);
+  }
+  return chains;
 }
 
 export function dsSnapshot(pair: DsPair): MarketSnapshot {

@@ -1,4 +1,4 @@
-import { THRESHOLDS, type TokenPhase } from '@groupie/shared';
+import { THRESHOLDS, type TokenPhase, type WrongChainReason } from '@groupie/shared';
 import type { MarketSnapshot } from '../market/types.js';
 
 export interface TokenState {
@@ -41,7 +41,18 @@ const MINUTE_MS = 60_000;
  * rows written before round 6 still carry it — every site that READS
  * deathReason must keep accepting the string (see scheduler.ts's pollDead).
  */
-export type DeathReason = 'liquidity_floor' | 'never_graduated' | 'rug_floor';
+export type DeathReason =
+  | 'liquidity_floor'
+  | 'never_graduated'
+  | 'rug_floor'
+  /**
+   * Round 17b: the address trades on ANOTHER chain and has no market here at
+   * all, so nothing about it was ever measured (mcap-at-death is null by
+   * construction). Written only by the resolution path, and the only reason
+   * that is never re-read for a comeback — there is no market on this chain to
+   * come back. Encoded by `wrongChainReason` in @groupie/shared.
+   */
+  | WrongChainReason;
 
 /**
  * Round 11's newborn grace: no liquidity-based death this soon after the launch

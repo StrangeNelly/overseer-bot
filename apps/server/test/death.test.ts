@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { tokens } from '@groupie/db';
-import { POLL_TIERS, THRESHOLDS } from '@groupie/shared';
+import { POLL_TIERS, THRESHOLDS, wrongChainReason } from '@groupie/shared';
 import type { DsPair } from '../src/market/dexscreener.js';
 import {
   callLiquidityDeath,
@@ -13,6 +13,7 @@ import {
   deadPollSeconds,
   isDue,
   isSuspiciousPair,
+  resolveIntervalSeconds,
   type Candidate,
 } from '../src/poller/scheduler.js';
 
@@ -505,5 +506,194 @@ describe('isDue — orphan tokens are never due', () => {
     expect(isDue(candidate({ token: tok({ lastPolledAt: new Date(NOW - 46_000) }) }), NOW)).toBe(
       true,
     );
+  });
+});
+
+/**
+ * The unresolved back-off (docs/decisions.md round 17b).
+ *
+ * Live case: a Base contract pasted into the group sat in FRESH as "indexing…"
+ * for 8h, re-asking two GeckoTerminal calls every 45 seconds for an answer that
+ * could not exist. New PONS launches index within minutes, so the fast tier
+ * only has to cover those minutes; after that the retry is a formality until
+ * the 48h never_graduated rule ends it.
+ */
+describe('resolveIntervalSeconds (round 17b)', () => {
+  const minutesAgo = (m: number) => new Date(NOW - m * MINUTE);
+
+  it('holds the fresh tier for the first 15 minutes', () => {
+    expect(resolveIntervalSeconds(minutesAgo(0), NOW)).toBe(POLL_TIERS.freshSeconds);
+    expect(resolveIntervalSeconds(minutesAgo(14.9), NOW)).toBe(POLL_TIERS.freshSeconds);
+  });
+
+  it('drops to 5-minute retries from 15 minutes to six hours', () => {
+    expect(resolveIntervalSeconds(minutesAgo(POLL_TIERS.unresolvedFastMinutes), NOW)).toBe(
+      POLL_TIERS.activeSeconds,
+    );
+    // Round 17b review: the middle tier runs to SIX hours, so a CA pasted
+    // before its pool exists is never more than five minutes late to its own
+    // first reading — the number mcap-at-call is measured from.
+    expect(resolveIntervalSeconds(minutesAgo(2 * 60), NOW)).toBe(POLL_TIERS.activeSeconds);
+    expect(resolveIntervalSeconds(minutesAgo(POLL_TIERS.unresolvedSlowHours * 60 - 1), NOW)).toBe(
+      POLL_TIERS.activeSeconds,
+    );
+  });
+
+  it('drops to hourly from six hours on', () => {
+    expect(resolveIntervalSeconds(minutesAgo(POLL_TIERS.unresolvedSlowHours * 60), NOW)).toBe(
+      POLL_TIERS.idleSeconds,
+    );
+    // The dud's own timeline: still asked, but hourly, until the 48h rule.
+    expect(resolveIntervalSeconds(minutesAgo(8 * 60), NOW)).toBe(POLL_TIERS.idleSeconds);
+    expect(resolveIntervalSeconds(minutesAgo(47 * 60), NOW)).toBe(POLL_TIERS.idleSeconds);
+  });
+
+  it('measures from first sighting, so a late poll never resets the clock', () => {
+    // Eight hours old either way: the value cannot depend on lastPolledAt.
+    expect(resolveIntervalSeconds(minutesAgo(8 * 60), NOW)).toBe(POLL_TIERS.idleSeconds);
+  });
+
+  it('treats an undatable row as brand new — the answer that cannot miss a launch', () => {
+    expect(resolveIntervalSeconds(null, NOW)).toBe(POLL_TIERS.freshSeconds);
+    expect(resolveIntervalSeconds(new Date(NaN), NOW)).toBe(POLL_TIERS.freshSeconds);
+  });
+});
+
+describe('isDue — unresolved tokens ride the back-off (round 17b)', () => {
+  const tok = (over: Partial<TokenRow>): TokenRow =>
+    token({ phase: 'unresolved', rugHiddenAt: null, poolAddress: null, ...over });
+
+  const candidate = (over: Partial<Candidate>): Candidate => ({
+    token: tok({ firstSeenAt: new Date(NOW), lastPolledAt: null }),
+    lastActivityMs: NOW,
+    reviveRequested: false,
+    called: true,
+    watched: false,
+    ...over,
+  });
+
+  const dueAfter = (ageMinutes: number, sinceLastPollSeconds: number, over: Partial<Candidate> = {}) =>
+    isDue(
+      candidate({
+        token: tok({
+          firstSeenAt: new Date(NOW - ageMinutes * MINUTE),
+          lastPolledAt: new Date(NOW - sinceLastPollSeconds * 1000),
+        }),
+        ...over,
+      }),
+      NOW,
+    );
+
+  it('polls a brand-new address every 45 seconds', () => {
+    expect(dueAfter(1, 44)).toBe(false);
+    expect(dueAfter(1, 46)).toBe(true);
+  });
+
+  it('...every 5 minutes once it is a quarter of an hour old', () => {
+    expect(dueAfter(20, 46)).toBe(false);
+    expect(dueAfter(20, 301)).toBe(true);
+  });
+
+  it('...and still every 5 minutes hours later, for the pre-launch paste', () => {
+    expect(dueAfter(5 * 60, 46)).toBe(false);
+    expect(dueAfter(5 * 60, 301)).toBe(true);
+  });
+
+  it('...and hourly past the sixth hour', () => {
+    expect(dueAfter(8 * 60, 301)).toBe(false);
+    expect(dueAfter(8 * 60, 3_601)).toBe(true);
+  });
+
+  it('a never-polled address is due immediately, at every age', () => {
+    // The immediate poll on paste is what usually takes this, but a restart
+    // must not leave an unpolled CA waiting an hour for its first attempt.
+    for (const ageMinutes of [0, 30, 600]) {
+      const fresh = candidate({
+        token: tok({ firstSeenAt: new Date(NOW - ageMinutes * MINUTE), lastPolledAt: null }),
+      });
+      expect([ageMinutes, isDue(fresh, NOW)]).toEqual([ageMinutes, true]);
+    }
+  });
+
+  it('a watch does not put it back on the 45-second tier', () => {
+    // A watch is a standing request for minute-scale alerts, but an unindexed
+    // address has no market to alert on and asking faster cannot index it.
+    expect(dueAfter(8 * 60, 301, { watched: true })).toBe(false);
+  });
+});
+
+/**
+ * Wrong-chain corpses (docs/decisions.md round 17b, as revised by its review):
+ * the address trades on another chain, so there is no market HERE that could
+ * ever come back — and the corpse asks neither source for one (see
+ * resolve.test.ts). What it does keep is the cheapest ordinary cadence, because
+ * the dead poll also SWEEPS: a call posted after the death has to be put onto
+ * the death record, and the tick is the only thing that can be relied on to do
+ * it. So: daily, never the 3-hourly fresh-death tier.
+ */
+describe('isDue / deadPollSeconds — a wrong-chain corpse sweeps, but reads nothing', () => {
+  const corpse = (over: Partial<TokenRow> = {}): TokenRow =>
+    token({
+      phase: 'dead',
+      deathReason: wrongChainReason('base'),
+      diedAt: new Date(NOW - 60_000),
+      lastPolledAt: new Date(NOW - 60_000),
+      rugHiddenAt: null,
+      firstSeenAt: new Date(NOW - 3_600_000),
+      ...over,
+    });
+
+  const candidate = (over: Partial<Candidate>): Candidate => ({
+    token: corpse(),
+    lastActivityMs: NOW,
+    reviveRequested: false,
+    called: true,
+    watched: false,
+    ...over,
+  });
+
+  it('sits on the daily tier, not the fresh-death one, minutes after dying', () => {
+    // A death a minute old: any other corpse would be re-read in 3h, this one
+    // waits a day — its poll can only sweep, so there is nothing to hurry for.
+    expect(isDue(candidate({}), NOW)).toBe(false);
+    expect(
+      isDue(
+        candidate({ token: corpse({ lastPolledAt: new Date(NOW - 3 * 3_600_000 - 1_000) }) }),
+        NOW,
+      ),
+    ).toBe(false);
+  });
+
+  it('...and comes due once a day, so a call made after the death cannot strand', () => {
+    expect(
+      isDue(
+        candidate({ token: corpse({ lastPolledAt: new Date(NOW - 24 * 3_600_000 - 1_000) }) }),
+        NOW,
+      ),
+    ).toBe(true);
+  });
+
+  it('a repost wakes it too — consuming the flag costs no market call', () => {
+    expect(isDue(candidate({ reviveRequested: true }), NOW)).toBe(true);
+    // ...which is also what any other corpse's repost does.
+    expect(
+      isDue(
+        candidate({ reviveRequested: true, token: corpse({ deathReason: 'liquidity_floor' }) }),
+        NOW,
+      ),
+    ).toBe(true);
+  });
+
+  it('deadPollSeconds says the same thing in the tiers own units', () => {
+    expect(deadPollSeconds(new Date(NOW), NOW, wrongChainReason('base'))).toBe(
+      POLL_TIERS.deadSeconds,
+    );
+    // A reason that lost its chain id is still a wrong-chain death: the cadence
+    // must not change because a label went missing.
+    expect(deadPollSeconds(new Date(NOW), NOW, 'wrong_chain:')).toBe(POLL_TIERS.deadSeconds);
+    // ...and it really is the SLOWEST tier: a fresh death of any other kind is
+    // re-read 3-hourly for its first 48h.
+    expect(deadPollSeconds(new Date(NOW), NOW, 'rug_floor')).toBe(POLL_TIERS.deadRecentSeconds);
+    expect(deadPollSeconds(new Date(NOW), NOW, null)).toBe(POLL_TIERS.deadRecentSeconds);
   });
 });

@@ -29,7 +29,13 @@ export function isReviving(card: BoardCard, now: number): boolean {
   return age !== null && age < REVIVING_WINDOW_MS;
 }
 
-/** No market data yet: the row prints a dim dash, never a hero number. */
+/**
+ * No market data yet: the row prints a dim dash, never a hero number.
+ *
+ * True of a dead card as well — a wrong-chain or never-graduated death has no
+ * numbers either — so every caller must let DEATH win first (statusEdge below,
+ * TokenCard's own flag). "Dead" and "still loading" are not both sayable.
+ */
 export function isUnresolved(card: BoardCard): boolean {
   return card.phase === 'unresolved' || (card.mcapUsd === null && card.multiple === null);
 }

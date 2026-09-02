@@ -212,7 +212,14 @@ function poolIdToAddress(id: string | undefined): string | null {
   return idx >= 0 ? id.slice(idx + 1).toLowerCase() : id.toLowerCase();
 }
 
-/** Batch lookup by token address (up to 30). Missing tokens are simply absent. */
+/** GeckoTerminal's cap on `/tokens/multi/{...}` — the endpoint's own ceiling. */
+export const TOKENS_MULTI_MAX = 30;
+
+/**
+ * Batch lookup by token address (up to TOKENS_MULTI_MAX). Missing tokens are
+ * simply ABSENT from the map — that is "GeckoTerminal has no answer", never
+ * evidence that the token is dead or fake.
+ */
 export async function getTokensMulti(addresses: string[]): Promise<Map<string, GtTokenInfo>> {
   const out = new Map<string, GtTokenInfo>();
   if (addresses.length === 0) return out;
