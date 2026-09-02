@@ -226,6 +226,93 @@ export interface WatchByAddressRequest {
   address: string;
 }
 
+/* ------------------------------------------------ upcoming projects (round 23) */
+
+/**
+ * A pre-launch X account the group is tracking (launch_monitors). 'launched'
+ * once the account itself posted a contract that resolved on Robinhood Chain;
+ * 'renamed' / 'suspended' when the stored x_user_id no longer answers to the
+ * handle — said out loud rather than silently watching a stranger.
+ */
+export type ProjectStatus = 'active' | 'launched' | 'expired' | 'removed' | 'renamed' | 'suspended';
+
+/** A token that CLAIMS the handle on-chain (PONS socials) but was never posted by the account. */
+export interface ProjectCandidate {
+  address: string;
+  symbol: string | null;
+  mcapUsd: number | null;
+  /** ISO instant the launch was seen on-chain. */
+  at: string;
+  links: TradingLinkRow;
+}
+
+export interface ProjectEntry {
+  id: number;
+  /** Lowercase, no leading @. */
+  handle: string;
+  xUserId: string | null;
+  displayName: string | null;
+  avatarUrl: string | null;
+  bio: string | null;
+  followers: number | null;
+  /** Follower count when the monitor was added — the delta is the curve. */
+  followersAtAdd: number | null;
+  accountCreatedAt: string | null;
+  /** The account's most recent post we have seen, null before the first check. */
+  lastPostAt: string | null;
+  /** Our last successful check of this account, null before the first. */
+  lastCheckedAt: string | null;
+  /** Free text the adder attached (`/overseer track @handle <note>`). */
+  note: string | null;
+  addedBy: number;
+  addedByName: string | null;
+  addedAt: string;
+  addedByMe: boolean;
+  status: ProjectStatus;
+  /** Set once the account posted a resolving contract (Tier A). */
+  launched: {
+    address: string;
+    symbol: string | null;
+    tokenId: number | null;
+    /** ISO instant of the post. */
+    at: string;
+    tweetUrl: string | null;
+    /** Whether the chat ping went out (held when the token predated the post by > 10 min). */
+    pinged: boolean;
+    links: TradingLinkRow;
+  } | null;
+  /** Tier B: on-chain launches claiming this handle, newest first, never pinged. */
+  candidates: ProjectCandidate[];
+}
+
+/**
+ * GET /api/g/:slug/upcoming
+ * `enabled` false = no X provider key in this deployment (the zone says so).
+ * `lastCheckAt` = the watcher's last successful poll across all monitors.
+ * POST /api/g/:slug/upcoming { handle: string; note?: string } -> 201 ProjectEntry,
+ *   409 when capped (caps echoed here) or already tracked, 404 when the handle
+ *   does not resolve on X. DELETE /api/g/:slug/upcoming/:id -> 204 (any member).
+ * Bot parity: `/overseer track @handle [note]`, `untrack @handle`, `tracking`.
+ */
+export interface ProjectsResponse {
+  enabled: boolean;
+  lastCheckAt: string | null;
+  capPerGroup: number;
+  capPerMember: number;
+  projects: ProjectEntry[];
+}
+
+export interface TrackProjectRequest {
+  handle: string;
+  note?: string;
+}
+
+/** groups.settings.xwatch, merged over XWATCH_DEFAULTS. `/overseer set launchping on|off`. */
+export interface XWatchSettings {
+  /** Whether a Tier-A launch posts the chat ping (the board row exists either way). */
+  launchPing: boolean;
+}
+
 /* ------------------------------------------------ member verdict (round 21) */
 
 /**
