@@ -234,6 +234,18 @@ export const SLEEPERS = {
    * meaning anything, and it is the depth the daily window can actually back.
    */
   inBandMaxDays: 35,
+  /**
+   * An entry still in the SAME band as the previous scan, still trading,
+   * extends its residency by the elapsed time instead of re-reading candles —
+   * but a carried figure is re-measured off OHLCV once it is this old.
+   *
+   * The bound the carry accepts: a coin that left its band and came back
+   * BETWEEN two scans is credited for the gap it was away, until the next full
+   * measurement corrects it. At a 3h scan cadence that is at most 8 carried
+   * steps, and the error only ever shows up as too MUCH residency on a coin
+   * that is, by definition, back in the band.
+   */
+  residencyReverifyHours: 24,
   /** An entry that has been listed this long earns the persistence marker. */
   persistenceMarkerHours: 3,
   /** sleeper_seen rows older than this are pruned. */

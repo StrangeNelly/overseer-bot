@@ -1,0 +1,1 @@
+ALTER TABLE "sleeper_entries" ADD COLUMN "residency_measured_at" timestamp with time zone;

@@ -172,6 +172,10 @@ export const groupMembers = pgTable(
     userId: bigint('user_id', { mode: 'number' }).notNull(),
     status: text('status').notNull(),
     checkedAt: timestamp('checked_at', { withTimezone: true }).notNull().defaultNow(),
+    // The member's Telegram display name as of the last membership check or
+    // chat command (round 16c): the only name source for a member who has never
+    // posted a call here, which is exactly who a watchlist slot needs to name.
+    displayName: text('display_name'),
   },
   (t) => [primaryKey({ columns: [t.groupId, t.userId] })],
 );
@@ -297,6 +301,16 @@ export const sleeperEntries = pgTable(
      * reads failed) simply claim no residency rather than a fictional one.
      */
     inBandHours: doublePrecision('in_band_hours').notNull().default(0),
+    /**
+     * When in_band_hours was last measured off CANDLES (docs/decisions.md round
+     * 16b). A scan that finds the address still in the same band carries the
+     * figure forward plus the elapsed time and copies this stamp unchanged, so
+     * it dates the last real measurement rather than the last scan.
+     *
+     * NULL means "never measured, or measured before this column existed" —
+     * which forces a full OHLCV measurement, the safe answer.
+     */
+    residencyMeasuredAt: timestamp('residency_measured_at', { withTimezone: true }),
     poolCreatedAt: timestamp('pool_created_at', { withTimezone: true }),
   },
   // The read is always "the latest scan, band ascending, rank ascending".

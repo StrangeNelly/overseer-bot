@@ -16,22 +16,96 @@ const BASE = 'https://api.geckoterminal.com/api/v2';
  * run of successes halves it back down to the 2s base. The 20/min window stays
  * as the hard ceiling for the quiet-IP case.
  */
-const WINDOW_MS = 60_000;
-const MAX_PER_WINDOW = 20;
-const BASE_GAP_MS = 2_000;
-const MAX_GAP_MS = 15_000;
+export const WINDOW_MS = 60_000;
+export const MAX_PER_WINDOW = 20;
+export const BASE_GAP_MS = 2_000;
+export const MAX_GAP_MS = 15_000;
 /** Successes in a row before the gap relaxes one step. */
 const RECOVERY_STREAK = 20;
 const COOLDOWN_MS = 30_000;
+/**
+ * How long a yielding scan waiter sleeps before asking again. Short enough that
+ * the scan takes the slot the instant the polls stop queueing.
+ */
+export const SCAN_YIELD_MS = 250;
+
+/**
+ * ...and the ceiling on that yielding: a scan waiter this old is treated as a
+ * poll for ONE grant, so continuous poll traffic can delay the scan but never
+ * starve it. Costs the polls at most one gap per aged scan call.
+ */
+export const SCAN_MAX_YIELD_MS = 60_000;
+
+/**
+ * What the caller is doing with the slot.
+ *
+ * 'poll' is the live board — the 15s tick, an immediate poll after a call, a
+ * call-time backfill; something on screen is waiting for it. 'scan' is the
+ * 3-hourly Sleepers sweep: nothing waits on it and it can afford to be last.
+ */
+export type GtPriority = 'poll' | 'scan';
+
+/** Everything the grant decision reads. Plain data, so it is testable. */
+export interface BudgetState {
+  /** Grant timestamps inside the sliding window, oldest first. */
+  stamps: readonly number[];
+  cooldownUntil: number;
+  lastGrantMs: number;
+  minGapMs: number;
+  /** How many 'poll' callers are queued for a slot right now. */
+  waitingPoll: number;
+}
+
+export type BudgetDecision = { grant: true } | { grant: false; waitMs: number };
+
+/**
+ * Grant or wait, as a pure function of the budget's state and the clock.
+ *
+ * The order is the policy: a cooldown outranks everything, then scan traffic
+ * yields to any waiting poll, then the adaptive inter-call gap, then the
+ * window ceiling. Every wait is strictly positive, so a caller looping on this
+ * can never spin.
+ *
+ * `waitedMs` is how long this caller has already been yielding. A scan that has
+ * yielded for SCAN_MAX_YIELD_MS stops yielding: without it, poll traffic that
+ * keeps one caller queued at all times (a tick of unresolved CAs at a
+ * backed-off gap does) would hold the scan off indefinitely.
+ */
+export function budgetDecision(
+  state: BudgetState,
+  priority: GtPriority,
+  nowMs: number,
+  waitedMs = 0,
+): BudgetDecision {
+  if (nowMs < state.cooldownUntil) return { grant: false, waitMs: state.cooldownUntil - nowMs };
+  if (priority === 'scan' && state.waitingPoll > 0 && waitedMs < SCAN_MAX_YIELD_MS) {
+    return { grant: false, waitMs: SCAN_YIELD_MS };
+  }
+  const sinceLast = nowMs - state.lastGrantMs;
+  if (sinceLast < state.minGapMs) return { grant: false, waitMs: state.minGapMs - sinceLast };
+  const live = state.stamps.filter((s) => nowMs - s <= WINDOW_MS);
+  if (live.length < MAX_PER_WINDOW) return { grant: true };
+  return { grant: false, waitMs: WINDOW_MS - (nowMs - live[0]!) + 100 };
+}
+
+/** The 429 step and the recovery step, split out so the curve is testable. */
+export function backedOffGap(currentGapMs: number): number {
+  return Math.min(currentGapMs * 2, MAX_GAP_MS);
+}
+export function relaxedGap(currentGapMs: number): number {
+  return Math.max(BASE_GAP_MS, currentGapMs / 2);
+}
+
 const stamps: number[] = [];
 let cooldownUntil = 0;
 let lastGrantMs = 0;
 let minGapMs = BASE_GAP_MS;
 let successStreak = 0;
+let waitingPoll = 0;
 
 function backOff(): void {
   successStreak = 0;
-  const next = Math.min(minGapMs * 2, MAX_GAP_MS);
+  const next = backedOffGap(minGapMs);
   if (next !== minGapMs) {
     minGapMs = next;
     console.warn(`gt budgeter: 429 — pacing backed off to ${minGapMs / 1000}s between calls`);
@@ -42,38 +116,54 @@ function noteSuccess(): void {
   successStreak += 1;
   if (successStreak >= RECOVERY_STREAK && minGapMs > BASE_GAP_MS) {
     successStreak = 0;
-    minGapMs = Math.max(BASE_GAP_MS, minGapMs / 2);
+    minGapMs = relaxedGap(minGapMs);
     console.log(`gt budgeter: quota recovered — pacing relaxed to ${minGapMs / 1000}s`);
   }
 }
 
-async function acquireSlot(): Promise<void> {
-  for (;;) {
-    const now = Date.now();
-    if (now < cooldownUntil) {
-      await new Promise((r) => setTimeout(r, cooldownUntil - now));
-      continue;
+/** Test-only: returns the module's budget state to its boot values. */
+export function resetBudget(): void {
+  stamps.length = 0;
+  cooldownUntil = 0;
+  lastGrantMs = 0;
+  minGapMs = BASE_GAP_MS;
+  successStreak = 0;
+  waitingPoll = 0;
+}
+
+/** Exported for the fake-timer test that pins the queueing behaviour. */
+export async function acquireSlot(priority: GtPriority): Promise<void> {
+  // Counted before the first decision so a scan already sleeping sees this poll
+  // on its next look, and released in `finally` so a rejected caller (there is
+  // none today) could never leave the count high and park the scan forever.
+  if (priority === 'poll') waitingPoll += 1;
+  const arrivedMs = Date.now();
+  try {
+    for (;;) {
+      const now = Date.now();
+      // Single-threaded: no await between this decision and the grant below, so
+      // two concurrent waiters cannot both pass the same gap.
+      const decision = budgetDecision(
+        { stamps, cooldownUntil, lastGrantMs, minGapMs, waitingPoll },
+        priority,
+        now,
+        Math.max(0, now - arrivedMs),
+      );
+      if (decision.grant) {
+        while (stamps.length > 0 && now - stamps[0]! > WINDOW_MS) stamps.shift();
+        stamps.push(now);
+        lastGrantMs = now;
+        return;
+      }
+      await new Promise((r) => setTimeout(r, decision.waitMs));
     }
-    // Single-threaded: no await between this check and the grant below, so
-    // two concurrent waiters cannot both pass the same gap.
-    const sinceLast = now - lastGrantMs;
-    if (sinceLast < minGapMs) {
-      await new Promise((r) => setTimeout(r, minGapMs - sinceLast));
-      continue;
-    }
-    while (stamps.length > 0 && now - stamps[0]! > WINDOW_MS) stamps.shift();
-    if (stamps.length < MAX_PER_WINDOW) {
-      stamps.push(now);
-      lastGrantMs = now;
-      return;
-    }
-    const waitMs = WINDOW_MS - (now - stamps[0]!) + 100;
-    await new Promise((r) => setTimeout(r, waitMs));
+  } finally {
+    if (priority === 'poll') waitingPoll -= 1;
   }
 }
 
-async function gtFetch(path: string): Promise<unknown | null> {
-  await acquireSlot();
+async function gtFetch(path: string, priority: GtPriority = 'poll'): Promise<unknown | null> {
+  await acquireSlot(priority);
   const res = await fetch(`${BASE}${path}`, {
     headers: { accept: 'application/json' },
     signal: AbortSignal.timeout(15_000),
@@ -94,7 +184,7 @@ async function gtFetch(path: string): Promise<unknown | null> {
   return res.json();
 }
 
-interface JsonApiResource {
+export interface JsonApiResource {
   id?: string;
   type?: string;
   attributes?: Record<string, unknown>;
@@ -166,14 +256,19 @@ export interface GtPoolInfo {
   dex: string | null;
 }
 
-export async function getPool(poolAddress: string): Promise<GtPoolInfo | null> {
-  const body = (await gtFetch(`/networks/${ROBINHOOD_SLUG}/pools/${poolAddress}`)) as {
-    data?: JsonApiResource;
-  } | null;
-  const a = body?.data?.attributes;
-  if (!a) return null;
+/**
+ * One pool resource -> GtPoolInfo. The single-pool and multi-pool endpoints
+ * answer with the SAME attributes (verified live 2026-09-02), so both go
+ * through this: a batched reading and a single one can never diverge.
+ *
+ * `poolAddress` is supplied by the caller because only it knows which address
+ * this resource is the answer to — the request's for /pools/{addr}, the payload's
+ * own `attributes.address` for a multi response.
+ */
+export function parsePoolResource(resource: JsonApiResource, poolAddress: string): GtPoolInfo {
+  const a = resource.attributes ?? {};
   const launchpad = a.launchpad_details as Record<string, unknown> | undefined;
-  const dexRel = body?.data?.relationships?.dex?.data;
+  const dexRel = resource.relationships?.dex?.data;
   const dexId = Array.isArray(dexRel) ? dexRel[0]?.id : dexRel?.id;
   const created = typeof a.pool_created_at === 'string' ? new Date(a.pool_created_at) : null;
   const migrated = launchpad?.migrated_destination_pool_address;
@@ -189,6 +284,74 @@ export async function getPool(poolAddress: string): Promise<GtPoolInfo | null> {
     migratedPoolAddress: typeof migrated === 'string' && migrated ? migrated.toLowerCase() : null,
     dex: typeof dexId === 'string' ? dexId : null,
   };
+}
+
+export async function getPool(poolAddress: string): Promise<GtPoolInfo | null> {
+  const body = (await gtFetch(`/networks/${ROBINHOOD_SLUG}/pools/${poolAddress}`)) as {
+    data?: JsonApiResource;
+  } | null;
+  if (!body?.data?.attributes) return null;
+  return parsePoolResource(body.data, poolAddress);
+}
+
+/** GeckoTerminal's cap on `/pools/multi/{...}` — verified live 2026-09-02. */
+export const POOLS_MULTI_MAX = 30;
+
+/** Fixed-size slices, in order. Exported for the chunking test. */
+export function chunk<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+/**
+ * One `/pools/multi` response -> the pools it actually carried.
+ *
+ * Keyed by the pool address LOWERCASE (which is how GeckoTerminal returns it
+ * and how the database stores it), plus an alias under the exact string the
+ * caller asked with when that differs (defensive: pool_address rows are
+ * lowercase today) — so `map.get(token.poolAddress)` works whatever casing a
+ * row carries.
+ *
+ * A pool GeckoTerminal does not know is simply ABSENT from `data[]` — no error,
+ * no empty row — and so is a resource that arrives with no `attributes`, which
+ * getPool answers as null. Either absence is "no reading" and must never be
+ * read as a $0 market; the callers own that, and this map just doesn't contain
+ * the address.
+ */
+export function parsePoolsMulti(
+  body: unknown,
+  requested: readonly string[],
+): Map<string, GtPoolInfo> {
+  const out = new Map<string, GtPoolInfo>();
+  const asked = new Map(requested.map((a) => [a.toLowerCase(), a]));
+  const data = (body as { data?: JsonApiResource[] } | null)?.data ?? [];
+  for (const item of data) {
+    if (!item.attributes) continue;
+    const a = item.attributes;
+    const address =
+      typeof a.address === 'string' && a.address ? a.address.toLowerCase() : poolIdToAddress(item.id);
+    if (!address) continue;
+    const info = parsePoolResource(item, address);
+    out.set(address, info);
+    const original = asked.get(address);
+    if (original !== undefined && original !== address) out.set(original, info);
+  }
+  return out;
+}
+
+/**
+ * Batch pool lookup (docs/decisions.md round 16b). POOLS_MULTI_MAX is the
+ * endpoint's own ceiling, so anything longer is chunked into several calls.
+ */
+export async function getPoolsMulti(poolAddresses: string[]): Promise<Map<string, GtPoolInfo>> {
+  const out = new Map<string, GtPoolInfo>();
+  for (const part of chunk(poolAddresses, POOLS_MULTI_MAX)) {
+    if (part.length === 0) continue;
+    const body = await gtFetch(`/networks/${ROBINHOOD_SLUG}/pools/multi/${part.join(',')}`);
+    for (const [key, info] of parsePoolsMulti(body, part)) out.set(key, info);
+  }
+  return out;
 }
 
 /**
@@ -266,9 +429,11 @@ export async function getOhlcv(
   poolAddress: string,
   timeframe: 'hour' | 'day',
   limit: number,
+  priority: GtPriority = 'poll',
 ): Promise<GtCandle[]> {
   const body = (await gtFetch(
     `/networks/${ROBINHOOD_SLUG}/pools/${poolAddress}/ohlcv/${timeframe}?limit=${limit}`,
+    priority,
   )) as { data?: { attributes?: { ohlcv_list?: unknown[][] } } } | null;
   return parseOhlcvRows(body?.data?.attributes?.ohlcv_list ?? []);
 }
@@ -293,6 +458,12 @@ export interface GtPoolListing {
   vol24Usd: number | null;
   /** buys + sells over 24h; null when the block is missing entirely. */
   txns24: number | null;
+  /**
+   * buys + sells over the LAST HOUR; null when the block is missing entirely.
+   * The 24h figures are trailing, so this is the only thing in the listing that
+   * says whether the coin is still trading right now.
+   */
+  txns1h: number | null;
   poolCreatedAt: Date | null;
 }
 
@@ -309,9 +480,13 @@ export interface GtPoolListing {
  * callers must stop at SLEEPERS.maxPages. An empty/missing `data` array returns
  * [] so a caller can stop early.
  */
-export async function getTopPools(page: number): Promise<GtPoolListing[]> {
+export async function getTopPools(
+  page: number,
+  priority: GtPriority = 'poll',
+): Promise<GtPoolListing[]> {
   const body = (await gtFetch(
     `/networks/${ROBINHOOD_SLUG}/pools?sort=h24_volume_usd_desc&page=${page}`,
+    priority,
   )) as { data?: JsonApiResource[] } | null;
 
   const out: GtPoolListing[] = [];
@@ -324,11 +499,13 @@ export async function getTopPools(page: number): Promise<GtPoolListing[]> {
     const baseTokenAddress = poolIdToAddress(base?.id);
     if (!poolAddress || !baseTokenAddress) continue;
 
-    const txns = (a.transactions as Record<string, unknown> | undefined)?.h24 as
-      | Record<string, unknown>
-      | undefined;
-    const buys = num(txns?.buys);
-    const sells = num(txns?.sells);
+    const transactions = a.transactions as Record<string, unknown> | undefined;
+    const sumTxns = (window: 'h24' | 'h1'): number | null => {
+      const block = transactions?.[window] as Record<string, unknown> | undefined;
+      const buys = num(block?.buys);
+      const sells = num(block?.sells);
+      return buys === null && sells === null ? null : (buys ?? 0) + (sells ?? 0);
+    };
     const created = typeof a.pool_created_at === 'string' ? new Date(a.pool_created_at) : null;
 
     out.push({
@@ -341,7 +518,8 @@ export async function getTopPools(page: number): Promise<GtPoolListing[]> {
       priceUsd: num(a.base_token_price_usd),
       liquidityUsd: num(a.reserve_in_usd),
       vol24Usd: num((a.volume_usd as Record<string, unknown> | undefined)?.h24),
-      txns24: buys === null && sells === null ? null : (buys ?? 0) + (sells ?? 0),
+      txns24: sumTxns('h24'),
+      txns1h: sumTxns('h1'),
       poolCreatedAt: created && !Number.isNaN(created.getTime()) ? created : null,
     });
   }

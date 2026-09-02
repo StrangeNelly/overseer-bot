@@ -41,8 +41,11 @@ async function checkMembership(
   }
 
   let status = 'unknown';
+  let displayName: string | null = null;
   try {
-    status = (await botApi.getChatMember(group.chatId, userId)).status;
+    const member = await botApi.getChatMember(group.chatId, userId);
+    status = member.status;
+    displayName = telegramDisplayName(member.user);
   } catch (err) {
     // A user Telegram has never seen in this chat throws, as does any transient
     // API failure. Cache the miss for the TTL so a retrying client can't turn a
@@ -53,12 +56,45 @@ async function checkMembership(
   const checkedAt = new Date();
   await db
     .insert(groupMembers)
-    .values({ groupId: group.id, userId, status, checkedAt })
+    .values({ groupId: group.id, userId, status, checkedAt, displayName })
     .onConflictDoUpdate({
       target: [groupMembers.groupId, groupMembers.userId],
-      set: { status, checkedAt },
+      // A failed check must not erase a name we already hold.
+      set: { status, checkedAt, ...(displayName ? { displayName } : {}) },
     });
   return ALLOWED_STATUSES.has(status);
+}
+
+/** @username when there is one, else the profile name — the chat's own convention. */
+export function telegramDisplayName(user: {
+  first_name: string;
+  last_name?: string;
+  username?: string;
+}): string | null {
+  if (user.username) return `@${user.username}`;
+  const name = [user.first_name, user.last_name].filter(Boolean).join(' ').trim();
+  return name || null;
+}
+
+/**
+ * A chat command proves membership and carries the sender's name, so it keeps
+ * group_members current without a getChatMember round trip. Never lowers a
+ * cached status: only the name moves.
+ */
+export async function rememberMemberName(
+  db: Db,
+  groupId: number,
+  userId: number,
+  displayName: string | null,
+): Promise<void> {
+  if (!displayName) return;
+  await db
+    .insert(groupMembers)
+    .values({ groupId, userId, status: 'member', checkedAt: new Date(), displayName })
+    .onConflictDoUpdate({
+      target: [groupMembers.groupId, groupMembers.userId],
+      set: { displayName },
+    });
 }
 
 /**

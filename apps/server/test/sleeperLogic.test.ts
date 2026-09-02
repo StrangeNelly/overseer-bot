@@ -2,13 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { SLEEPER_BANDS, SLEEPERS, requiredVolumeUsd } from '@groupie/shared';
 import {
   bandFor,
+  carriedResidencyHours,
   computeResidency,
   dedupeByToken,
   inferSupply,
+  needsFullMeasurement,
   qualify,
   selectSleepers,
   type Candle,
   type PoolCandidate,
+  type PrevResidency,
 } from '../src/poller/sleeperLogic.js';
 
 const HOUR = 3_600_000;
@@ -28,6 +31,7 @@ function candidate(over: Partial<PoolCandidate> = {}): PoolCandidate {
     // Comfortably over requiredVolumeUsd(80_000) ≈ $19K.
     vol24Usd: 200_000,
     txns24: 400,
+    txns1h: 12,
     poolCreatedAt: new Date(NOW - 2 * DAY),
     ...over,
   };
@@ -555,5 +559,96 @@ describe('computeResidency', () => {
   it('refuses a future-stamped candle rather than reading it as fresh', () => {
     const hourly = hourlyCandles(10, 80_000).map((c) => ({ ...c, tsSec: c.tsSec + 4 * 3_600 }));
     expect(residency({ hourly }).hours).toBe(0);
+  });
+});
+
+/* --------------------------- carrying residency between scans (round 16b) */
+
+describe('needsFullMeasurement', () => {
+  const BAND_A = { loUsd: 50_000, hiUsd: 100_000 };
+  const BAND_B = { loUsd: 100_000, hiUsd: 250_000 };
+  const SCAN_GAP = SLEEPERS.scanIntervalHours * HOUR;
+
+  /** A previous entry that is carryable: same band, real hours, just measured. */
+  function prev(over: Partial<PrevResidency> = {}): PrevResidency {
+    return {
+      band: BAND_A,
+      inBandHours: 12,
+      scanAtMs: NOW - SCAN_GAP,
+      measuredAtMs: NOW - SCAN_GAP,
+      ...over,
+    };
+  }
+
+  it('a new entry always pays for candles', () => {
+    expect(needsFullMeasurement(undefined, { band: BAND_A }, NOW)).toBe(true);
+  });
+
+  it('the same band with a measured figure is carried, not re-read', () => {
+    expect(needsFullMeasurement(prev(), { band: BAND_A }, NOW)).toBe(false);
+  });
+
+  it('a band change re-measures — the old streak ended whatever else is true', () => {
+    expect(needsFullMeasurement(prev(), { band: BAND_B }, NOW)).toBe(true);
+    // Same low, different high is still a different band.
+    expect(needsFullMeasurement(prev(), { band: { loUsd: 50_000, hiUsd: 120_000 } }, NOW)).toBe(true);
+  });
+
+  it('a previous 0 is a failed or out-of-band read, never a base to add to', () => {
+    expect(needsFullMeasurement(prev({ inBandHours: 0 }), { band: BAND_A }, NOW)).toBe(true);
+    expect(needsFullMeasurement(prev({ inBandHours: Number.NaN }), { band: BAND_A }, NOW)).toBe(true);
+  });
+
+  it('an unstamped figure (pre-column rows, failed reads) re-measures', () => {
+    expect(needsFullMeasurement(prev({ measuredAtMs: null }), { band: BAND_A }, NOW)).toBe(true);
+  });
+
+  it('re-verifies once the measurement is a day old, and not before', () => {
+    const stale = SLEEPERS.residencyReverifyHours * HOUR;
+    expect(needsFullMeasurement(prev({ measuredAtMs: NOW - stale + 1 }), { band: BAND_A }, NOW)).toBe(false);
+    expect(needsFullMeasurement(prev({ measuredAtMs: NOW - stale }), { band: BAND_A }, NOW)).toBe(true);
+    expect(needsFullMeasurement(prev({ measuredAtMs: NOW - 2 * stale }), { band: BAND_A }, NOW)).toBe(true);
+  });
+
+  it('refuses to carry a coin that has stopped trading', () => {
+    // The listing's volume and txn figures are trailing 24h ones, so a coin that
+    // stopped trading an hour ago still qualifies and still buckets into the same
+    // band — and would accrue residency it is not earning until the daily
+    // re-verification. Zero trades in the last hour is that coin.
+    expect(needsFullMeasurement(prev(), { band: BAND_A, txns1h: 0 }, NOW)).toBe(true);
+  });
+
+  it('...but an UNKNOWN hourly count is not a stopped coin', () => {
+    // Absence of the h1 block says nothing; only a measured zero refuses.
+    expect(needsFullMeasurement(prev(), { band: BAND_A, txns1h: null }, NOW)).toBe(false);
+    expect(needsFullMeasurement(prev(), { band: BAND_A }, NOW)).toBe(false);
+    expect(needsFullMeasurement(prev(), { band: BAND_A, txns1h: 1 }, NOW)).toBe(false);
+  });
+
+  it('refuses to carry off a nonsense clock', () => {
+    expect(needsFullMeasurement(prev({ scanAtMs: NOW + HOUR }), { band: BAND_A }, NOW)).toBe(true);
+    expect(needsFullMeasurement(prev({ measuredAtMs: NOW + HOUR }), { band: BAND_A }, NOW)).toBe(true);
+  });
+});
+
+describe('carriedResidencyHours', () => {
+  const base: PrevResidency = {
+    band: { loUsd: 50_000, hiUsd: 100_000 },
+    inBandHours: 12,
+    scanAtMs: NOW - 3 * HOUR,
+    measuredAtMs: NOW - 3 * HOUR,
+  };
+
+  it('adds the time since the scan that measured it', () => {
+    expect(carriedResidencyHours(base, NOW)).toBeCloseTo(15, 6);
+  });
+
+  it('caps exactly where a measured value would', () => {
+    const cap = SLEEPERS.inBandMaxDays * 24;
+    expect(carriedResidencyHours({ ...base, inBandHours: cap - 1 }, NOW)).toBe(cap);
+  });
+
+  it('never runs backwards on a clock that did', () => {
+    expect(carriedResidencyHours({ ...base, scanAtMs: NOW + HOUR }, NOW)).toBe(12);
   });
 });

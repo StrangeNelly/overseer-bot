@@ -26,7 +26,11 @@ import { runSleeperScan } from './sleeperScan.js';
 const TICK_MS = 15_000;
 /** Caps per tick, sized to GeckoTerminal's 25-30/min budget. */
 const MAX_RESOLUTIONS_PER_TICK = 6;
-const MAX_CURVE_POLLS_PER_TICK = 10;
+/**
+ * Not a budget: the curve tier is batched, so this is the multi-pool endpoint's
+ * own ceiling. A token held back is a token polled late by a whole tick.
+ */
+const MAX_CURVE_TOKENS_PER_TICK = gt.POOLS_MULTI_MAX;
 const MAX_DEAD_POLLS_PER_TICK = 4;
 const MAX_OHLCV_FILLS_PER_TICK = 5;
 
@@ -505,16 +509,25 @@ async function pollUnresolved(db: Db, token: TokenRow, opts: PollOpts): Promise<
   );
 }
 
-async function pollCurve(db: Db, token: TokenRow, opts: PollOpts): Promise<void> {
-  if (!token.poolAddress) {
-    await pollUnresolved(db, token, opts); // re-resolve to find the pool
-    return;
-  }
-  const pool = await gt.getPool(token.poolAddress);
-  if (!pool) {
-    await db.update(tokens).set({ lastPolledAt: new Date() }).where(eq(tokens.id, token.id));
-    return;
-  }
+/**
+ * A curve read we could not take: stamp the clock so the token keeps its tier
+ * cadence, and write NOTHING else. An unreadable pool is not a $0 market — no
+ * snapshot row, no death check, no peak update.
+ */
+async function noReading(db: Db, token: TokenRow): Promise<void> {
+  await db.update(tokens).set({ lastPolledAt: new Date() }).where(eq(tokens.id, token.id));
+}
+
+/**
+ * Everything a curve poll does once it HAS its pool. Shared by the single-token
+ * path (pollTokenNow, pollCurve) and the batched one, so the two can't drift.
+ */
+async function applyCurvePool(
+  db: Db,
+  token: TokenRow,
+  pool: gt.GtPoolInfo,
+  opts: PollOpts,
+): Promise<void> {
   if (pool.graduated === true) {
     // Trading moves to the migrated pool; the curve pool is abandoned and its
     // last candle would poison any later OHLCV backfill.
@@ -535,6 +548,55 @@ async function pollCurve(db: Db, token: TokenRow, opts: PollOpts): Promise<void>
   const history = await loadTokenLiquidity(db, token.id, token.phase);
   await applySnapshot(db, token, snap, opts, history);
   await checkDeath(db, token, snap, history);
+}
+
+/**
+ * One curve token, one GeckoTerminal call. The bot's immediate polls use this;
+ * the tick uses pollCurveBatch. Exported so the tests can hold the two against
+ * each other.
+ */
+export async function pollCurve(db: Db, token: TokenRow, opts: PollOpts): Promise<void> {
+  if (!token.poolAddress) {
+    await pollUnresolved(db, token, opts); // re-resolve to find the pool
+    return;
+  }
+  const pool = await gt.getPool(token.poolAddress);
+  if (!pool) {
+    await noReading(db, token);
+    return;
+  }
+  await applyCurvePool(db, token, pool, opts);
+}
+
+/**
+ * The tick's curve tier (docs/decisions.md round 16b): ONE `/pools/multi` call
+ * for up to 30 due curve tokens, then exactly pollCurve's per-token handling.
+ *
+ * A token ABSENT from the response is a token GeckoTerminal has no answer for
+ * (it answers 200 with a shorter array, never an error). That is the same
+ * "unknown reading" the single-pool 404 produces, and it is handled the same
+ * way: stamp the clock, write nothing.
+ *
+ * Sharing a call must not mean sharing a failure, so BOTH branches below are
+ * isolated per token — a readable pool and an unreadable one alike, because the
+ * readings are already paid for and one failed stamp must not discard the rest.
+ * Only the fetch itself is shared: if THAT throws, the caller's isolate stamps
+ * the whole batch, which is what a failed poll has always done.
+ */
+export async function pollCurveBatch(db: Db, batch: TokenRow[], opts: PollOpts): Promise<void> {
+  const withPool = batch.filter((t) => Boolean(t.poolAddress));
+  // A curve token with no pool on record can only be re-resolved, one at a time.
+  for (const token of batch) {
+    if (!token.poolAddress) await isolate(db, [token], () => pollUnresolved(db, token, opts));
+  }
+  if (withPool.length === 0) return;
+  const pools = await gt.getPoolsMulti(withPool.map((t) => t.poolAddress!));
+  for (const token of withPool) {
+    const pool = pools.get(token.poolAddress!);
+    await isolate(db, [token], () =>
+      pool ? applyCurvePool(db, token, pool, opts) : noReading(db, token),
+    );
+  }
 }
 
 /**
@@ -607,20 +669,45 @@ async function pollGraduatedBatch(db: Db, batch: TokenRow[], opts: PollOpts): Pr
   }
 }
 
-async function pollDead(db: Db, token: TokenRow, opts: PollOpts): Promise<void> {
-  // 'rug_floor' can kill either phase, so it identifies neither on its own: a
-  // token with no graduation on record was still on its curve, and a curve
-  // pool is a GeckoTerminal read (its DexScreener "best pair" is dust at best).
-  // 'curve_floor' is no longer produced (round 6 retired it), but rows written
-  // before that still carry it and must still route to the curve read.
-  const wasCurve =
+/**
+ * Which market a corpse is re-read from.
+ *
+ * 'rug_floor' can kill either phase, so it identifies neither on its own: a
+ * token with no graduation on record was still on its curve, and a curve pool
+ * is a GeckoTerminal read (its DexScreener "best pair" is dust at best).
+ * 'curve_floor' is no longer produced (round 6 retired it), but rows written
+ * before that still carry it and must still route to the curve read.
+ *
+ * Exported so the tick can batch the curve-read corpses into one call.
+ */
+export function deadReadsCurve(token: TokenRow): boolean {
+  return (
     token.deathReason === 'curve_floor' ||
     token.deathReason === 'never_graduated' ||
-    (token.deathReason === 'rug_floor' && token.graduatedAt === null);
+    (token.deathReason === 'rug_floor' && token.graduatedAt === null)
+  );
+}
+
+/**
+ * `curvePools` is the tick's prefetched `/pools/multi` answer: when it is
+ * supplied, a curve-read corpse takes its pool from there instead of spending a
+ * call of its own, and an address missing from it is the same unknown reading a
+ * null getPool gives. Absent (bot-triggered polls) it falls back to the
+ * single-pool call. Exported for tests.
+ */
+export async function pollDead(
+  db: Db,
+  token: TokenRow,
+  opts: PollOpts,
+  curvePools?: Map<string, gt.GtPoolInfo>,
+): Promise<void> {
+  const wasCurve = deadReadsCurve(token);
   let snap: MarketSnapshot | null = null;
   let pool: gt.GtPoolInfo | null = null;
   if (wasCurve && token.poolAddress) {
-    pool = await gt.getPool(token.poolAddress);
+    pool = curvePools
+      ? (curvePools.get(token.poolAddress) ?? null)
+      : await gt.getPool(token.poolAddress);
     if (pool) snap = gt.gtSnapshot(pool);
   } else {
     const pair = (await ds.getBestPairs([token.address])).get(token.address);
@@ -816,7 +903,7 @@ export async function runTick(db: Db): Promise<void> {
   const curve = due
     .filter((c) => c.token.phase === 'curve')
     .sort(watchedFirst)
-    .slice(0, MAX_CURVE_POLLS_PER_TICK);
+    .slice(0, MAX_CURVE_TOKENS_PER_TICK);
   const graduated = due.filter((c) => c.token.phase === 'graduated');
   // Dead work is the least urgent; drain the backlog oldest-first over ticks
   // rather than letting it monopolize the GT budget in one.
@@ -831,12 +918,42 @@ export async function runTick(db: Db): Promise<void> {
   for (const c of unresolved) {
     await isolate(db, [c.token], () => pollUnresolved(db, c.token, TICK_POLL));
   }
-  for (const c of curve) await isolate(db, [c.token], () => pollCurve(db, c.token, TICK_POLL));
+  if (curve.length > 0) {
+    const batch = curve.map((c) => c.token);
+    await isolate(db, batch, () => pollCurveBatch(db, batch, TICK_POLL));
+  }
   for (let i = 0; i < graduated.length; i += 30) {
     const batch = graduated.slice(i, i + 30).map((c) => c.token);
     await isolate(db, batch, () => pollGraduatedBatch(db, batch, TICK_POLL));
   }
-  for (const c of dead) await isolate(db, [c.token], () => pollDead(db, c.token, TICK_POLL));
+  // The corpses that are read off GeckoTerminal share one call too.
+  //
+  // The only realistic throw from that call is the 429 that just parked the
+  // budgeter for 30s and doubled the gap, so falling back to one read per corpse
+  // would hold the tick open for the cooldown plus a gap each — on the LEAST
+  // urgent tier. Those corpses are deferred instead — and STAMPED, so the
+  // oldest-first slice moves past them next tick rather than re-selecting and
+  // re-dropping the same four for as long as the 429 lasts, which would starve
+  // every DexScreener-read corpse queued behind them. A repost is the exception,
+  // since its revival check is what the member is waiting on.
+  let deadCurvePools: Map<string, gt.GtPoolInfo> | undefined;
+  let deadBatch = dead;
+  const readsCurvePool = (c: Candidate) => deadReadsCurve(c.token) && c.token.poolAddress !== null;
+  const deadCurveAddresses = dead.filter(readsCurvePool).map((c) => c.token.poolAddress!);
+  if (deadCurveAddresses.length > 0) {
+    try {
+      deadCurvePools = await gt.getPoolsMulti(deadCurveAddresses);
+    } catch (err) {
+      console.warn('dead-pool prefetch failed, deferring curve-read corpses:', err);
+      deadBatch = dead.filter((c) => !readsCurvePool(c) || c.reviveRequested);
+      for (const c of dead.filter((c) => readsCurvePool(c) && !c.reviveRequested)) {
+        await isolate(db, [c.token], () => noReading(db, c.token));
+      }
+    }
+  }
+  for (const c of deadBatch) {
+    await isolate(db, [c.token], () => pollDead(db, c.token, TICK_POLL, deadCurvePools));
+  }
 
   // Judged on the data this tick just wrote. Never let it abort the tick: a
   // failed alert pass must not cost us the prune (or the next tick's cadence).

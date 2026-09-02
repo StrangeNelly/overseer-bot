@@ -1,12 +1,15 @@
-import { lt } from 'drizzle-orm';
+import { lt, sql } from 'drizzle-orm';
 import { sleeperEntries, sleeperSeen, type Db } from '@groupie/db';
 import { SLEEPERS, twitterUrlFrom, websiteUrlFrom } from '@groupie/shared';
 import * as ds from '../market/dexscreener.js';
 import * as gt from '../market/geckoterminal.js';
 import {
+  carriedResidencyHours,
   computeResidency,
+  needsFullMeasurement,
   selectSleepers,
   type PoolCandidate,
+  type PrevResidency,
   type SleeperPick,
 } from './sleeperLogic.js';
 
@@ -54,10 +57,10 @@ function sleep(ms: number): Promise<void> {
  */
 async function fetchPage(page: number): Promise<gt.GtPoolListing[]> {
   try {
-    return await gt.getTopPools(page);
+    return await gt.getTopPools(page, 'scan');
   } catch (err) {
     console.warn(`sleeper scan: page ${page} failed, retrying once:`, err);
-    return gt.getTopPools(page);
+    return gt.getTopPools(page, 'scan');
   }
 }
 
@@ -91,6 +94,7 @@ async function collect(): Promise<{ candidates: PoolCandidate[]; pages: number }
         liquidityUsd: pool.liquidityUsd,
         vol24Usd: pool.vol24Usd,
         txns24: pool.txns24,
+        txns1h: pool.txns1h,
         poolCreatedAt: pool.poolCreatedAt,
       });
     }
@@ -151,6 +155,12 @@ async function enrich(picks: SleeperPick[]): Promise<EnrichedPick[]> {
 interface ScoredPick extends EnrichedPick {
   /** Continuous hours in band, measured off candles (round 14). */
   inBandHours: number;
+  /**
+   * When inBandHours was last measured off candles — this scan for a full
+   * measurement, the previous stamp for a carried one, null when the read
+   * failed.
+   */
+  residencyMeasuredAt: Date | null;
 }
 
 /** One OHLCV call, with a single retry — same discipline as a listing page. */
@@ -161,31 +171,88 @@ async function fetchOhlcv(
 ): Promise<gt.GtCandle[]> {
   await sleep(OHLCV_GAP_MS);
   try {
-    return await gt.getOhlcv(poolAddress, timeframe, limit);
+    return await gt.getOhlcv(poolAddress, timeframe, limit, 'scan');
   } catch (err) {
     console.warn(`sleeper scan: ${timeframe} ohlcv for ${poolAddress} failed, retrying once:`, err);
     await sleep(OHLCV_GAP_MS);
-    return gt.getOhlcv(poolAddress, timeframe, limit);
+    return gt.getOhlcv(poolAddress, timeframe, limit, 'scan');
   }
 }
 
 /**
- * Time in band for every kept entry (docs/decisions.md round 14).
+ * The previous scan's residency, per address (docs/decisions.md round 16b).
  *
- * Hourly candles first: 100 of them reach ~4 days back, which covers every
- * duration up to 3d on its own. Only when the streak survives that whole window
- * is a second, daily call worth making — so the common case is one call per
- * pool and the long-residency case is two.
+ * Safe to read at measure time: persist() inserts THIS scan's rows and only
+ * then deletes the older ones, so until it runs the newest scan_at in the table
+ * is still the previous scan's. One row per address per scan (selectSleepers
+ * dedupes by token), so a plain map is enough.
+ */
+async function loadPreviousResidency(db: Db): Promise<Map<string, PrevResidency>> {
+  const rows = await db
+    .select({
+      address: sleeperEntries.address,
+      bandLoUsd: sleeperEntries.bandLoUsd,
+      bandHiUsd: sleeperEntries.bandHiUsd,
+      inBandHours: sleeperEntries.inBandHours,
+      scanAt: sleeperEntries.scanAt,
+      residencyMeasuredAt: sleeperEntries.residencyMeasuredAt,
+    })
+    .from(sleeperEntries)
+    .where(sql`${sleeperEntries.scanAt} = (select max(${sleeperEntries.scanAt}) from ${sleeperEntries})`);
+
+  const out = new Map<string, PrevResidency>();
+  for (const row of rows) {
+    out.set(row.address, {
+      band: { loUsd: row.bandLoUsd, hiUsd: row.bandHiUsd },
+      inBandHours: row.inBandHours,
+      scanAtMs: row.scanAt.getTime(),
+      measuredAtMs: row.residencyMeasuredAt?.getTime() ?? null,
+    });
+  }
+  return out;
+}
+
+/**
+ * Time in band for every kept entry (docs/decisions.md rounds 14 and 16b).
+ *
+ * The cheap path first: an address the previous scan already
+ * measured IN THE SAME BAND simply extends its figure by the time since that
+ * scan, no candles fetched. Only new entries, band changes, failed previous
+ * reads and figures older than SLEEPERS.residencyReverifyHours pay for OHLCV.
+ * needsFullMeasurement owns that decision and carries the error bound.
+ *
+ * The full walk: hourly candles first (100 of them reach ~4 days back, which
+ * covers every duration up to 3d on its own), and only a window that was
+ * in-band all the way through is worth a second, daily call.
  *
  * A pool whose candles cannot be read reports 0 rather than a guess. That means
  * it is filtered out of every duration view for one cycle, which is the honest
  * failure: we do not know how long it has been sitting there.
  */
-async function measureResidency(picks: EnrichedPick[], nowMs: number): Promise<ScoredPick[]> {
+async function measureResidency(
+  picks: EnrichedPick[],
+  prev: Map<string, PrevResidency>,
+  nowMs: number,
+): Promise<ScoredPick[]> {
   const out: ScoredPick[] = [];
   let failures = 0;
+  let carried = 0;
   for (const pick of picks) {
+    const previous = prev.get(pick.address);
+    if (previous && !needsFullMeasurement(previous, pick, nowMs)) {
+      carried++;
+      out.push({
+        ...pick,
+        inBandHours: carriedResidencyHours(previous, nowMs),
+        // The stamp travels with the figure: what is dated here is the last
+        // real measurement, which is what the 24h re-verification reads.
+        // Non-null because needsFullMeasurement rejects an unstamped previous.
+        residencyMeasuredAt: new Date(previous.measuredAtMs!),
+      });
+      continue;
+    }
     let inBandHours = 0;
+    let measured = false;
     try {
       const shared = {
         band: pick.band,
@@ -203,13 +270,17 @@ async function measureResidency(picks: EnrichedPick[], nowMs: number): Promise<S
       } else {
         inBandHours = fromHourly.hours;
       }
+      measured = true;
     } catch (err) {
       failures++;
       console.warn(`sleeper scan: no residency for ${pick.address}:`, err);
     }
-    out.push({ ...pick, inBandHours });
+    // A failed read is left UNSTAMPED so the next scan measures it properly
+    // rather than carrying a 0 forward for a day.
+    out.push({ ...pick, inBandHours, residencyMeasuredAt: measured ? new Date(nowMs) : null });
   }
   if (failures > 0) console.warn(`sleeper scan: ${failures}/${picks.length} residency reads failed`);
+  if (carried > 0) console.log(`sleeper scan: ${carried}/${picks.length} residencies carried forward`);
   return out;
 }
 
@@ -240,6 +311,7 @@ async function persist(db: Db, scanAt: Date, picks: ScoredPick[]): Promise<void>
         txns24: Math.round(pick.txns24),
         turnover: pick.turnover,
         inBandHours: pick.inBandHours,
+        residencyMeasuredAt: pick.residencyMeasuredAt,
         poolCreatedAt: pick.poolCreatedAt,
       })),
     );
@@ -275,12 +347,14 @@ async function recordSeen(db: Db, scanAt: Date, addresses: string[]): Promise<vo
  */
 export async function runSleeperScan(db: Db): Promise<SleeperScanResult> {
   const scanAt = new Date();
+  // Read BEFORE persist() writes this scan — see loadPreviousResidency.
+  const previous = await loadPreviousResidency(db);
   const { candidates, pages } = await collect();
   const picks = selectSleepers(candidates, scanAt.getTime());
   const enriched = await enrich(picks);
   // Measured against the scan's own clock, so every entry in a scan answers the
   // duration filter as of the same instant.
-  const scored = await measureResidency(enriched, scanAt.getTime());
+  const scored = await measureResidency(enriched, previous, scanAt.getTime());
 
   await persist(db, scanAt, scored);
   await recordSeen(db, scanAt, [...new Set(scored.map((e) => e.address))]);

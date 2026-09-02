@@ -6,6 +6,7 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import { SQL as SQLClass } from 'drizzle-orm/sql/sql';
 import {
   calls as callsTable,
+  groupMembers,
   mentions,
   sleeperEntries,
   sleeperSeen,
@@ -134,6 +135,7 @@ function makeDb(script: Script = {}): { db: Db; calls: DbCall[] } {
     if (table === tokens) return 'tokens';
     if (table === callsTable) return 'calls';
     if (table === mentions) return 'mentions';
+    if (table === groupMembers) return 'groupMembers';
     if (table === sleeperEntries) return 'sleeperEntries';
     if (table === sleeperSeen) return 'sleeperSeen';
     return 'unknown';
@@ -871,17 +873,20 @@ function watchRow(over: Record<string, unknown> = {}): Record<string, unknown> {
 
 /**
  * Script a board GET: board rows then the two count queries, all on `calls`;
- * `names` answers the slot-holder name lookup (mentions joined to calls).
+ * `names` answers the mention-name fallback (mentions joined to calls) and
+ * `memberNames` the cached group_members display names, which win.
  */
 function boardScript(options: {
   cards?: Array<{ call: CallRow; token: TokenRow }>;
   watchlist?: unknown[];
   names?: Array<{ userId: number; userName: string }>;
+  memberNames?: Array<{ userId: number; displayName: string | null }>;
 }): Script {
   return {
     'select:calls': [options.cards ?? [], [{ n: '0' }], [{ n: '0' }]],
     'select:watches': [options.watchlist ?? []],
     'select:mentions': [options.names ?? []],
+    'select:groupMembers': [options.memberNames ?? []],
   };
 }
 
@@ -1105,6 +1110,41 @@ describe('WatchlistEntry.addedByName', () => {
     const { db, calls } = makeDb(boardScript({}));
     await board(db);
     expect(find(calls, 'select:mentions')).toHaveLength(0);
+    expect(find(calls, 'select:groupMembers')).toHaveLength(0);
+  });
+
+  it('prefers the cached display name over the mention name', async () => {
+    // The membership check writes the name Telegram reports today; a mention
+    // is whatever they typed under weeks ago.
+    const { db } = makeDb(
+      boardScript({
+        watchlist: [watchRow({ addedBy: OTHER_USER_ID })],
+        names: [{ userId: OTHER_USER_ID, userName: '@old-handle' }],
+        memberNames: [{ userId: OTHER_USER_ID, displayName: '@friend' }],
+      }),
+    );
+    expect((await board(db)).watchlist[0]?.addedByName).toBe('@friend');
+  });
+
+  it('names a member who never posted a call, from the membership cache alone', async () => {
+    const { db } = makeDb(
+      boardScript({
+        watchlist: [watchRow({ addedBy: OTHER_USER_ID })],
+        memberNames: [{ userId: OTHER_USER_ID, displayName: '@friend' }],
+      }),
+    );
+    expect((await board(db)).watchlist[0]?.addedByName).toBe('@friend');
+  });
+
+  it('falls back to the mention name when the cached name is null', async () => {
+    const { db } = makeDb(
+      boardScript({
+        watchlist: [watchRow({ addedBy: OTHER_USER_ID })],
+        names: [{ userId: OTHER_USER_ID, userName: '@pwnzssg' }],
+        memberNames: [{ userId: OTHER_USER_ID, displayName: null }],
+      }),
+    );
+    expect((await board(db)).watchlist[0]?.addedByName).toBe('@pwnzssg');
   });
 });
 
@@ -1132,6 +1172,7 @@ function sleeperRow(over: Partial<SleeperRow> = {}): SleeperRow {
     txns24: 100,
     turnover: 0.5,
     inBandHours: 12,
+    residencyMeasuredAt: AT,
     poolCreatedAt: new Date(AT.getTime() - 48 * 3_600_000),
     ...over,
   };

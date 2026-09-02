@@ -29,6 +29,8 @@ export interface PoolCandidate {
   liquidityUsd: number | null;
   vol24Usd: number | null;
   txns24: number | null;
+  /** Trades in the last hour; null when the listing carried no h1 block. */
+  txns1h: number | null;
   poolCreatedAt: Date | null;
 }
 
@@ -326,4 +328,70 @@ export function computeResidency(input: ResidencyInput): BandResidency {
   const capSec = SLEEPERS.inBandMaxDays * DAY_SEC;
   const spanSec = Math.min(Math.max(0, nowSec - streakStartSec), capSec);
   return { hours: spanSec / HOUR_SEC, hourlyExhausted };
+}
+
+// ---------------------------------------------------------------------------
+// Carrying residency between scans (docs/decisions.md round 16b)
+// ---------------------------------------------------------------------------
+
+/** What the previous scan recorded for one address. */
+export interface PrevResidency {
+  band: Band;
+  /** Hours in band as of that scan. */
+  inBandHours: number;
+  /** When that scan ran. */
+  scanAtMs: number;
+  /** When the figure was last measured off candles; null = never / unknown. */
+  measuredAtMs: number | null;
+}
+
+/** Residency cap, in hours — the same ceiling computeResidency applies. */
+const MAX_RESIDENCY_HOURS = SLEEPERS.inBandMaxDays * 24;
+
+/**
+ * Does this pick need the full OHLCV walk-back, or can the previous scan's
+ * figure simply be carried forward?
+ *
+ * Carrying is only ever legitimate for an address that is STILL IN THE SAME
+ * BAND with a residency the last scan actually measured: the coin has not left
+ * as far as this scan can see, so the streak it was on has grown by the time
+ * between the two scans. Everything else re-measures:
+ *
+ *   - no previous entry (new to the list) — there is nothing to extend;
+ *   - a different band — the old streak ended, whatever else is true;
+ *   - a previous figure of 0 — the last measurement failed or found the coin
+ *     out of band, and 0 + elapsed would invent residency out of nothing;
+ *   - zero trades in the last hour — the listing's own figures are trailing 24h
+ *     ones, so a coin that has stopped trading stays on it and would keep
+ *     accruing band time it is not earning. This is the candle-freshness rule
+ *     computeResidency applies (inBandMaxCandleAgeHours), reached without a
+ *     call. An UNKNOWN h1 count carries: absence of the block is not absence of
+ *     trades;
+ *   - a figure last measured over `residencyReverifyHours` ago, so a carried
+ *     value can never drift indefinitely (see the constant for the bound);
+ *   - a nonsense clock (stamps in the future) — never carry off bad arithmetic.
+ */
+export function needsFullMeasurement(
+  prev: PrevResidency | undefined,
+  pick: { band: Band; txns1h?: number | null },
+  nowMs: number,
+): boolean {
+  if (!prev) return true;
+  if (pick.txns1h === 0) return true;
+  if (prev.band.loUsd !== pick.band.loUsd || prev.band.hiUsd !== pick.band.hiUsd) return true;
+  if (!Number.isFinite(prev.inBandHours) || prev.inBandHours <= 0) return true;
+  if (prev.measuredAtMs === null || !Number.isFinite(prev.measuredAtMs)) return true;
+  if (!Number.isFinite(prev.scanAtMs) || prev.scanAtMs > nowMs) return true;
+  const measuredAgeMs = nowMs - prev.measuredAtMs;
+  if (measuredAgeMs < 0) return true;
+  return measuredAgeMs >= SLEEPERS.residencyReverifyHours * HOUR_MS;
+}
+
+/**
+ * The carried figure: last scan's hours plus the time since it ran, capped
+ * exactly where a measured value would be.
+ */
+export function carriedResidencyHours(prev: PrevResidency, nowMs: number): number {
+  const elapsedHours = Math.max(0, (nowMs - prev.scanAtMs) / HOUR_MS);
+  return Math.min(prev.inBandHours + elapsedHours, MAX_RESIDENCY_HOURS);
 }

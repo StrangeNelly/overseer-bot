@@ -35,6 +35,7 @@ import {
   tokenLabel,
 } from '../poller/alertLogic.js';
 import { pollTokenNow } from '../poller/scheduler.js';
+import { rememberMemberName } from '../api/membership.js';
 import type { Config } from '../config.js';
 import { ingestMessage, upsertToken } from './ingest.js';
 
@@ -228,6 +229,14 @@ export async function handleWatch(
     await ctx.reply(capReply(outcome.cap));
     return;
   }
+  // The board names the slot after its holder; a command is the one moment the
+  // chat hands us that name for a member who may never have posted a call.
+  await rememberMemberName(
+    db,
+    group.id,
+    userId,
+    ctx.from && !ctx.from.is_bot ? displayName(ctx.from) : null,
+  );
 
   const s = alertSettingsOf(group.settings);
   const held = await activeWatchCount(db, group.id, userId);

@@ -1,7 +1,7 @@
 import { and, desc, eq, gte, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
-import { calls, mentions, snapshots, tokens, watches, type Db } from '@groupie/db';
+import { calls, groupMembers, mentions, snapshots, tokens, watches, type Db } from '@groupie/db';
 import {
   BOARD_WINDOWS,
   BOARD_WINDOW_HOURS,
@@ -242,14 +242,15 @@ export function toWatchlistEntry(
 }
 
 /**
- * The name each slot holder posts under, from their own most recent mention in
- * THIS group (docs/decisions.md round 16 review). `watches.added_by`,
- * `mentions.user_id` and `calls.caller_user_id` are all the same Telegram user
- * id, so the latest mention a member wrote is the freshest display name we
- * hold for them — keyed by member, never by coin.
+ * The name each slot holder goes by, keyed by member — never by coin.
  *
- * One batched query for the whole watchlist. A member who has never posted a
- * call or a mention here is simply absent: the design would rather say
+ * Two sources, batched for the whole watchlist: group_members.display_name,
+ * written by every membership check and chat command (round 16c — it names a
+ * member who has never posted a call here, which is exactly who a slot needs
+ * to name), then the member's most recent mention in THIS group as the
+ * fallback for rows cached before the column existed. `watches.added_by`,
+ * `mentions.user_id` and `calls.caller_user_id` are all the same Telegram id.
+ * A member absent from both is simply unnamed: the design would rather say
  * "another member's slot" than attribute a slot to the wrong person.
  */
 export async function loadSlotHolderNames(
@@ -258,13 +259,21 @@ export async function loadSlotHolderNames(
   userIds: number[],
 ): Promise<Map<number, string>> {
   if (userIds.length === 0) return new Map();
-  const rows = await db
-    .selectDistinctOn([mentions.userId], { userId: mentions.userId, userName: mentions.userName })
-    .from(mentions)
-    .innerJoin(calls, eq(calls.id, mentions.callId))
-    .where(and(eq(calls.groupId, groupId), inArray(mentions.userId, userIds)))
-    .orderBy(mentions.userId, desc(mentions.at));
-  return new Map(rows.map((r) => [r.userId, r.userName]));
+  const [members, mentioned] = await Promise.all([
+    db
+      .select({ userId: groupMembers.userId, displayName: groupMembers.displayName })
+      .from(groupMembers)
+      .where(and(eq(groupMembers.groupId, groupId), inArray(groupMembers.userId, userIds))),
+    db
+      .selectDistinctOn([mentions.userId], { userId: mentions.userId, userName: mentions.userName })
+      .from(mentions)
+      .innerJoin(calls, eq(calls.id, mentions.callId))
+      .where(and(eq(calls.groupId, groupId), inArray(mentions.userId, userIds)))
+      .orderBy(mentions.userId, desc(mentions.at)),
+  ]);
+  const names = new Map<number, string>(mentioned.map((r) => [r.userId, r.userName]));
+  for (const m of members) if (m.displayName) names.set(m.userId, m.displayName);
+  return names;
 }
 
 /** count(*) is a bigint, which postgres-js hands back as a string. */
