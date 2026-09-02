@@ -316,15 +316,19 @@ export interface RangeBoardResponse {
  */
 
 /**
- * The duration filter (docs/decisions.md round 14): how long the coin has sat
- * inside its band, continuously, up to the scan. 3h is the default and the
- * shortest; 336h (2w) is where the $1M–$3M band unlocks.
+ * The duration filter (docs/decisions.md rounds 14 and 17): how long the coin
+ * has sat inside its band, continuously, up to the scan. 3h is the default;
+ * 30m and 1h (round 17) are read off 15-minute candles for entries whose
+ * hourly residency is under 3h, so they name new entrants rather than
+ * pretending hourly candles can see half an hour.
  */
-export const SLEEPER_DURATIONS_HOURS = [3, 6, 24, 72, 168, 336, 720] as const;
+export const SLEEPER_DURATIONS_HOURS = [0.5, 1, 3, 6, 24, 72, 168, 336, 720] as const;
 export type SleeperDurationHours = (typeof SLEEPER_DURATIONS_HOURS)[number];
 
 /** Chip text. Written out rather than derived: "720h" is not how anyone reads a month. */
 export const SLEEPER_DURATION_LABELS: Record<SleeperDurationHours, string> = {
+  0.5: '30m',
+  1: '1h',
   3: '3h',
   6: '6h',
   24: '24h',
@@ -334,7 +338,12 @@ export const SLEEPER_DURATION_LABELS: Record<SleeperDurationHours, string> = {
   720: '1m',
 };
 
-/** The shortest duration that unlocks a `longOnly` band. */
+/**
+ * Views shorter than this keep round 9's 10-day pool-age ceiling (the scan
+ * itself admits pools up to SLEEPERS.inBandMaxDays so the long views can be
+ * served at all). It no longer gates any band: round 17 made $1M–$3M a regular
+ * band at every duration.
+ */
 export const SLEEPER_LONG_ONLY_MIN_HOURS = 336;
 
 export interface SleeperBandSpec {
@@ -342,17 +351,19 @@ export interface SleeperBandSpec {
   readonly loUsd: number;
   readonly hiUsd: number;
   /**
-   * Only served once the requested duration reaches
-   * SLEEPER_LONG_ONLY_MIN_HOURS. Round 14: a $1M–$3M coin is only a "sleeper"
-   * if it has genuinely sat still for weeks — at 3h it is just a big coin.
+   * Served only from SLEEPER_LONG_ONLY_MIN_HOURS up. No shipped band sets it
+   * since round 17; the gate stays so a future band can be long-only without
+   * touching the serve path.
    */
   readonly longOnly: boolean;
 }
 
 /**
- * The bands the SCAN buckets into: the four Ranging presets plus the round-14
- * $1M–$3M band. RANGE_PRESETS itself is untouched — Ranging still has four —
- * so the two surfaces can diverge without either one reaching into the other.
+ * The bands the SCAN buckets into (round 17): the four Ranging presets plus
+ * $1M–$3M, $3M–$5M and $5M–$8M. RANGE_PRESETS itself is untouched — Ranging
+ * still has four — so the two surfaces can diverge without either one reaching
+ * into the other. The upper bands are what the stocks filter makes usable:
+ * without it they are nothing but tokenized equities.
  */
 export const SLEEPER_BANDS: readonly SleeperBandSpec[] = [
   ...RANGE_PRESETS.map((preset) => ({
@@ -361,7 +372,9 @@ export const SLEEPER_BANDS: readonly SleeperBandSpec[] = [
     hiUsd: preset.hiUsd,
     longOnly: false,
   })),
-  { label: '1M–3M', loUsd: 1_000_000, hiUsd: 3_000_000, longOnly: true },
+  { label: '1M–3M', loUsd: 1_000_000, hiUsd: 3_000_000, longOnly: false },
+  { label: '3M–5M', loUsd: 3_000_000, hiUsd: 5_000_000, longOnly: false },
+  { label: '5M–8M', loUsd: 5_000_000, hiUsd: 8_000_000, longOnly: false },
 ];
 
 /** The bands a given duration is allowed to see, in ascending order. */
@@ -410,6 +423,12 @@ export interface SleeperEntry {
    */
   watched: boolean;
   watchedByMe: boolean;
+  /**
+   * Round 17: a tokenized stock, ETF or leveraged equity product
+   * (isTokenizedStock). Stored at scan time; the default view excludes these
+   * and the `stocks=1` query includes them.
+   */
+  isStock: boolean;
 }
 
 export interface SleeperBand {
@@ -420,16 +439,19 @@ export interface SleeperBand {
 }
 
 /**
- * GET /api/g/:slug/sleepers?all=0|1&minHours=<SLEEPER_DURATIONS_HOURS member>
+ * GET /api/g/:slug/sleepers?all=0|1&stocks=0|1&minHours=<SLEEPER_DURATIONS_HOURS member>
  *
- * `all=1` drops the twitter-required default. Bands are every band that
- * duration is allowed to see (sleeperBandsFor), in ascending order and always
- * present, so an empty band can say so rather than silently vanishing.
+ * `all=1` drops the twitter-required default; `stocks=1` drops the
+ * no-tokenized-stocks default (round 17). Bands are every band that duration
+ * is allowed to see (sleeperBandsFor), in ascending order and always present,
+ * so an empty band can say so rather than silently vanishing.
  */
 export interface SleepersResponse {
   /** ISO instant of the scan behind this payload; null before the first one. */
   refreshedAt: string | null;
   /** The duration filter this payload answers — echoed back like Ranging's. */
   minHours: SleeperDurationHours;
+  /** Whether tokenized stocks were excluded from this payload (the default). */
+  excludeStocks: boolean;
   bands: SleeperBand[];
 }
