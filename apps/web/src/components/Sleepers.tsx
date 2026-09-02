@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import type { ReactNode } from 'react';
 import type {
   SleeperBand,
   SleeperDurationHours,
@@ -6,13 +7,21 @@ import type {
   SleepersResponse,
 } from '@groupie/shared';
 import {
-  SLEEPER_BANDS,
   SLEEPER_DURATION_LABELS,
   SLEEPER_DURATIONS_HOURS,
+  SLEEPER_LONG_ONLY_MIN_HOURS,
   SLEEPERS,
 } from '@groupie/shared';
 import { bandPosition } from '../derive';
-import { avatarHue, fmtAge, fmtHours, fmtTurnover, fmtUsd, shortAddress } from '../format';
+import {
+  avatarHue,
+  fmtAge,
+  fmtHours,
+  fmtHoursFloor,
+  fmtTurnover,
+  fmtUsd,
+  shortAddress,
+} from '../format';
 import { hoverCapable } from '../motion';
 import type { WatchProps } from '../watch';
 import { targetFromSleeper, watchFor } from '../watch';
@@ -46,6 +55,12 @@ interface SleepersProps {
   /** Minimum continuous time in band — the round-14 duration filter. */
   minHours: SleeperDurationHours;
   onMinHours: (next: SleeperDurationHours) => void;
+  /**
+   * The X-only / no-stocks chips, when this layout has nowhere else to put
+   * them. Desktop draws them in the view header; mobile has only the 46px tone
+   * band, which the trust frame owns, so they ride the control panel instead.
+   */
+  filterChips?: ReactNode;
   /** Shared clock, ticked once a minute by App. */
   now: number;
   watch: WatchProps;
@@ -53,10 +68,6 @@ interface SleepersProps {
 
 function bandLabel(band: SleeperBand): string {
   return `${fmtUsd(band.loUsd)}–${fmtUsd(band.hiUsd)}`;
-}
-
-function isLongOnly(band: SleeperBand): boolean {
-  return SLEEPER_BANDS.some((spec) => spec.loUsd === band.loUsd && spec.longOnly);
 }
 
 function title(entry: SleeperEntry): string {
@@ -71,12 +82,16 @@ export function Sleepers({
   xOnly,
   minHours,
   onMinHours,
+  filterChips,
   now,
   watch,
 }: SleepersProps) {
   // One open link row at a time, exactly like the board's rows.
   const [openAddress, setOpenAddress] = useState<string | null>(null);
-  useEffect(() => setOpenAddress(null), [xOnly, minHours]);
+  // The stocks filter is read off the PAYLOAD rather than a prop: it is the
+  // response that decides which rows exist, and the toggle is a request for one.
+  const excludeStocks = data?.excludeStocks ?? true;
+  useEffect(() => setOpenAddress(null), [xOnly, minHours, excludeStocks]);
 
   const toggle = useCallback(
     (address: string) => setOpenAddress((prev) => (prev === address ? null : address)),
@@ -93,6 +108,14 @@ export function Sleepers({
         the group's own calls.
       */}
       <div className="ctl-panel">
+        {filterChips ? (
+          <div className="ctl-row">
+            <span className="ctl-label">SHOWING</span>
+            <div className="chips" role="group" aria-label="Sleepers filters">
+              {filterChips}
+            </div>
+          </div>
+        ) : null}
         <div className="ctl-row">
           <span className="ctl-label">IN BAND ≥</span>
           <div className="chips chips-hours" role="group" aria-label="Minimum time in band">
@@ -110,8 +133,8 @@ export function Sleepers({
           </div>
           <span className="ctl-note">
             {total === null
-              ? '$1M–$3M appears from 2w up — at 3h a $2M coin is just a big coin'
-              : `${total} leads across ${data?.bands.length ?? 0} bands · $1M–$3M appears from 2w up`}
+              ? 'residency is read off candles — it reaches back before we first saw the coin'
+              : `${total} leads across ${data?.bands.length ?? 0} bands · residency read off candles`}
           </span>
         </div>
       </div>
@@ -187,14 +210,32 @@ function SleeperBody({
     );
   }
   if (total === 0) {
-    // Two independent reasons to be empty, and the duration is the one the
-    // reader just changed — name it first so the fix is obvious.
-    const held = `held its band for ${SLEEPER_DURATION_LABELS[minHours]}+`;
+    // Three independent reasons to be empty, and the duration is the one the
+    // reader just changed — name it first so the fix is obvious. Every
+    // suggestion is a filter that is actually ON: at the shortest chip there is
+    // no shorter duration to offer, and offering one sends the reader to a
+    // chip they are already standing on.
+    // Every figure and flag here is the PAYLOAD's, not the toggles': this
+    // sentence explains an empty response, and a toggle can already be ahead of
+    // the response it is waiting for (or of one that failed to arrive).
+    const held = `held its band for ${SLEEPER_DURATION_LABELS[data.minHours]}+`;
+    const options: string[] = [];
+    if (data.minHours !== SLEEPER_DURATIONS_HOURS[0]) options.push('a shorter duration');
+    if (data.xOnly) options.push('showing all');
+    if (data.excludeStocks) options.push('including stocks');
+    const suggestion =
+      options.length === 0
+        ? ''
+        : ` Try ${
+            options.length === 1
+              ? options[0]
+              : `${options.slice(0, -1).join(', ')}, or ${options[options.length - 1]}`
+          }.`;
     return (
       <p className="empty">
-        {xOnly
-          ? `Nothing with an X account ${held} this scan. Try a shorter duration, or showing all.`
-          : `Nothing on the chain ${held} this scan. Try a shorter duration.`}
+        {data.xOnly
+          ? `Nothing with an X account ${held} this scan.${suggestion}`
+          : `Nothing on the chain ${held} this scan.${suggestion}`}
       </p>
     );
   }
@@ -203,20 +244,20 @@ function SleeperBody({
     <>
       {/* Keyed on the filters so a chip change remounts the grid: that is what
           plays the 200ms cross-fade, and it is the only motion this surface has. */}
-      <div className="zone-grid slp-grid" key={`${minHours}-${xOnly ? 'x' : 'all'}`}>
+      <div
+        className="zone-grid slp-grid"
+        key={`${minHours}-${xOnly ? 'x' : 'all'}-${data.excludeStocks ? 'nostock' : 'stock'}`}
+      >
+        {/* Every band the payload carries, in its own order — round 17 made all
+            seven regular, so nothing here is gated on the duration any more. */}
         {data.bands.map((band, index) => (
-          <section
-            className={`zone zone-cyan zone-slp${isLongOnly(band) ? ' is-glow' : ''}`}
-            key={band.loUsd}
-          >
+          <section className="zone zone-cyan zone-slp" key={band.loUsd}>
             <div className="zone-band">
               <span className="zone-id">
                 <span className="zone-headline zone-headline-band">{bandLabel(band)}</span>
                 <span className="zone-count">{band.entries.length}</span>
               </span>
-              {isLongOnly(band) ? (
-                <span className="zone-note">long holds only · unlocked at 2w+</span>
-              ) : index === 0 ? (
+              {index === 0 ? (
                 <span className="zone-note">ranked by turnover (24h vol ÷ mcap)</span>
               ) : null}
             </div>
@@ -244,8 +285,12 @@ function SleeperBody({
       <p className="footnote slp-footnote">
         ranked by turnover (24h volume ÷ market cap) · liquidity ≥ {fmtUsd(SLEEPERS.minLiquidityUsd)}{' '}
         and ≥ {Math.round(SLEEPERS.liqToMcapMinRatio * 100)}% of market cap · pool age{' '}
-        {SLEEPERS.minPoolAgeHours}h–{SLEEPERS.maxPoolAgeDays}d · time in band from hourly/daily
-        candles · nothing here is tracked
+        {SLEEPERS.minPoolAgeHours}h+ · under {SLEEPERS.maxPoolAgeDays}d on views shorter than{' '}
+        {SLEEPER_DURATION_LABELS[SLEEPER_LONG_ONLY_MIN_HOURS]} · time in band from candle history (
+        {SLEEPERS.shortCandleMinutes}-minute candles under {SLEEPERS.shortHoldMaxHours}h) ·{' '}
+        {data.xOnly ? 'X account required' : 'X account not required'} ·{' '}
+        {data.excludeStocks ? 'tokenized stocks excluded' : 'tokenized stocks included'} · nothing
+        here is tracked
       </p>
     </>
   );
@@ -310,7 +355,10 @@ function SleeperRow({
   // Measured off candles, so it reaches back before we ever saw the coin — and
   // it is capped, which the "+" says out loud rather than pretending precision.
   const capped = entry.inBandHours >= SLEEPERS.inBandMaxDays * 24;
-  const inBand = entry.inBandHours > 0 ? `${fmtHours(entry.inBandHours)}${capped ? '+' : ''}` : null;
+  // Floored, never rounded: the badge sits under the duration chip that served
+  // the row, and a rounded-up figure would name a chip that drops the coin.
+  const inBand =
+    entry.inBandHours > 0 ? `${fmtHoursFloor(entry.inBandHours)}${capped ? '+' : ''}` : null;
   const tick = bandPosition(entry.mcapUsd, loUsd, hiUsd);
   const control = watchFor(targetFromSleeper(entry), watch);
 
@@ -346,6 +394,12 @@ function SleeperRow({
                 X
               </a>
             ) : null}
+            {/*
+              A tokenized equity, not a coin (round 17). It only appears when
+              the reader has turned the stocks filter off, and it is a plain
+              badge — a fact about what the row IS, never a P&L colour.
+            */}
+            {entry.isStock ? <span className="badge badge-stock">STOCK</span> : null}
             {/*
               Two different clocks, side by side on purpose. "in band" is the
               coin's own history, read off candles that predate us; "on list" is

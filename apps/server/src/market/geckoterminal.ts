@@ -439,6 +439,28 @@ export async function getOhlcv(
 }
 
 /**
+ * The last `limit` aggregated MINUTE candles for a pool, newest first — the
+ * same endpoint and the same payload shape as getOhlcv, at the minute
+ * timeframe with an `aggregate` bucket size (15 for quarter-hours).
+ *
+ * Used by the Sleepers scan for the 30m/1h duration chips (docs/decisions.md
+ * round 17): hourly candles cannot resolve half an hour, so an entry with no
+ * established hourly residency gets one of these instead.
+ */
+export async function getOhlcvMinutes(
+  poolAddress: string,
+  aggregate: number,
+  limit: number,
+  priority: GtPriority = 'poll',
+): Promise<GtCandle[]> {
+  const body = (await gtFetch(
+    `/networks/${ROBINHOOD_SLUG}/pools/${poolAddress}/ohlcv/minute?aggregate=${aggregate}&limit=${limit}`,
+    priority,
+  )) as { data?: { attributes?: { ohlcv_list?: unknown[][] } } } | null;
+  return parseOhlcvRows(body?.data?.attributes?.ohlcv_list ?? []);
+}
+
+/**
  * One row of the chain-wide pool listing. Deliberately flat and nullable: the
  * Sleepers scan is the only caller, and it does its own floor checks.
  */

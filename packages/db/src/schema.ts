@@ -311,6 +311,15 @@ export const sleeperEntries = pgTable(
      * which forces a full OHLCV measurement, the safe answer.
      */
     residencyMeasuredAt: timestamp('residency_measured_at', { withTimezone: true }),
+    /**
+     * A tokenized stock, ETF or leveraged equity product, decided at scan time
+     * by isTokenizedStock (docs/decisions.md round 17). Stored rather than
+     * recomputed on read so the toggle answers off the same reading the keep
+     * cut used. Defaults to false: a row written before this column existed
+     * carries no name evidence either way, and the rule's own answer for an
+     * unknown name is false.
+     */
+    isStock: boolean('is_stock').notNull().default(false),
     poolCreatedAt: timestamp('pool_created_at', { withTimezone: true }),
   },
   // The read is always "the latest scan, band ascending, rank ascending".

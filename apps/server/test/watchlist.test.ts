@@ -1173,13 +1173,14 @@ function sleeperRow(over: Partial<SleeperRow> = {}): SleeperRow {
     turnover: 0.5,
     inBandHours: 12,
     residencyMeasuredAt: AT,
+    isStock: false,
     poolCreatedAt: new Date(AT.getTime() - 48 * 3_600_000),
     ...over,
   };
 }
 
-async function sleepers(db: Db): Promise<SleepersResponse> {
-  const res = await testApp(db).request(`/api/g/${SLUG}/sleepers`);
+async function sleepers(db: Db, query = ''): Promise<SleepersResponse> {
+  const res = await testApp(db).request(`/api/g/${SLUG}/sleepers${query}`);
   expect(res.status).toBe(200);
   return (await res.json()) as SleepersResponse;
 }
@@ -1250,5 +1251,86 @@ describe('SleeperEntry.watched / watchedByMe', () => {
     const queries = find(calls, 'select:watches');
     expect(queries).toHaveLength(1);
     expect(whereParams(queries[0])).toEqual([GROUP_ID, true]);
+  });
+});
+
+/* --------------------------------------------- Sleepers stocks toggle (r17) */
+
+/** A stock and a coin in the same band, the stock ranked first on turnover. */
+const stockRows = (): SleeperRow[] => [
+  sleeperRow({ id: 1, rank: 1, symbol: 'QQQ', name: 'Invesco QQQ • Robinhood Token', isStock: true }),
+  sleeperRow({ id: 2, rank: 2, address: `0x${'2'.repeat(40)}`, symbol: 'SLPR', isStock: false }),
+];
+
+describe('GET /api/g/:slug/sleepers — the no-stocks default', () => {
+  it('excludes tokenized stocks when nothing is asked for, and says so', async () => {
+    const { db } = makeDb(sleeperScript({ rows: stockRows() }));
+    const body = await sleepers(db);
+    expect(body.excludeStocks).toBe(true);
+    expect(body.bands[0]?.entries.map((e) => e.symbol)).toEqual(['SLPR']);
+  });
+
+  it('includes them on stocks=1, flagged, behind the coins, and echoes the toggle', async () => {
+    const { db } = makeDb(sleeperScript({ rows: stockRows() }));
+    const body = await sleepers(db, '?stocks=1');
+    expect(body.excludeStocks).toBe(false);
+    // QQQ outranks SLPR on turnover, but the band leads with its coins: the
+    // reader asked to SEE stocks, not to have them take the top of the band.
+    expect(body.bands[0]?.entries.map((e) => e.symbol)).toEqual(['SLPR', 'QQQ']);
+    expect(body.bands[0]?.entries.map((e) => e.isStock)).toEqual([false, true]);
+  });
+
+  it('treats any other value as the default, never as "show them"', async () => {
+    for (const query of ['?stocks=0', '?stocks=true', '?stocks=', '?stocks=11']) {
+      const { db } = makeDb(sleeperScript({ rows: stockRows() }));
+      const body = await sleepers(db, query);
+      expect(body.excludeStocks).toBe(true);
+      expect(body.bands[0]?.entries.map((e) => e.symbol)).toEqual(['SLPR']);
+    }
+  });
+});
+
+/* ------------------------------------ Sleepers: the serve cut is per kind */
+
+/** One band whose top three turnover ranks are equities, with a coin under them. */
+const stockHeavyBand = (): SleeperRow[] => [
+  sleeperRow({ id: 1, rank: 1, address: `0x${'a'.repeat(40)}`, symbol: 'QQQ', isStock: true }),
+  sleeperRow({ id: 2, rank: 2, address: `0x${'b'.repeat(40)}`, symbol: 'TSM', isStock: true }),
+  sleeperRow({ id: 3, rank: 3, address: `0x${'c'.repeat(40)}`, symbol: 'PLTR', isStock: true }),
+  sleeperRow({ id: 4, rank: 4, address: `0x${'d'.repeat(40)}`, symbol: 'SLPR', isStock: false }),
+  sleeperRow({ id: 5, rank: 5, address: `0x${'e'.repeat(40)}`, symbol: 'MRNA', isStock: true }),
+];
+
+describe('GET /api/g/:slug/sleepers — servePerBand applies per kind', () => {
+  it('serves the coin under three equities when stocks are excluded', async () => {
+    const { db } = makeDb(sleeperScript({ rows: stockHeavyBand() }));
+    expect((await sleepers(db)).bands[0]?.entries.map((e) => e.symbol)).toEqual(['SLPR']);
+  });
+
+  it('adds up to three stocks WITHOUT displacing that coin', async () => {
+    // The whole point of the toggle: turning stocks on may only ever add rows.
+    // A single union-wide top-3 cut would have served QQQ/TSM/PLTR and dropped
+    // the one coin the default view showed.
+    const { db } = makeDb(sleeperScript({ rows: stockHeavyBand() }));
+    const symbols = (await sleepers(db, '?stocks=1')).bands[0]?.entries.map((e) => e.symbol);
+    expect(symbols).toEqual(['SLPR', 'QQQ', 'TSM', 'PLTR']);
+  });
+});
+
+/* ------------------------------------------- Sleepers: the xOnly echo (r17) */
+
+describe('GET /api/g/:slug/sleepers — the X-only echo', () => {
+  it('reports the twitter-required default', async () => {
+    const { db } = makeDb(sleeperScript({ rows: [sleeperRow()] }));
+    expect((await sleepers(db)).xOnly).toBe(true);
+  });
+
+  it('reports all=1, and serves the entries with no X account', async () => {
+    const { db } = makeDb(
+      sleeperScript({ rows: [sleeperRow({ symbol: 'NOX', twitterUrl: null })] }),
+    );
+    const body = await sleepers(db, '?all=1');
+    expect(body.xOnly).toBe(false);
+    expect(body.bands[0]?.entries.map((e) => e.symbol)).toEqual(['NOX']);
   });
 });

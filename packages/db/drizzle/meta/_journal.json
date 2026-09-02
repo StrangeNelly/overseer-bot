@@ -78,6 +78,13 @@
       "when": 1788306755854,
       "tag": "0010_white_william_stryker",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1788308003577,
+      "tag": "0011_smiling_jubilee",
+      "breakpoints": true
     }
   ]
 }

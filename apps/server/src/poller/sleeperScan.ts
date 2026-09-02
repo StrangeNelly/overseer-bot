@@ -6,7 +6,10 @@ import * as gt from '../market/geckoterminal.js';
 import {
   carriedResidencyHours,
   computeResidency,
+  computeShortResidency,
+  dedupeByToken,
   needsFullMeasurement,
+  qualify,
   selectSleepers,
   type PoolCandidate,
   type PrevResidency,
@@ -122,23 +125,56 @@ interface EnrichedPick extends SleeperPick {
 }
 
 /**
- * One DexScreener batch over the kept entries: image, socials, and a proper
+ * DexScreener batches over the given addresses: image, socials, and a proper
  * symbol/name. A token DexScreener does not index (curve-phase coins are
- * routinely absent) keeps the GeckoTerminal name data and null socials — an
- * absence there says nothing about the coin.
+ * routinely absent) is simply missing from the map — an absence there says
+ * nothing about the coin.
+ *
+ * Run BEFORE selection since round 17, because the token NAME is what decides
+ * whether an entry is a tokenized stock and the stock/coin split has to happen
+ * inside the keep cut. GeckoTerminal's pool listing carries only the pool's own
+ * name ("QQQ / WETH 1%"), built from symbols, so it cannot answer that.
  */
-async function enrich(picks: SleeperPick[]): Promise<EnrichedPick[]> {
+async function fetchPairs(addresses: readonly string[]): Promise<Map<string, ds.DsPair>> {
   const pairs = new Map<string, ds.DsPair>();
-  for (let i = 0; i < picks.length; i += DS_BATCH) {
-    const batch = picks.slice(i, i + DS_BATCH).map((p) => p.address);
+  let unnamed = 0;
+  for (let i = 0; i < addresses.length; i += DS_BATCH) {
+    const batch = addresses.slice(i, i + DS_BATCH);
     try {
-      for (const [address, pair] of await ds.getBestPairs(batch)) pairs.set(address, pair);
+      for (const [address, pair] of await fetchPairsBatch(batch)) pairs.set(address, pair);
     } catch (err) {
-      // Metadata is a nicety; the scan's numbers all come from GeckoTerminal.
+      unnamed += batch.length;
       console.warn('sleeper scan: dexscreener enrichment failed for a batch:', err);
     }
   }
+  // Not just missing metadata since round 17: an address with no name is an
+  // address the tokenized-stock rule has to answer "coin" for, so a failed
+  // batch quietly puts equities back in the coins' keep slots. Say so.
+  if (unnamed > 0) {
+    console.warn(
+      `sleeper scan: ${unnamed}/${addresses.length} qualified addresses left unnamed — ` +
+        'any tokenized stocks among them are kept and served as coins this scan',
+    );
+  }
+  return pairs;
+}
 
+/**
+ * One DexScreener batch, with a single retry — the same discipline every
+ * GeckoTerminal call here already has. No pacing sleep: DexScreener's limit is
+ * 300/min and one scan asks for a handful of batches.
+ */
+async function fetchPairsBatch(batch: string[]): Promise<Map<string, ds.DsPair>> {
+  try {
+    return await ds.getBestPairs(batch);
+  } catch (err) {
+    console.warn('sleeper scan: dexscreener batch failed, retrying once:', err);
+    return ds.getBestPairs(batch);
+  }
+}
+
+/** The kept picks, with the metadata already fetched attached. */
+function enrich(picks: SleeperPick[], pairs: Map<string, ds.DsPair>): EnrichedPick[] {
   return picks.map((pick) => {
     const pair = pairs.get(pick.address);
     return {
@@ -177,6 +213,67 @@ async function fetchOhlcv(
     await sleep(OHLCV_GAP_MS);
     return gt.getOhlcv(poolAddress, timeframe, limit, 'scan');
   }
+}
+
+/** The 15-minute read behind the 30m/1h chips, paced like every other call. */
+async function fetchShortOhlcv(poolAddress: string): Promise<gt.GtCandle[]> {
+  await sleep(OHLCV_GAP_MS);
+  try {
+    return await gt.getOhlcvMinutes(
+      poolAddress,
+      SLEEPERS.shortCandleMinutes,
+      SLEEPERS.shortCandleLimit,
+      'scan',
+    );
+  } catch (err) {
+    console.warn(`sleeper scan: 15m ohlcv for ${poolAddress} failed, retrying once:`, err);
+    await sleep(OHLCV_GAP_MS);
+    return gt.getOhlcvMinutes(
+      poolAddress,
+      SLEEPERS.shortCandleMinutes,
+      SLEEPERS.shortCandleLimit,
+      'scan',
+    );
+  }
+}
+
+/** The newest candle's START, or null when the series carried no readable one. */
+function newestTsSec(candles: readonly gt.GtCandle[]): number | null {
+  let newest: number | null = null;
+  for (const candle of candles) {
+    if (!Number.isFinite(candle.tsSec)) continue;
+    if (newest === null || candle.tsSec > newest) newest = candle.tsSec;
+  }
+  return newest;
+}
+
+/**
+ * Is the 15-minute read worth making at all, or is its answer already known?
+ *
+ * computeShortResidency reports 0 whenever the newest 15-minute candle's START
+ * is more than SLEEPERS.shortMaxCandleAgeMinutes old, and two signals we hold
+ * BEFORE spending the call prove that is the answer:
+ *
+ *   - the listing says zero trades in the last hour, so the newest 15-minute
+ *     bucket cannot have started inside it. An UNKNOWN count (null) still
+ *     reads: absence of the h1 block is not absence of trades;
+ *   - the newest HOURLY candle started more than
+ *     (shortMaxCandleAgeMinutes + 60) minutes ago, so no trade can have landed
+ *     inside the freshness window either — the hour that would contain it has
+ *     no candle. An unknown hourly age (no readable candles) still reads.
+ *
+ * Skipping is not a shortcut around the rule: the caller records the 0 the read
+ * would have returned, so a sub-3h figure never rides on the hourly span alone.
+ */
+function shortReadCanSeeAnything(
+  txns1h: number | null | undefined,
+  newestHourlyTsSec: number | null,
+  nowMs: number,
+): boolean {
+  if (txns1h === 0) return false;
+  if (newestHourlyTsSec === null) return true;
+  const ageMin = (nowMs / 1000 - newestHourlyTsSec) / 60;
+  return ageMin <= SLEEPERS.shortMaxCandleAgeMinutes + 60;
 }
 
 /**
@@ -228,6 +325,29 @@ async function loadPreviousResidency(db: Db): Promise<Map<string, PrevResidency>
  * A pool whose candles cannot be read reports 0 rather than a guess. That means
  * it is filtered out of every duration view for one cycle, which is the honest
  * failure: we do not know how long it has been sitting there.
+ *
+ * The short read (round 17): a full measurement that comes back under
+ * SLEEPERS.shortHoldMaxHours pays for ONE more call, 15-minute candles, so the
+ * 30m and 1h chips have something to filter on. Below that threshold the minute
+ * evidence is the AUTHORITATIVE one — it REPLACES the hourly figure rather than
+ * competing with it — because the chips it serves are defined in terms of
+ * fifteen-minute closes, and hourly candles cannot resolve half an hour either
+ * way: a coin that left the band 45 minutes ago still has an in-band hourly
+ * close. A null reading (no candles, nothing readable) leaves the hourly figure
+ * standing; a 0 reading is evidence and replaces it.
+ *
+ * Bounded by construction — at most one extra call per NEW short entry per scan
+ * (two if the first attempt errors and the retry runs), never for a carried
+ * one, never for an entry the hourly walk already established at
+ * shortHoldMaxHours or more, never after a failed hourly read (whose failure is
+ * almost always the budgeter telling us to stop asking), and never when the
+ * listing or the hourly candles already prove the answer would be 0 — see
+ * shortReadCanSeeAnything.
+ *
+ * The short read has its OWN try/catch: the hourly walk that preceded it is a
+ * real measurement, and throwing it (and its stamp) away over a 429 on the
+ * follow-up call would force a full re-measurement next scan — the exact spend
+ * the budgeter is asking us to avoid.
  */
 async function measureResidency(
   picks: EnrichedPick[],
@@ -251,16 +371,18 @@ async function measureResidency(
       });
       continue;
     }
+    const shared = {
+      band: pick.band,
+      entryMcapUsd: pick.mcapUsd,
+      entryPriceUsd: pick.priceUsd,
+      nowMs,
+    };
     let inBandHours = 0;
     let measured = false;
+    let newestHourlyTsSec: number | null = null;
     try {
-      const shared = {
-        band: pick.band,
-        entryMcapUsd: pick.mcapUsd,
-        entryPriceUsd: pick.priceUsd,
-        nowMs,
-      };
       const hourly = await fetchOhlcv(pick.poolAddress, 'hour', SLEEPERS.inBandHourlyLimit);
+      newestHourlyTsSec = newestTsSec(hourly);
       const fromHourly = computeResidency({ ...shared, hourly });
       // hourlyExhausted is only ever true off a live, in-band streak, so this
       // is the one case where a second call can find more history.
@@ -274,6 +396,24 @@ async function measureResidency(
     } catch (err) {
       failures++;
       console.warn(`sleeper scan: no residency for ${pick.address}:`, err);
+    }
+    if (measured && inBandHours < SLEEPERS.shortHoldMaxHours) {
+      if (shortReadCanSeeAnything(pick.txns1h, newestHourlyTsSec, nowMs)) {
+        try {
+          const minutes = await fetchShortOhlcv(pick.poolAddress);
+          const fromMinutes = computeShortResidency({ ...shared, minutes });
+          // A number is a reading and it wins outright, 0 included. Null is no
+          // reading at all, and the hourly figure stands.
+          if (fromMinutes !== null) inBandHours = fromMinutes;
+        } catch (err) {
+          console.warn(`sleeper scan: 15m read failed, hourly figure kept for ${pick.address}:`, err);
+        }
+      } else {
+        // The listing already proved the read would answer 0: nothing traded
+        // inside the freshness window. Below the threshold the minute evidence
+        // is the only evidence, so the hourly span is not kept in its place.
+        inBandHours = 0;
+      }
     }
     // A failed read is left UNSTAMPED so the next scan measures it properly
     // rather than carrying a 0 forward for a day.
@@ -312,6 +452,7 @@ async function persist(db: Db, scanAt: Date, picks: ScoredPick[]): Promise<void>
         turnover: pick.turnover,
         inBandHours: pick.inBandHours,
         residencyMeasuredAt: pick.residencyMeasuredAt,
+        isStock: pick.isStock,
         poolCreatedAt: pick.poolCreatedAt,
       })),
     );
@@ -350,11 +491,22 @@ export async function runSleeperScan(db: Db): Promise<SleeperScanResult> {
   // Read BEFORE persist() writes this scan — see loadPreviousResidency.
   const previous = await loadPreviousResidency(db);
   const { candidates, pages } = await collect();
-  const picks = selectSleepers(candidates, scanAt.getTime());
-  const enriched = await enrich(picks);
+  // Names first (round 17): the tokenized-stock rule reads the base token's
+  // name, and the keep cut needs the answer before it picks its twelve. Only
+  // candidates that already clear every floor are looked up — the ones that
+  // fail cannot be kept whatever they are called. qualify() is pure and cheap,
+  // so running it here and again inside selectSleepers costs nothing.
+  const deduped = dedupeByToken(candidates);
+  const nowMs = scanAt.getTime();
+  const pairs = await fetchPairs(
+    deduped.filter((c) => qualify(c, nowMs) !== null).map((c) => c.address),
+  );
+  const named = deduped.map((c) => ({ ...c, tokenName: pairs.get(c.address)?.name ?? null }));
+  const picks = selectSleepers(named, nowMs);
+  const enriched = enrich(picks, pairs);
   // Measured against the scan's own clock, so every entry in a scan answers the
   // duration filter as of the same instant.
-  const scored = await measureResidency(enriched, previous, scanAt.getTime());
+  const scored = await measureResidency(enriched, previous, nowMs);
 
   await persist(db, scanAt, scored);
   await recordSeen(db, scanAt, [...new Set(scored.map((e) => e.address))]);
@@ -362,6 +514,7 @@ export async function runSleeperScan(db: Db): Promise<SleeperScanResult> {
   console.log(
     `sleeper scan: ${candidates.length} pools over ${pages} page(s) -> ${scored.length} kept ` +
       `(${scored.filter((e) => e.twitterUrl !== null).length} with X, ` +
+      `${scored.filter((e) => e.isStock).length} tokenized stocks, ` +
       `${scored.filter((e) => e.inBandHours >= 24).length} in band 24h+)`,
   );
   return { scanned: candidates.length, kept: scored.length, pages };

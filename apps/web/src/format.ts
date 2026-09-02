@@ -3,6 +3,8 @@
  * above, never scientific notation, and an em dash for every missing value.
  */
 
+import { SLEEPERS } from '@groupie/shared';
+
 const DASH = '—';
 
 function stripTrailingZero(s: string): string {
@@ -92,6 +94,35 @@ export function fmtHours(hours: number | null | undefined): string {
   // otherwise round a real 0.5h streak up to "1h" (or a 20-minute one to "0h").
   if (hours < 1) return `${Math.round(hours * 60)}m`;
   const whole = Math.round(hours);
+  if (whole < 48) return `${whole}h`;
+  const days = Math.floor(whole / 24);
+  const rest = whole % 24;
+  return rest === 0 ? `${days}d` : `${days}d ${rest}h`;
+}
+
+/**
+ * The same duration, floored — `1h 15m`, `2h 30m`, `45m`, `14h`, `2d 3h`, `—`.
+ *
+ * The constraint: this figure is printed beside the duration chip that served
+ * it, so it must never claim more time than was measured. fmtHours rounds, and
+ * a rounded 2.5h reads "3h" on a row the 3h chip would drop — the badge would
+ * contradict the filter that produced it. Under SLEEPERS.shortHoldMaxHours the
+ * quarter-hour is the real precision of the 15-minute residency read, so it is
+ * printed rather than collapsed to whole hours.
+ */
+export function fmtHoursFloor(hours: number | null | undefined): string {
+  if (!isNum(hours) || hours < 0) return DASH;
+  if (hours < SLEEPERS.shortHoldMaxHours) {
+    const quarters = Math.floor(hours * 4);
+    const whole = Math.floor(quarters / 4);
+    const minutes = (quarters - whole * 4) * 15;
+    // Below a quarter hour there is no floor to print that is not 0m, and "0m"
+    // beside a live row reads as an error rather than as a short streak.
+    if (quarters === 0) return '<15m';
+    if (whole === 0) return `${minutes}m`;
+    return minutes === 0 ? `${whole}h` : `${whole}h ${minutes}m`;
+  }
+  const whole = Math.floor(hours);
   if (whole < 48) return `${whole}h`;
   const days = Math.floor(whole / 24);
   const rest = whole % 24;

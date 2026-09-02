@@ -15,8 +15,8 @@ import {
 import type { ApiEnv } from './membership.js';
 
 /**
- * GET /api/g/:slug/sleepers?all=0|1&minHours=<SLEEPER_DURATIONS_HOURS member>
- * — the chain-wide discovery stream (docs/decisions.md rounds 9 and 14).
+ * GET /api/g/:slug/sleepers?all=0|1&stocks=0|1&minHours=<SLEEPER_DURATIONS_HOURS member>
+ * — the chain-wide discovery stream (docs/decisions.md rounds 9, 14 and 17).
  *
  * The scan itself is group-agnostic: one sweep of the chain serves every group.
  * Everything group-specific happens HERE, at read time:
@@ -24,7 +24,8 @@ import type { ApiEnv } from './membership.js';
  *     more — it is on the board);
  *   - drop anything that has not held its band for the requested duration;
  *   - default to entries that have an X account, with `all=1` to see the rest;
- *   - cut each band to SLEEPERS.servePerBand after every filter.
+ *   - drop tokenized stocks, with `stocks=1` to see them;
+ *   - cut each band to SLEEPERS.servePerBand PER KIND after every filter.
  */
 
 type EntryRow = typeof sleeperEntries.$inferSelect;
@@ -46,6 +47,16 @@ export function parseMinHours(
     return { error: `minHours must be one of ${SLEEPER_DURATIONS_HOURS.join(', ')}` };
   }
   return { minHours: value as SleeperDurationHours };
+}
+
+/**
+ * Whether this request wants tokenized stocks in the payload (round 17).
+ * Anything but an explicit "1" excludes them: the toggle ships ON, and a
+ * mistyped or absent parameter must land on the default the owner asked for
+ * rather than on a board full of equities.
+ */
+export function parseIncludeStocks(raw: string | undefined): boolean {
+  return raw === '1';
 }
 
 /**
@@ -145,6 +156,7 @@ function toEntry(
     links: tradingLinks(row.address),
     watched,
     watchedByMe,
+    isStock: row.isStock,
   };
 }
 
@@ -156,12 +168,13 @@ export function createSleeperRoutes(db: Db): Hono<ApiEnv> {
     // Anything but an explicit "1" keeps the twitter-required default: this
     // surface leans on an X account being the cheapest way to research a lead.
     const showAll = c.req.query('all') === '1';
+    const excludeStocks = !parseIncludeStocks(c.req.query('stocks'));
     const parsed = parseMinHours(c.req.query('minHours'));
     if ('error' in parsed) return c.json({ error: parsed.error }, 400);
     const { minHours } = parsed;
-    // The $1M–$3M band only exists at 2w/1m (round 14). Deciding it here, off
-    // the band list, means the entries filter and the payload's band list can
-    // never disagree about which bands this duration has.
+    // One sleeperBandsFor call answers both "which bands does this duration
+    // show" and "which rows may be served", so the payload's band list and the
+    // entries filter cannot disagree about it.
     const bandSpecs = sleeperBandsFor(minHours);
     const visibleBandLos = new Set(bandSpecs.map((band) => band.loUsd));
 
@@ -184,7 +197,13 @@ export function createSleeperRoutes(db: Db): Hono<ApiEnv> {
     ]);
     const userId = c.get('userId');
 
-    const byBand = new Map<number, SleeperEntry[]>();
+    // The serve cut is per KIND, like the scan's keep cut: up to servePerBand
+    // coins AND up to servePerBand stocks. Ranking is over the whole band, so a
+    // band whose top turnover rows are all equities would otherwise serve three
+    // stocks and drop the coin underneath — turning the stocks toggle ON would
+    // REMOVE a coin the default view showed, which is not what a toggle labelled
+    // "with stocks" can mean. Coins lead the band for the same reason.
+    const byBand = new Map<number, { coins: SleeperEntry[]; stocks: SleeperEntry[] }>();
     for (const row of rows) {
       const address = row.address.toLowerCase();
       if (!visibleBandLos.has(row.bandLoUsd)) continue;
@@ -192,28 +211,35 @@ export function createSleeperRoutes(db: Db): Hono<ApiEnv> {
       if (!passesServeAgeCeiling(row.poolCreatedAt, minHours, nowMs)) continue;
       if (called.has(address)) continue;
       if (!showAll && row.twitterUrl === null) continue;
-      const list = byBand.get(row.bandLoUsd) ?? [];
+      if (excludeStocks && row.isStock) continue;
+      const bucket = byBand.get(row.bandLoUsd) ?? { coins: [], stocks: [] };
+      const list = row.isStock ? bucket.stocks : bucket.coins;
       // Rows arrive rank-ascending, so a plain length check is the top-N cut.
       if (list.length >= SLEEPERS.servePerBand) continue;
       const slotHolder = watchedBy.get(address);
       list.push(
         toEntry(row, seen.get(address) ?? 0, slotHolder !== undefined, slotHolder === userId),
       );
-      byBand.set(row.bandLoUsd, list);
+      byBand.set(row.bandLoUsd, bucket);
     }
 
     // Every band this duration can see is always present, empty or not: the tab
     // says so per band rather than silently collapsing to whichever ones had
     // entries.
-    const bands: SleeperBand[] = bandSpecs.map((preset) => ({
-      loUsd: preset.loUsd,
-      hiUsd: preset.hiUsd,
-      entries: byBand.get(preset.loUsd) ?? [],
-    }));
+    const bands: SleeperBand[] = bandSpecs.map((preset) => {
+      const bucket = byBand.get(preset.loUsd);
+      return {
+        loUsd: preset.loUsd,
+        hiUsd: preset.hiUsd,
+        entries: bucket ? [...bucket.coins, ...bucket.stocks] : [],
+      };
+    });
 
     const body: SleepersResponse = {
       refreshedAt: rows[0]?.scanAt.toISOString() ?? null,
       minHours,
+      excludeStocks,
+      xOnly: !showAll,
       bands,
     };
     return c.json(body);

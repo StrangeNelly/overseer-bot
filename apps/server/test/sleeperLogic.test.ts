@@ -4,6 +4,7 @@ import {
   bandFor,
   carriedResidencyHours,
   computeResidency,
+  computeShortResidency,
   dedupeByToken,
   inferSupply,
   needsFullMeasurement,
@@ -87,24 +88,28 @@ describe('bandFor', () => {
     expect(bandFor(900_000)).toEqual({ loUsd: 500_000, hiUsd: 1_000_000 });
   });
 
-  it('buckets the round-14 fifth band, $1M–$3M', () => {
+  it('buckets the three upper bands added in round 17', () => {
     expect(bandFor(1_850_000)).toEqual({ loUsd: 1_000_000, hiUsd: 3_000_000 });
     expect(bandFor(2_999_999)).toEqual({ loUsd: 1_000_000, hiUsd: 3_000_000 });
+    expect(bandFor(4_000_000)).toEqual({ loUsd: 3_000_000, hiUsd: 5_000_000 });
+    expect(bandFor(6_500_000)).toEqual({ loUsd: 5_000_000, hiUsd: 8_000_000 });
   });
 
   it('is a partition: a shared endpoint belongs to the upper band only', () => {
     expect(bandFor(100_000)).toEqual({ loUsd: 100_000, hiUsd: 250_000 });
     expect(bandFor(250_000)).toEqual({ loUsd: 250_000, hiUsd: 500_000 });
     expect(bandFor(500_000)).toEqual({ loUsd: 500_000, hiUsd: 1_000_000 });
-    // $1M used to close the last band; the fifth band now owns it.
     expect(bandFor(1_000_000)).toEqual({ loUsd: 1_000_000, hiUsd: 3_000_000 });
+    expect(bandFor(3_000_000)).toEqual({ loUsd: 3_000_000, hiUsd: 5_000_000 });
+    expect(bandFor(5_000_000)).toEqual({ loUsd: 5_000_000, hiUsd: 8_000_000 });
   });
 
   it('includes both outer edges but nothing beyond them', () => {
     expect(bandFor(50_000)).toEqual({ loUsd: 50_000, hiUsd: 100_000 });
-    expect(bandFor(3_000_000)).toEqual({ loUsd: 1_000_000, hiUsd: 3_000_000 });
+    // The last band CLOSES, so $8M is the top of the ladder, not a gap.
+    expect(bandFor(8_000_000)).toEqual({ loUsd: 5_000_000, hiUsd: 8_000_000 });
     expect(bandFor(49_999)).toBeNull();
-    expect(bandFor(3_000_001)).toBeNull();
+    expect(bandFor(8_000_001)).toBeNull();
   });
 
   it('rejects a non-finite mcap', () => {
@@ -113,8 +118,17 @@ describe('bandFor', () => {
   });
 
   it('leaves Ranging alone: SLEEPER_BANDS extends the presets, never replaces them', () => {
-    expect(SLEEPER_BANDS).toHaveLength(5);
-    expect(SLEEPER_BANDS.filter((b) => b.longOnly).map((b) => b.loUsd)).toEqual([1_000_000]);
+    // Round 17: the four Ranging presets plus 1M–3M, 3M–5M and 5M–8M.
+    expect(SLEEPER_BANDS).toHaveLength(7);
+    expect(SLEEPER_BANDS.at(-1)).toMatchObject({ loUsd: 5_000_000, hiUsd: 8_000_000 });
+    // No band is duration-gated any more; the flag survives for a future one.
+    expect(SLEEPER_BANDS.filter((b) => b.longOnly)).toEqual([]);
+  });
+
+  it('is contiguous: every band starts where the previous one ended', () => {
+    for (let i = 1; i < SLEEPER_BANDS.length; i++) {
+      expect(SLEEPER_BANDS[i]?.loUsd).toBe(SLEEPER_BANDS[i - 1]?.hiUsd);
+    }
   });
 });
 
@@ -225,10 +239,11 @@ describe('qualify — floors', () => {
     expect(qualify(candidate({ mcapUsd: 20_000, vol24Usd: 500_000 }), NOW)).toBeNull();
     expect(
       qualify(
+        // Above $8M, the top of the round-17 ladder.
         candidate({
-          mcapUsd: 5_000_000,
-          priceUsd: 0.005,
-          liquidityUsd: 500_000,
+          mcapUsd: 9_000_000,
+          priceUsd: 0.009,
+          liquidityUsd: 900_000,
           vol24Usd: 50_000_000,
         }),
         NOW,
@@ -339,7 +354,9 @@ describe('selectSleepers', () => {
         ...bandOf(15, 200_000, '0xb'), // 100K–250K
         ...bandOf(2, 400_000, '0xc'), // 250K–500K
         ...bandOf(15, 900_000, '0xd'), // 500K–1M
-        ...bandOf(15, 2_000_000, '0xe'), // 1M–3M, the round-14 band
+        ...bandOf(15, 2_000_000, '0xe'), // 1M–3M
+        ...bandOf(15, 4_000_000, '0xf'), // 3M–5M, round 17
+        ...bandOf(15, 6_000_000, '0xg'), // 5M–8M, round 17
       ],
       NOW,
     );
@@ -347,11 +364,11 @@ describe('selectSleepers', () => {
       (preset) => picks.filter((p) => p.band.loUsd === preset.loUsd).length,
     );
     const keep = SLEEPERS.keepPerBand;
-    expect(perBand).toEqual([keep, keep, 2, keep, keep]);
+    expect(perBand).toEqual([keep, keep, 2, keep, keep, keep, keep]);
     // Band ascending, and rank restarts at 1 inside each band.
     const bandOrder = picks.map((p) => p.band.loUsd);
     expect(bandOrder).toEqual([...bandOrder].sort((a, b) => a - b));
-    expect(picks.filter((p) => p.rank === 1)).toHaveLength(5);
+    expect(picks.filter((p) => p.rank === 1)).toHaveLength(7);
   });
 
   it('dedupes before ranking, so one coin cannot fill a band with its own pools', () => {
@@ -389,6 +406,72 @@ describe('selectSleepers', () => {
   it('returns nothing when nothing qualifies', () => {
     expect(selectSleepers([], NOW)).toEqual([]);
     expect(selectSleepers([candidate({ liquidityUsd: 0 })], NOW)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tokenized stocks (docs/decisions.md round 17)
+// ---------------------------------------------------------------------------
+
+describe('qualify — isStock', () => {
+  it('reads the issuer suffix off the TOKEN name, not the pool name', () => {
+    expect(qualify(candidate({ tokenName: 'Invesco QQQ • Robinhood Token' }), NOW)?.isStock).toBe(
+      true,
+    );
+    expect(qualify(candidate({ poolName: 'QQQ / WETH 1%' }), NOW)?.isStock).toBe(false);
+  });
+
+  it('flags leveraged equity products', () => {
+    expect(qualify(candidate({ tokenName: 'NVDA 3x Long' }), NOW)?.isStock).toBe(true);
+  });
+
+  it('never guesses from an unknown name', () => {
+    expect(qualify(candidate({ tokenName: null }), NOW)?.isStock).toBe(false);
+    expect(qualify(candidate(), NOW)?.isStock).toBe(false);
+  });
+});
+
+describe('selectSleepers — the stock/coin keep split', () => {
+  /** n coins in one band; `stock` names them as Robinhood equity tokens. */
+  function kind(count: number, prefix: string, stock: boolean): PoolCandidate[] {
+    return Array.from({ length: count }, (_, i) =>
+      candidate({
+        address: `${prefix}${i}`,
+        poolAddress: `${prefix}pool${i}`,
+        // Stocks turn over harder here than every coin, so an unsplit cut would
+        // hand them all twelve slots — which is exactly the live shape round 17
+        // was written for.
+        vol24Usd: 80_000 * (stock ? 9 - i * 0.1 : 4 - i * 0.1),
+        tokenName: stock ? `Equity ${i} • Robinhood Token` : `Coin ${i}`,
+      }),
+    );
+  }
+
+  it('gives each kind its own keepPerBand, so stocks cannot crowd out coins', () => {
+    const picks = selectSleepers([...kind(15, '0xs', true), ...kind(15, '0xc', false)], NOW);
+    const keep = SLEEPERS.keepPerBand;
+    expect(picks.filter((p) => p.isStock)).toHaveLength(keep);
+    expect(picks.filter((p) => !p.isStock)).toHaveLength(keep);
+    // Both cuts keep the best of their kind.
+    expect(picks.filter((p) => p.isStock).map((p) => p.address)).toEqual(
+      Array.from({ length: keep }, (_, i) => `0xs${i}`),
+    );
+    expect(picks.filter((p) => !p.isStock).map((p) => p.address)).toEqual(
+      Array.from({ length: keep }, (_, i) => `0xc${i}`),
+    );
+  });
+
+  it('still ranks the band as one list, ascending and gapless', () => {
+    const picks = selectSleepers([...kind(15, '0xs', true), ...kind(15, '0xc', false)], NOW);
+    expect(picks.map((p) => p.rank)).toEqual(picks.map((_, i) => i + 1));
+    // Ranking is by turnover over everything kept: the stocks lead here.
+    expect(picks.slice(0, SLEEPERS.keepPerBand).every((p) => p.isStock)).toBe(true);
+  });
+
+  it('does not reserve slots: a band of coins alone still keeps twelve', () => {
+    const picks = selectSleepers(kind(15, '0xc', false), NOW);
+    expect(picks).toHaveLength(SLEEPERS.keepPerBand);
+    expect(picks.every((p) => !p.isStock)).toBe(true);
   });
 });
 
@@ -559,6 +642,92 @@ describe('computeResidency', () => {
   it('refuses a future-stamped candle rather than reading it as fresh', () => {
     const hourly = hourlyCandles(10, 80_000).map((c) => ({ ...c, tsSec: c.tsSec + 4 * 3_600 }));
     expect(residency({ hourly }).hours).toBe(0);
+  });
+});
+
+/* ---------------------------------------------- short holds (round 17) */
+
+describe('computeShortResidency', () => {
+  const BAND = { loUsd: 50_000, hiUsd: 100_000 };
+  const MCAP = 80_000;
+  const PRICE = 0.00008; // => 1e9 supply
+  const NOW_SEC = Math.floor(NOW / 1000);
+  const QUARTER = 15 * 60;
+  const closeFor = (mcap: number) => mcap / 1_000_000_000;
+
+  /**
+   * `count` 15-minute candles, newest first, the newest STARTING
+   * `newestAgoMin` minutes ago. `mcapAt(i)` is candle i's implied mcap.
+   */
+  function quarters(
+    count: number,
+    mcapAt: number | ((i: number) => number),
+    newestAgoMin = 0,
+  ): Candle[] {
+    return Array.from({ length: count }, (_, i) => ({
+      tsSec: NOW_SEC - newestAgoMin * 60 - i * QUARTER,
+      close: closeFor(typeof mcapAt === 'function' ? mcapAt(i) : mcapAt),
+    }));
+  }
+
+  function short(over: Partial<Parameters<typeof computeShortResidency>[0]> = {}) {
+    return computeShortResidency({
+      band: BAND,
+      entryMcapUsd: MCAP,
+      entryPriceUsd: PRICE,
+      minutes: quarters(12, 80_000),
+      nowMs: NOW,
+      ...over,
+    });
+  }
+
+  it('counts closes, a quarter hour each: 2 is 30m and 4 is 1h', () => {
+    expect(short({ minutes: quarters(2, 80_000) })).toBeCloseTo(0.5, 6);
+    expect(short({ minutes: quarters(4, 80_000) })).toBeCloseTo(1, 6);
+    expect(short({ minutes: quarters(1, 80_000) })).toBeCloseTo(0.25, 6);
+  });
+
+  it('stays a candle below the hourly threshold even on a full window', () => {
+    // A full 12 closes would read as exactly shortHoldMaxHours, but the newest
+    // bucket is in progress and the hourly walk already declined to establish
+    // that many hours — so the figure can never reach the 3h chip.
+    const full = short({ minutes: quarters(12, 80_000) });
+    expect(full).toBeCloseTo(SLEEPERS.shortHoldMaxHours - 0.25, 6);
+    expect(full).toBeLessThan(SLEEPERS.shortHoldMaxHours);
+  });
+
+  it('stops at the first close outside the band', () => {
+    // Newest three in band, the fourth out: the older stretch is another visit.
+    expect(short({ minutes: quarters(12, (i) => (i === 3 ? 200_000 : 80_000)) })).toBeCloseTo(
+      0.75,
+      6,
+    );
+  });
+
+  it('reads 0 — a real reading — when the coin has already left the band', () => {
+    expect(short({ minutes: quarters(12, (i) => (i === 0 ? 200_000 : 80_000)) })).toBe(0);
+  });
+
+  it('accepts a newest candle up to 30 minutes old and reads 0 past that', () => {
+    expect(short({ minutes: quarters(4, 80_000, 30) })).toBeCloseTo(1, 6);
+    // Stale, not absent: the window says this coin is not holding a band NOW.
+    expect(short({ minutes: quarters(4, 80_000, 31) })).toBe(0);
+    expect(short({ minutes: quarters(4, 80_000, 120) })).toBe(0);
+  });
+
+  it('reports NO READING, not a zero, off data it cannot use', () => {
+    // null and 0 are different claims: the caller keeps the hourly figure on a
+    // null and lets a 0 replace it.
+    expect(short({ minutes: [] })).toBeNull();
+    // No price and no mcap: supply cannot be inferred, so no close is a mcap.
+    expect(short({ entryPriceUsd: null, entryMcapUsd: 0 })).toBeNull();
+    // A future stamp is a bad clock, not evidence the coin left the band.
+    expect(short({ minutes: quarters(4, 80_000, -60) })).toBeNull();
+  });
+
+  it('sorts defensively rather than trusting the upstream order', () => {
+    const ascending = [...quarters(4, 80_000)].reverse();
+    expect(short({ minutes: ascending })).toBeCloseTo(1, 6);
   });
 });
 

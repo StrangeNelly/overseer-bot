@@ -145,19 +145,26 @@ export function fetchRange(
 
 /**
  * Sleepers: the chain-wide discovery stream. `all` drops the twitter-required
- * default; `minHours` is the time-in-band filter (round 14). Snapshot data on a
- * 3-hourly server scan — never on the live stream.
+ * default; `stocks` drops the no-tokenized-stocks default (round 17);
+ * `minHours` is the time-in-band filter (round 14). Snapshot data on a 3-hourly
+ * server scan — never on the live stream.
+ *
+ * Both flags are sent explicitly rather than omitted at their default, so the
+ * URL always says what the payload answers.
  */
 export function fetchSleepers(
   slug: string,
   all: boolean,
+  stocks: boolean,
   minHours: SleeperDurationHours,
   signal?: AbortSignal,
 ): Promise<SleepersResponse> {
-  return request<SleepersResponse>(
-    `${groupPath(slug)}/sleepers?all=${all ? '1' : '0'}&minHours=${minHours}`,
-    { signal },
-  );
+  const params = new URLSearchParams({
+    all: all ? '1' : '0',
+    stocks: stocks ? '1' : '0',
+    minHours: String(minHours),
+  });
+  return request<SleepersResponse>(`${groupPath(slug)}/sleepers?${params.toString()}`, { signal });
 }
 
 export function binCall(slug: string, callId: number): Promise<void> {

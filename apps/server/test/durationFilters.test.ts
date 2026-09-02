@@ -8,7 +8,7 @@ import {
   sleeperBandsFor,
 } from '@groupie/shared';
 import { parseQuery } from '../src/api/range.js';
-import { parseMinHours, passesServeAgeCeiling } from '../src/api/sleepers.js';
+import { parseIncludeStocks, parseMinHours, passesServeAgeCeiling } from '../src/api/sleepers.js';
 
 /**
  * The two duration filters' PARAMETER contracts — Ranging's `hours` (with the
@@ -121,9 +121,26 @@ describe('GET /api/g/:slug/sleepers — minHours validation', () => {
     }
   });
 
+  it('accepts the round-17 short holds', () => {
+    expect(parseMinHours('0.5')).toEqual({ minHours: 0.5 });
+    expect(parseMinHours('1')).toEqual({ minHours: 1 });
+  });
+
   it('rejects anything outside the tuple rather than clamping to it', () => {
-    for (const raw of ['0', '1', '4', '12', '48', '1000', 'week', '3.5', '-3']) {
+    for (const raw of ['0', '0.25', '4', '12', '48', '1000', 'week', '3.5', '-3']) {
       expect(parseMinHours(raw)).toHaveProperty('error');
+    }
+  });
+});
+
+describe('GET /api/g/:slug/sleepers — the stocks toggle', () => {
+  it('includes tokenized stocks only on an explicit 1', () => {
+    expect(parseIncludeStocks('1')).toBe(true);
+  });
+
+  it('excludes them for an absent, empty or unrecognised value', () => {
+    for (const raw of [undefined, '', '0', 'true', 'yes', '11', ' 1']) {
+      expect(parseIncludeStocks(raw)).toBe(false);
     }
   });
 });
@@ -154,20 +171,19 @@ describe('passesServeAgeCeiling — round 9 meets round 14', () => {
   });
 });
 
-describe('sleeperBandsFor — the $1M–$3M band gate', () => {
-  it('hides the long-only band at every duration below 2w', () => {
-    for (const hours of SLEEPER_DURATIONS_HOURS.filter((h) => h < SLEEPER_LONG_ONLY_MIN_HOURS)) {
+describe('sleeperBandsFor — seven bands at every duration (round 17)', () => {
+  it('serves all seven whatever the duration, up to $8M', () => {
+    for (const hours of SLEEPER_DURATIONS_HOURS) {
       const bands = sleeperBandsFor(hours);
-      expect(bands).toHaveLength(4);
-      expect(bands.some((b) => b.loUsd === 1_000_000)).toBe(false);
+      expect(bands).toHaveLength(7);
+      expect(bands.at(-1)).toMatchObject({ loUsd: 5_000_000, hiUsd: 8_000_000 });
     }
   });
 
-  it('unlocks it at 2w and 1m', () => {
-    for (const hours of [336, 720]) {
-      const bands = sleeperBandsFor(hours);
-      expect(bands).toHaveLength(5);
-      expect(bands[4]).toMatchObject({ loUsd: 1_000_000, hiUsd: 3_000_000, longOnly: true });
+  it('no longer gates $1M–$3M behind 2w', () => {
+    // Round 14 unlocked it only at 2w/1m; round 17 made it a regular band.
+    for (const hours of SLEEPER_DURATIONS_HOURS.filter((h) => h < SLEEPER_LONG_ONLY_MIN_HOURS)) {
+      expect(sleeperBandsFor(hours).some((b) => b.loUsd === 1_000_000)).toBe(true);
     }
   });
 

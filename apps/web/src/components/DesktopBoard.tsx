@@ -51,12 +51,18 @@ export interface RangeSummary {
   rows: RangeSummaryRow[];
 }
 
-/** The desktop SLEEPERS summary: the five bands drawn as a count strip. */
+/**
+ * The desktop SLEEPERS summary: every band drawn as one segment of a count
+ * strip (seven of them since round 17). `label` is the band's floor, already
+ * abbreviated by the caller to what fits the 330px rail.
+ */
 export interface SleepersSummary {
   total: number;
   bands: { label: string; count: number }[];
   refreshedAt: string | null;
   xOnly: boolean;
+  /** Whether the payload behind these counts excluded tokenized stocks. */
+  excludeStocks: boolean;
   minHoursLabel: string;
 }
 
@@ -481,6 +487,7 @@ export function DesktopBoard({
                     ? `refreshed ${fmtAgeSafe(sleepersSummary.refreshedAt, now)} ago`
                     : 'first scan pending',
                   sleepersSummary.xOnly ? 'X only' : 'showing all',
+                  sleepersSummary.excludeStocks ? 'no stocks' : 'with stocks',
                   `in band ≥ ${sleepersSummary.minHoursLabel}`,
                 ].join(' · ')}
               </p>
@@ -501,7 +508,11 @@ function fmtAgeSafe(iso: string, now: number): string {
   return fmtHours(Math.max(0, now - t) / (60 * 60 * 1000));
 }
 
-/** The per-band count strip: five segments, widths proportional to the counts. */
+/**
+ * The per-band count strip: one segment per band (seven since round 17), widths
+ * proportional to the counts. An empty band draws neither segment nor legend
+ * entry — a zero-width segment is not a smaller bar, it is an invisible one.
+ */
 function SleeperStrip({ summary }: { summary: SleepersSummary }) {
   // Same rule as the day-outcome strip: the band that grew flashes once, at 6%
   // of its own colour.

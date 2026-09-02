@@ -10,6 +10,7 @@ import {
   backedOffGap,
   budgetDecision,
   chunk,
+  getOhlcvMinutes,
   getTopPools,
   gtSnapshot,
   parsePoolResource,
@@ -330,6 +331,40 @@ describe('getTopPools', () => {
       // No h1 block at all is UNKNOWN, not zero trades.
       [15, null],
     ]);
+  });
+});
+
+describe('getOhlcvMinutes', () => {
+  beforeEach(() => resetBudget());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    resetBudget();
+  });
+
+  it('asks the minute endpoint for aggregated buckets and parses them newest-first', async () => {
+    const fetchMock = vi.fn(async (url: unknown) => ({
+      url,
+      status: 200,
+      ok: true,
+      json: async () => ({
+        data: {
+          attributes: {
+            // Deliberately oldest-first: the parse re-asserts the order.
+            ohlcv_list: [
+              [1_788_200_000, '1', '1', '1', '0.00007', 10],
+              [1_788_200_900, '1', '1', '1', '0.00008', 10],
+            ],
+          },
+        },
+      }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const candles = await getOhlcvMinutes('0xpool', 15, 12, 'scan');
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
+      '/pools/0xpool/ohlcv/minute?aggregate=15&limit=12',
+    );
+    expect(candles.map((c) => c.close)).toEqual([0.00008, 0.00007]);
   });
 });
 

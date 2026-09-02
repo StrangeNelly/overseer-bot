@@ -1,4 +1,4 @@
-import { SLEEPER_BANDS, SLEEPERS, requiredVolumeUsd } from '@groupie/shared';
+import { SLEEPER_BANDS, SLEEPERS, isTokenizedStock, requiredVolumeUsd } from '@groupie/shared';
 
 /**
  * Pure selection logic for the Sleepers chain-wide scan (docs/decisions.md
@@ -32,6 +32,15 @@ export interface PoolCandidate {
   /** Trades in the last hour; null when the listing carried no h1 block. */
   txns1h: number | null;
   poolCreatedAt: Date | null;
+  /**
+   * The BASE TOKEN's name, e.g. "Invesco QQQ • Robinhood Token" — what the
+   * tokenized-stock rule reads (docs/decisions.md round 17). The pool listing
+   * carries only the pool's name ("QQQ / WETH 1%"), which is built from
+   * symbols, so the scan attaches this from its DexScreener enrichment before
+   * selecting. Undefined and null both mean "not known", which
+   * isTokenizedStock answers with false.
+   */
+  tokenName?: string | null;
 }
 
 export interface Band {
@@ -49,6 +58,12 @@ export interface QualifiedSleeper extends PoolCandidate {
   band: Band;
   /** vol24 / mcap. */
   turnover: number;
+  /**
+   * A tokenized stock, ETF or leveraged equity product (round 17). Kept and
+   * stored like any other entry — the read side decides whether to show it —
+   * but it competes for band slots only against other stocks.
+   */
+  isStock: boolean;
 }
 
 /** A qualified candidate that made its band's top slice, with its position. */
@@ -63,7 +78,8 @@ export interface SleeperPick extends QualifiedSleeper {
  * The SLEEPER_BANDS share endpoints ($1M is both a high and a low), so
  * bucketing has to pick a side or an entry could land twice: each band is
  * half-open `[lo, hi)`, and only the last one closes at its high so a coin at
- * exactly $3M is still a sleeper rather than falling off the top.
+ * exactly the ladder's top (the last band's hiUsd) is still a sleeper rather
+ * than falling off it.
  */
 export function bandFor(mcapUsd: number): Band | null {
   if (!Number.isFinite(mcapUsd)) return null;
@@ -153,6 +169,7 @@ export function qualify(candidate: PoolCandidate, nowMs: number): QualifiedSleep
     poolCreatedAt,
     band,
     turnover: vol24Usd / mcapUsd,
+    isStock: isTokenizedStock(candidate.tokenName ?? null, candidate.address),
   };
 }
 
@@ -168,6 +185,12 @@ function bandKey(band: Band): number {
  * `keepPerBand` is deliberately larger than what the API serves: the read-side
  * "X only" filter and the per-group call exclusion both cut entries, and a band
  * with only three kept would run dry the moment either applied.
+ *
+ * Round 17: that cut is applied to stocks and non-stocks SEPARATELY, so each
+ * kind gets its own `keepPerBand`. Tokenized equities sit in the upper bands by
+ * the dozen and would otherwise take every slot — the toggle could then only
+ * hide them, never reveal the coins underneath. Ranking is still over the whole
+ * band, so `rank` stays a single ascending order whichever kinds are served.
  */
 export function selectSleepers(
   candidates: readonly PoolCandidate[],
@@ -189,7 +212,17 @@ export function selectSleepers(
     const list = byBand.get(preset.loUsd);
     if (!list) continue;
     list.sort((a, b) => b.turnover - a.turnover);
-    list.slice(0, keepPerBand).forEach((entry, index) => out.push({ ...entry, rank: index + 1 }));
+    let coins = 0;
+    let stocks = 0;
+    const kept: QualifiedSleeper[] = [];
+    for (const entry of list) {
+      const taken = entry.isStock ? stocks : coins;
+      if (taken >= keepPerBand) continue;
+      if (entry.isStock) stocks++;
+      else coins++;
+      kept.push(entry);
+    }
+    kept.forEach((entry, index) => out.push({ ...entry, rank: index + 1 }));
   }
   return out;
 }
@@ -328,6 +361,74 @@ export function computeResidency(input: ResidencyInput): BandResidency {
   const capSec = SLEEPERS.inBandMaxDays * DAY_SEC;
   const spanSec = Math.min(Math.max(0, nowSec - streakStartSec), capSec);
   return { hours: spanSec / HOUR_SEC, hourlyExhausted };
+}
+
+// ---------------------------------------------------------------------------
+// Short holds (docs/decisions.md round 17)
+// ---------------------------------------------------------------------------
+
+export interface ShortResidencyInput {
+  band: Band;
+  /** Market cap at scan time, from the listing row. */
+  entryMcapUsd: number;
+  /** Base token price at scan time, from the SAME listing row. */
+  entryPriceUsd: number | null;
+  /** 15-minute candles, newest first. */
+  minutes: readonly Candle[];
+  nowMs: number;
+}
+
+const SHORT_CANDLE_SEC = SLEEPERS.shortCandleMinutes * 60;
+const SHORT_CANDLE_HOURS = SLEEPERS.shortCandleMinutes / 60;
+
+/**
+ * Residency for the 30m and 1h chips: consecutive in-band 15-minute closes
+ * ending at the newest candle, counted as `count x 0.25` hours — so 30m is two
+ * closes and 1h is four.
+ *
+ * Deliberately a COUNT, not the span computeResidency measures. At the hourly
+ * timescale a gap in the series is a quiet hour that still counts as residency;
+ * at fifteen minutes a gap is just as likely to be a pool nobody has traded in
+ * since the reading that put it in the band, and crediting it would let a
+ * silent coin claim exactly the sub-hour figure this chip exists to certify.
+ * Counting closes only credits quarter-hours we can actually see in band.
+ *
+ * The two answers are different claims, and the caller acts on each one
+ * differently (see measureResidency):
+ *   - null is NO READING — nothing to say. No candles, none of them readable,
+ *     a future-stamped newest candle (a bad clock is not evidence), or a
+ *     (mcap, price) pair that cannot produce a supply.
+ *   - 0 is a READING that establishes nothing: the newest candle's START is
+ *     more than SLEEPERS.shortMaxCandleAgeMinutes old (its data ends up to one
+ *     candle later still, which is the honest resolution of this timeframe),
+ *     or the newest close is already out of band.
+ *
+ * The figure is capped one candle BELOW SLEEPERS.shortHoldMaxHours: this call
+ * is only ever made after the hourly walk declined to establish that many
+ * hours, and the newest 15-minute bucket is in progress, so a full count is
+ * ~14 minutes short of the window it would otherwise claim.
+ */
+export function computeShortResidency(input: ShortResidencyInput): number | null {
+  const minutes = newestFirst(input.minutes);
+  const newest = minutes[0];
+  if (!newest) return null;
+
+  const nowSec = Math.floor(input.nowMs / 1000);
+  const ageSec = nowSec - newest.tsSec;
+  // One candle of slack for the in-progress bucket and clock skew; beyond that
+  // a future stamp is a bad reading, not fresh data.
+  if (ageSec < -SHORT_CANDLE_SEC) return null;
+  if (ageSec > SLEEPERS.shortMaxCandleAgeMinutes * 60) return 0;
+
+  const supply = inferSupply(input.entryMcapUsd, input.entryPriceUsd ?? newest.close);
+  if (supply === null) return null;
+
+  let count = 0;
+  for (const candle of minutes) {
+    if (!closeInBand(candle.close, supply, input.band)) break;
+    count++;
+  }
+  return Math.min(count * SHORT_CANDLE_HOURS, SLEEPERS.shortHoldMaxHours - SHORT_CANDLE_HOURS);
 }
 
 // ---------------------------------------------------------------------------

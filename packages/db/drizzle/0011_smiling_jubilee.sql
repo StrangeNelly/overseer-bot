@@ -1,0 +1,1 @@
+ALTER TABLE "sleeper_entries" ADD COLUMN "is_stock" boolean DEFAULT false NOT NULL;

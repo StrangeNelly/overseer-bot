@@ -434,7 +434,11 @@ export interface SleeperEntry {
 export interface SleeperBand {
   loUsd: number;
   hiUsd: number;
-  /** Up to SLEEPERS.servePerBand, ranked by turnover desc. May be empty. */
+  /**
+   * Up to SLEEPERS.servePerBand per KIND — coins first, then tokenized stocks
+   * when `stocks=1` asked for them — each run in turnover order. Including
+   * stocks is purely additive: it can never push a coin out. May be empty.
+   */
   entries: SleeperEntry[];
 }
 

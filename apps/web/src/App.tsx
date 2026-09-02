@@ -63,6 +63,7 @@ import {
 const WINDOW_STORAGE_KEY = 'groupie.window';
 const RANGE_STORAGE_KEY = 'groupie.range';
 const SLEEPERS_X_ONLY_STORAGE_KEY = 'groupie.sleepers.xOnly';
+const SLEEPERS_NO_STOCKS_STORAGE_KEY = 'groupie.sleepers.noStocks';
 const SLEEPERS_MIN_HOURS_STORAGE_KEY = 'groupie.sleepers.minHours';
 /** 3h — the shortest duration, and the server's own default (round 14). */
 const DEFAULT_SLEEPER_HOURS: SleeperDurationHours = 3;
@@ -195,6 +196,28 @@ function loadSleepersXOnly(): boolean {
 function saveSleepersXOnly(value: boolean): void {
   try {
     window.localStorage.setItem(SLEEPERS_X_ONLY_STORAGE_KEY, value ? '1' : '0');
+  } catch {
+    // Persisting the preference is best-effort.
+  }
+}
+
+/**
+ * Tokenized stocks are excluded by default (docs/decisions.md round 17): the
+ * upper bands are otherwise nothing but Robinhood's equity tokens, which hold a
+ * market-cap band because they are securities, not because anyone is quietly
+ * accumulating them.
+ */
+function loadSleepersNoStocks(): boolean {
+  try {
+    return window.localStorage.getItem(SLEEPERS_NO_STOCKS_STORAGE_KEY) !== '0';
+  } catch {
+    return true;
+  }
+}
+
+function saveSleepersNoStocks(value: boolean): void {
+  try {
+    window.localStorage.setItem(SLEEPERS_NO_STOCKS_STORAGE_KEY, value ? '1' : '0');
   } catch {
     // Persisting the preference is best-effort.
   }
@@ -430,6 +453,7 @@ export default function App() {
   // Sleepers lives in memory only: it is a 3-hourly snapshot of the whole
   // chain, not this group's board, so there is nothing to cache across reloads.
   const [sleepersXOnly, setSleepersXOnly] = useState<boolean>(loadSleepersXOnly);
+  const [sleepersNoStocks, setSleepersNoStocks] = useState<boolean>(loadSleepersNoStocks);
   const [sleepersMinHours, setSleepersMinHours] =
     useState<SleeperDurationHours>(loadSleepersMinHours);
   const [sleepers, setSleepers] = useState<SleepersResponse | null>(null);
@@ -447,6 +471,8 @@ export default function App() {
   const sleepersSeqRef = useRef(0);
   const sleepersXOnlyRef = useRef(sleepersXOnly);
   sleepersXOnlyRef.current = sleepersXOnly;
+  const sleepersNoStocksRef = useRef(sleepersNoStocks);
+  sleepersNoStocksRef.current = sleepersNoStocks;
   const sleepersMinHoursRef = useRef(sleepersMinHours);
   sleepersMinHoursRef.current = sleepersMinHours;
   // "Has this view ever loaded?" — a watch toggle only refreshes what is there.
@@ -570,6 +596,7 @@ export default function App() {
   const loadSleepers = useCallback(
     async (
       xOnly: boolean,
+      noStocks: boolean,
       minHours: SleeperDurationHours,
       options: { silent?: boolean } = {},
     ) => {
@@ -580,7 +607,7 @@ export default function App() {
       const seq = ++sleepersSeqRef.current;
       if (!options.silent) setSleepersLoading(true);
       try {
-        const data = await fetchSleepers(currentSlug, !xOnly, minHours);
+        const data = await fetchSleepers(currentSlug, !xOnly, !noStocks, minHours);
         if (seq !== sleepersSeqRef.current) return;
         setSleepers(data);
         setSleepersError(null);
@@ -625,14 +652,21 @@ export default function App() {
   // it loads when its view opens, when a filter changes, and on focus.
   //
   // Design pass 2 adds the desktop board as a reason to load it: the right rail
-  // draws the five bands as a count strip, which could only ever have said "open
-  // the view" while nothing had fetched the scan. One snapshot query per board
-  // load fills it in — the same trade round 15 made for the Ranging summary.
+  // draws the bands as a count strip, which could only ever have said "open the
+  // view" while nothing had fetched the scan. One snapshot query per board load
+  // fills it in — the same trade round 15 made for the Ranging summary.
   const sleepersNeeded = sleepersActive || layout === 'desktop';
   useEffect(() => {
     if (!slug || !sleepersNeeded) return;
-    void loadSleepers(sleepersXOnly, sleepersMinHours);
-  }, [slug, sleepersNeeded, sleepersXOnly, sleepersMinHours, loadSleepers]);
+    void loadSleepers(sleepersXOnly, sleepersNoStocks, sleepersMinHours);
+  }, [
+    slug,
+    sleepersNeeded,
+    sleepersXOnly,
+    sleepersNoStocks,
+    sleepersMinHours,
+    loadSleepers,
+  ]);
 
   const scheduleRefetch = useCallback(() => {
     if (debounceRef.current !== null) return;
@@ -677,7 +711,12 @@ export default function App() {
       const query = rangeQueryRef.current;
       if (rangingNeeded && query) void loadRange(query, { silent: true });
       if (sleepersNeeded) {
-        void loadSleepers(sleepersXOnlyRef.current, sleepersMinHoursRef.current, { silent: true });
+        void loadSleepers(
+          sleepersXOnlyRef.current,
+          sleepersNoStocksRef.current,
+          sleepersMinHoursRef.current,
+          { silent: true },
+        );
       }
     };
     window.addEventListener('focus', onFocus);
@@ -714,13 +753,22 @@ export default function App() {
     saveSleepersXOnly(next);
   }, []);
 
+  const onSleepersNoStocks = useCallback((next: boolean) => {
+    setSleepersNoStocks(next);
+    saveSleepersNoStocks(next);
+  }, []);
+
   const onSleepersMinHours = useCallback((next: SleeperDurationHours) => {
     setSleepersMinHours(next);
     saveSleepersMinHours(next);
   }, []);
 
   const onSleepersRetry = useCallback(() => {
-    void loadSleepers(sleepersXOnlyRef.current, sleepersMinHoursRef.current);
+    void loadSleepers(
+      sleepersXOnlyRef.current,
+      sleepersNoStocksRef.current,
+      sleepersMinHoursRef.current,
+    );
   }, [loadSleepers]);
 
   const onBin = useCallback(
@@ -788,7 +836,12 @@ export default function App() {
           loadBoard({ silent: true }),
           query && rangeRef.current ? loadRange(query, { silent: true }) : null,
           sleepersRef.current
-            ? loadSleepers(sleepersXOnlyRef.current, sleepersMinHoursRef.current, { silent: true })
+            ? loadSleepers(
+                sleepersXOnlyRef.current,
+                sleepersNoStocksRef.current,
+                sleepersMinHoursRef.current,
+                { silent: true },
+              )
             : null,
         ]);
       } catch (err) {
@@ -890,14 +943,21 @@ export default function App() {
     return {
       total: sleepers.bands.reduce((sum, band) => sum + band.entries.length, 0),
       bands: sleepers.bands.map((band) => ({
-        label: fmtUsd(band.loUsd),
+        // Round 17 put seven bands in a 330px rail: the legend prints each
+        // band's FLOOR without the dollar sign (50K · 100K · … · 5M), which is
+        // the only part that distinguishes one segment from the next.
+        label: fmtUsd(band.loUsd).replace('$', ''),
         count: band.entries.length,
       })),
       refreshedAt: sleepers.refreshedAt,
-      xOnly: sleepersXOnly,
+      // Both flags read off the payload, never the toggles: this line describes
+      // the numbers in the strip, and a toggle flipped mid-flight (or a refetch
+      // that failed, leaving the old payload in place) has not changed them yet.
+      xOnly: sleepers.xOnly,
+      excludeStocks: sleepers.excludeStocks,
       minHoursLabel: SLEEPER_DURATION_LABELS[sleepers.minHours],
     };
-  }, [sleepers, sleepersXOnly]);
+  }, [sleepers]);
 
   // The two analytical views (design pass 2, 3B/3C): controls panel plus
   // results, shared by the desktop full view and the mobile tab body. Only the
@@ -917,18 +977,34 @@ export default function App() {
     />
   );
 
-  const sleepersXOnlyChip = (
-    <button
-      type="button"
-      className={`chip chip-x${sleepersXOnly ? ' is-active' : ''}`}
-      aria-pressed={sleepersXOnly}
-      onClick={() => onSleepersXOnly(!sleepersXOnly)}
-    >
-      {sleepersXOnly ? 'X only' : 'showing all'}
-    </button>
+  // The two Sleepers filters ride together wherever the view is drawn — the
+  // desktop view header and the mobile tab band — because either one alone
+  // explains only half of what is missing from the bands below.
+  const sleepersChips = (
+    <>
+      <button
+        type="button"
+        className={`chip chip-x${sleepersXOnly ? ' is-active' : ''}`}
+        aria-pressed={sleepersXOnly}
+        onClick={() => onSleepersXOnly(!sleepersXOnly)}
+      >
+        {sleepersXOnly ? 'X only' : 'showing all'}
+      </button>
+      <button
+        type="button"
+        className={`chip chip-stocks${sleepersNoStocks ? ' is-active' : ''}`}
+        aria-pressed={sleepersNoStocks}
+        onClick={() => onSleepersNoStocks(!sleepersNoStocks)}
+      >
+        {sleepersNoStocks ? 'no stocks' : 'with stocks'}
+      </button>
+    </>
   );
 
-  const sleepersBody = (
+  // The chips are drawn wherever the layout has room for them: the desktop view
+  // header, or — on mobile, where the tone band is 46px and the trust frame owns
+  // it — the control panel above the duration chips.
+  const sleepersBodyWith = (filterChips: ReactNode) => (
     <Sleepers
       data={sleepers}
       loading={sleepersLoading}
@@ -937,6 +1013,7 @@ export default function App() {
       xOnly={sleepersXOnly}
       minHours={sleepersMinHours}
       onMinHours={onSleepersMinHours}
+      filterChips={filterChips}
       now={now}
       watch={watchProps}
     />
@@ -976,13 +1053,13 @@ export default function App() {
         }
         right={
           <>
-            <span className="view-note">coins with an X account only</span>
-            {sleepersXOnlyChip}
+            <span className="view-note">defaults: an X account, no tokenized stocks</span>
+            {sleepersChips}
           </>
         }
         onBack={() => setSection('fresh')}
       />
-      {sleepersBody}
+      {sleepersBodyWith(null)}
     </div>
   );
 
@@ -1009,19 +1086,18 @@ export default function App() {
       headline="SLEEPERS"
       count={sleepersCount}
       className="zone-tab"
-      headExtra={
-        <span className="zone-head-right">
-          {/* The trust frame rides the band, where a filter cannot scroll it
-              away — and it leads, so the scan's age is what an ellipsis eats. */}
-          <span className="zone-note">
-            <strong className="view-hard">not group calls</strong>
-            {sleepers?.refreshedAt ? ` · refreshed ${fmtAge(sleepers.refreshedAt, now)} ago` : ''}
-          </span>
-          {sleepersXOnlyChip}
-        </span>
+      /* The band carries the trust frame ALONE: at 375px two chips beside it
+         left ~50px for the note, which is not enough to print "not group
+         calls". The chips moved into the control panel below; here the frame
+         leads, so the scan's age is what an ellipsis eats. */
+      note={
+        <>
+          <strong className="view-hard">not group calls</strong>
+          {sleepers?.refreshedAt ? ` · refreshed ${fmtAge(sleepers.refreshedAt, now)} ago` : ''}
+        </>
       }
     >
-      {sleepersBody}
+      {sleepersBodyWith(sleepersChips)}
     </Zone>
   );
 

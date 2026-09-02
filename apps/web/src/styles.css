@@ -919,9 +919,11 @@ a {
    and puts it in reach of Tab (focus-within), which is the only route to the
    WATCH pill — and on ON WATCH rows, to freeing a slot. */
 .row.is-tapped .row-hoverlinks,
-.row:focus-within:not(.is-open) .row-hoverlinks {
+.row:has(:focus-visible):not(.is-open) .row-hoverlinks {
   display: flex;
 }
+/* :focus-visible, not :focus-within — a mouse click also focuses the hit
+   button, and plain focus would pin the strip open after every click. */
 
 @media (hover: hover) and (pointer: fine) {
   .row:hover .row-hoverlinks {
@@ -1570,14 +1572,17 @@ a {
   white-space: nowrap;
 }
 
-/* The X-only filter: a cyan chip, active by default. */
-.chip-x {
+/* The two Sleepers filters — X-only and no-stocks: cyan chips, both active by
+   default (docs/decisions.md rounds 9 and 17). */
+.chip-x,
+.chip-stocks {
   flex: 0 0 auto;
   min-height: 28px;
   padding: 3px 10px;
 }
 
-.chip-x.is-active {
+.chip-x.is-active,
+.chip-stocks.is-active {
   background: var(--cyan);
   border-color: var(--cyan);
   color: var(--ink);
@@ -1672,6 +1677,14 @@ a {
   color: var(--cyan);
   border-color: rgba(35, 217, 255, 0.35);
   font-variant-numeric: tabular-nums;
+}
+
+/* A tokenized equity. Deliberately the dimmest badge on the row: it is a
+   disclaimer about what the row is, not a signal about how it is doing. */
+.badge-stock {
+  color: var(--dimmer);
+  border-color: var(--badge-border);
+  letter-spacing: 0.6px;
 }
 
 /* ---------- skeleton ---------- */
@@ -1952,14 +1965,6 @@ a {
   border-bottom: 1px solid var(--tone-28);
   /* Mobile tab switch: the tint cross-fades rather than cutting (3F motion). */
   transition: background-color 200ms ease;
-}
-
-/* A band that carries a control as well as its note (the mobile SLEEPERS tab). */
-.zone-head-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
 }
 
 .zone-id {
@@ -2991,12 +2996,12 @@ a {
    hiding it left a tapped-open card with no way back, and dropped the focused
    button out from under a keyboard user. */
 .range-row.is-open .range-meta,
-.range-row:focus-within .range-meta {
+.range-row:has(:focus-visible) .range-meta {
   display: none;
 }
 
 .range-row.is-open .range-links,
-.range-row:focus-within .range-links {
+.range-row:has(:focus-visible) .range-links {
   display: flex;
 }
 
@@ -3022,11 +3027,6 @@ a {
 
 .zone-slp .zone-band {
   height: 40px;
-}
-
-/* The fifth band exists only at 2w+, and its border says so. */
-.zone-slp.is-glow {
-  border-color: rgba(35, 217, 255, 0.25);
 }
 
 .zone-headline-band {
@@ -3102,12 +3102,32 @@ a {
   background: rgba(35, 217, 255, 0.12);
 }
 
+/* Round 17's two extra bands continue the same fade rather than introducing a
+   colour: the strip reads as one range, low band to high. */
+.slp-seg-5 {
+  background: rgba(35, 217, 255, 0.09);
+}
+
+.slp-seg-6 {
+  background: rgba(35, 217, 255, 0.06);
+}
+
+/* Seven labels in a 330px rail: 8px type, no wrapping, and a segment whose
+   share of the width cannot hold its label clips rather than pushing the
+   strip out of the rail. */
 .slp-legend {
   display: flex;
+  gap: 2px;
   margin: 6px 14px 0;
-  font: 400 8.5px var(--font-mono);
+  font: 400 8px var(--font-mono);
   color: var(--dimmer);
   font-variant-numeric: tabular-nums;
+}
+
+.slp-legend > span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .slp-legend strong {
@@ -3689,4 +3709,10 @@ a {
 .wins-inert {
   opacity: 0.3;
   pointer-events: none;
+}
+
+/* Mobile SLPRS band: the trust frame must never ellipsise. At 375px the
+   9px note is ~6px too wide for the slot beside the 20px headline. */
+.zone-tab .zone-band .zone-note {
+  font-size: 8.5px;
 }

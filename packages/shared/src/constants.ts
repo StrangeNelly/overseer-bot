@@ -214,7 +214,13 @@ export const SLEEPERS = {
    * the moment a member asked for anything but the default 3h.
    */
   keepPerBand: 12,
-  /** Served per band by the API, after the per-group and twitter filters. */
+  /**
+   * Served per band by the API, after the per-group and twitter filters — and
+   * per KIND since round 17, so up to this many coins AND, when the reader asks
+   * for stocks, this many stocks. A single cut over the union would let a band
+   * of equities push its coins off the page, which would make the stocks toggle
+   * subtract rather than add.
+   */
   servePerBand: 3,
   /**
    * Time-in-band measurement (round 14). Hourly candles are asked for first —
@@ -246,6 +252,25 @@ export const SLEEPERS = {
    * that is, by definition, back in the band.
    */
   residencyReverifyHours: 24,
+  /**
+   * Short holds (docs/decisions.md round 17). Hourly candles cannot see half an
+   * hour, so a NEW entry whose hourly residency lands under `shortHoldMaxHours`
+   * gets one 15-minute read, and BELOW that threshold the minute reading is the
+   * authoritative one: it replaces the hourly figure rather than competing with
+   * it, because an hourly close cannot tell a coin still in its band from one
+   * that left forty-five minutes ago. `shortCandleLimit` candles is
+   * `shortHoldMaxHours` of history, and the figure is capped one candle below
+   * that threshold — the hourly walk already declined to establish it, and the
+   * newest bucket is still in progress.
+   *
+   * `shortMaxCandleAgeMinutes` is the freshness rule, applied to the newest
+   * candle's START — the same discipline as inBandMaxCandleAgeHours, at the
+   * shorter timescale. A residency of 30 minutes is a claim about right now.
+   */
+  shortHoldMaxHours: 3,
+  shortCandleMinutes: 15,
+  shortCandleLimit: 12,
+  shortMaxCandleAgeMinutes: 30,
   /** An entry that has been listed this long earns the persistence marker. */
   persistenceMarkerHours: 3,
   /** sleeper_seen rows older than this are pruned. */
