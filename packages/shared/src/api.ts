@@ -183,6 +183,12 @@ export interface WatchlistEntry {
   dataAsOf: string | null;
   /** Last 24h of mcap snapshots, downsampled like BoardCard.sparkline. */
   sparkline: SparkPoint[];
+  /**
+   * Market cap when the watch was activated (round 19) — the BUY OPP baseline:
+   * the alert measures its drawdown from here, never from a peak. Null until
+   * the first reading after the watch, or for watches older than the column.
+   */
+  mcapAtWatch: number | null;
   /** The member holding the slot — a Telegram user id, matched against MeResponse.userId. */
   addedBy: number;
   /** Display name for the slot holder when we have one (group_members), else null. */

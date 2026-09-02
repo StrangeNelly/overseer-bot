@@ -28,6 +28,12 @@ Running record of decisions made with the owner. Newest at the bottom.
   - Died rows, Ranging cards, Sleepers rows, spotlight cards, list rows, half-sheet rows: all carry WATCH / WATCHING / WATCHING·YOU. Dead coins may be watched (alerts resume automatically on revival).
 - Neutral-framing law unchanged: the board prints numbers ("NARCO +41% in 1h — on watch"), never "buy-opp"/"nuke" labels.
 
+## 2026-09-03 — BUY OPP measures from the watch, not the peak (round 19, owner)
+
+- Owner: the buy-opp alert was firing off the coin's high ("down from its all time high"); the 30% drawdown must be measured from **the market cap when the coin was added to the watchlist**. Rationale accepted: a retrace from a peak nobody was watching is trivia; a drawdown from the member's own entry point is the opportunity they asked to hear about.
+- Rule: `watches.mcap_at_watch` is stamped when a watch is activated (from the token's cached mcap; if unknown then, filled from the first snapshot after `added_at` — the same honesty as mcap-at-call). BUY OPP fires when current mcap ≤ (1 − buyRetracePct%) × mcap_at_watch, on the CROSSING (previous reading above the line, this one at/below) with the existing per-(group, token, type) cooldown as the backstop, and re-arms only after the mcap recovers above the line. Re-activating a watch re-stamps the baseline. `buyPeakWindowHours` / `buyMinDeclineHours` retire from the buy-opp rule (kept as settings keys for `/overseer set` compatibility, ignored, and dropped from `alerts` help text). NUKE is unchanged (peak-relative over 15 min is its point).
+- Message: "🟢 BUY OPP: $SYM −32% since watched ($120K → $82K) · LP $X" — numbers only. The bot's watch confirmation names the baseline ("Watching $SYM from $120K"), and ON WATCH rows show "watched at $120K · −32% since" (WatchlistEntry.mcapAtWatch).
+
 ## 2026-09-03 — Uniswap launch alerts (round 18, owner idea)
 
 - Owner: the meta is PONS, but bigger teams launch straight onto Uniswap with real liquidity ("even a 5 ETH paired launch is something to look at"); alert on those, without catching ordinary liquidity adds to existing pools.
