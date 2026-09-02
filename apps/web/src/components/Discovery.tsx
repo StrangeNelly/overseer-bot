@@ -316,8 +316,9 @@ function Disc({ entry }: { entry: DiscoveryEntry }) {
 
 /**
  * One lead. Same row anatomy as the board and Sleepers — disc, identity, shape,
- * age — with the X and WEB links promoted onto the head line: this is an
- * uncurated surface, and reading the project is the whole job here.
+ * age. The X and WEB links live in the hover strip / tap reveal like every
+ * other row's (owner: the head-line copies were redundant and cluttered the
+ * identity column).
  *
  * The shape slot carries the bundle facts instead of a chart. There is no
  * history behind a coin that launched an hour ago, and the launch block is the
@@ -372,28 +373,6 @@ function DiscoveryRow({
               <span className="badge badge-alerted" title="Posted to the chat">
                 ALERTED
               </span>
-            ) : null}
-            {entry.twitterUrl ? (
-              <a
-                className="pill pill-x"
-                href={entry.twitterUrl}
-                target="_blank"
-                rel="noopener"
-                aria-label={`${label} on X`}
-              >
-                X
-              </a>
-            ) : null}
-            {entry.websiteUrl ? (
-              <a
-                className="pill pill-x"
-                href={entry.websiteUrl}
-                target="_blank"
-                rel="noopener"
-                aria-label={`${label} website`}
-              >
-                WEB
-              </a>
             ) : null}
             {entry.watched ? <span className="watch-dot" title="On the group watchlist" /> : null}
           </div>
