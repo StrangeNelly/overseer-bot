@@ -213,6 +213,87 @@ export interface WatchByAddressRequest {
   address: string;
 }
 
+/* ------------------------------------------------ discovery (rounds 18 + 20) */
+
+/**
+ * One coin the chain surfaced on its own — a direct Uniswap launch (round 18)
+ * or a PONS graduation (round 20). Neither is a group call: this is the
+ * uncurated research stream, and every figure on it is a fact from the pool or
+ * the launch block, never a verdict. Filters (X + website present, not heavily
+ * bundled, not a tokenized stock) are applied server-side by default and are
+ * echoed back on the response.
+ */
+export type DiscoveryKind = 'launch' | 'graduation';
+
+export interface DiscoveryEntry {
+  kind: DiscoveryKind;
+  address: string;
+  symbol: string | null;
+  name: string | null;
+  imageUrl: string | null;
+  /** The pool the event created (launch) or migrated into (graduation). */
+  poolAddress: string;
+  /** GeckoTerminal/DexScreener dex id, e.g. 'uniswap-v4-robinhood', 'pons-v2-dex'. */
+  dex: string;
+  /** ISO instant of the on-chain event. */
+  at: string;
+  /** Total pool reserve at the event, in USD and in ETH terms (WETH-priced). */
+  initialLiquidityUsd: number | null;
+  initialLiquidityEth: number | null;
+  /** Latest enrichment (DexScreener), null until the first read. */
+  mcapUsd: number | null;
+  liquidityUsd: number | null;
+  /** Locked share of LP, 0–100, null when unknown. Uniswap LP is unlocked unless the team locks it. */
+  lpLockedPct: number | null;
+  twitterUrl: string | null;
+  websiteUrl: string | null;
+  /**
+   * Bundle facts from the launch block(s): share of total supply bought in the
+   * launch block, 0–100, and the distinct wallets that took it. Null when the
+   * logs could not be read — unknown is shown as unknown, never as 0.
+   */
+  launchBlockPct: number | null;
+  launchBlockWallets: number | null;
+  isStock: boolean;
+  /** Whether the chat alert for this entry was sent (capped per hour). */
+  alerted: boolean;
+  watched: boolean;
+  watchedByMe: boolean;
+  links: TradingLinkRow;
+}
+
+/**
+ * GET /api/g/:slug/discovery?kind=launch|graduation|all&hours=24&filtered=0|1
+ *
+ * `enabled` is false when the on-chain client is not configured (no
+ * ALCHEMY_API_KEY): the zones then say so instead of pretending to be empty.
+ * `filtered=0` drops every default filter for the reader who wants the raw
+ * stream; the flags echo what THIS payload applied.
+ */
+export interface DiscoveryResponse {
+  enabled: boolean;
+  hours: number;
+  filtered: boolean;
+  /** The launch-block share at/above which an entry is hidden by the bundle filter, 0–100. */
+  bundleMaxPct: number;
+  launches: DiscoveryEntry[];
+  graduations: DiscoveryEntry[];
+}
+
+/**
+ * Per-group discovery alert settings (groups.settings.discovery), merged over
+ * DISCOVERY_DEFAULTS in constants. `/overseer set launch <eth>` (0 = mute),
+ * `/overseer set grads on|off`.
+ */
+export interface DiscoverySettings {
+  /** Minimum initial liquidity in ETH for a launch to be posted to the chat; 0 mutes launch alerts. */
+  launchMinEth: number;
+  /** Whether filtered graduations are posted to the chat. */
+  gradsOn: boolean;
+  /** Chat alerts per hour across both kinds; overflow stays board-only. */
+  alertsPerHour: number;
+}
+
 export interface MeResponse {
   userId: number;
 }
