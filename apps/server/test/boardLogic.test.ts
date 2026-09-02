@@ -55,6 +55,8 @@ function card(spec: CardSpec): BoardCard {
     diedAt: spec.diedAt ?? null,
     deathReason: null,
     mcapAtDeath: null,
+    deathMarkedBy: null,
+    txns24: null,
     dataAsOf: new Date().toISOString(),
     watched: false,
     watchedByMe: false,

@@ -8,6 +8,7 @@ import {
   isStale,
   isUnresolved,
   moveOneHour,
+  peakNote,
   revivalDelta,
   statusEdge,
 } from '../derive';
@@ -293,6 +294,11 @@ export function TokenCard({
   // every held slot visible and freeable.
   if (slotNote) sub.push(slotNote);
   if (card.callerName) sub.push(card.callerName);
+  // The Retraced line already prints the peak AND the drawdown off it, so it
+  // stands in for the peak note rather than saying the same thing twice.
+  const retraceLine = !unresolved && !reviving && !died && section === 'retraced';
+
+  // 1. What state the call is in.
   if (unresolved) {
     sub.push('awaiting first data');
   } else if (reviving) {
@@ -303,20 +309,38 @@ export function TokenCard({
     );
   } else if (died) {
     sub.push(`died ${fmtAge(card.diedAt ?? card.calledAt, now)} ago`);
-  } else if (section === 'retraced') {
+  } else if (retraceLine) {
     sub.push(
       <span key="retrace" className="sub-retrace">
         {`${fmtRetrace(card.retraceFromPeakPct)} from peak ${fmtUsd(card.peakMcapSinceCall)}`}
       </span>,
     );
-  } else if (section === 'runners') {
-    sub.push(`peak ${fmtUsd(card.peakMcapSinceCall)}`);
-  } else if (section === 'watch' && card.liquidityUsd !== null) {
-    sub.push(`LP ${fmtUsd(card.liquidityUsd)}`);
-  } else if (card.watched && section !== 'watch') {
-    sub.push('on watchlist');
-  } else if (size === 'desk' && card.liquidityUsd !== null) {
-    sub.push(`LP ${fmtUsd(card.liquidityUsd)}`);
+  }
+
+  // 2. Where it has BEEN — the fact the mark-to-market numbers leave out. It
+  // sits ahead of LP so the sub's ellipsis takes liquidity before it takes the
+  // peak, and it is said on every surface: a dead call that offered 2.3x first
+  // and a dead call that never moved are not the same event.
+  const peakLine = unresolved || retraceLine ? null : peakNote(card);
+  if (peakLine) {
+    sub.push(
+      <span key="peak" className="sub-peak">
+        {peakLine}
+      </span>,
+    );
+  }
+
+  // 3. Surface detail — unchanged, and still only where no state line ran.
+  // RUNNERS stays excluded because its old line WAS the runners-only
+  // "peak $X"; the note above now says that in every zone.
+  if (!unresolved && !reviving && !died && !retraceLine && section !== 'runners') {
+    if (section === 'watch' && card.liquidityUsd !== null) {
+      sub.push(`LP ${fmtUsd(card.liquidityUsd)}`);
+    } else if (card.watched && section !== 'watch') {
+      sub.push('on watchlist');
+    } else if (size === 'desk' && card.liquidityUsd !== null) {
+      sub.push(`LP ${fmtUsd(card.liquidityUsd)}`);
+    }
   }
   if (stale) {
     sub.push(

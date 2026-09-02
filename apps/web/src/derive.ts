@@ -5,7 +5,7 @@
  */
 
 import type { BoardCard, BoardResponse, SparkPoint, WatchlistEntry } from '@groupie/shared';
-import { ageMs } from './format';
+import { ageMs, fmtMultiple, fmtUsd } from './format';
 
 /** Market numbers older than this get a visible "as of" hint. */
 export const STALE_AFTER_MS = 5 * 60 * 1000;
@@ -272,6 +272,44 @@ export function gaugePosition(card: BoardCard): number | null {
   const span = peakMcapSinceCall - mcapAtCall;
   if (!(span > 0)) return null;
   return Math.min(1, Math.max(0, (mcapUsd - mcapAtCall) / span));
+}
+
+/** Below this, the run never happened: the multiple already tells the story. */
+const PEAK_NOTE_MIN_MULTIPLE = 1.2;
+/** At or under this drawdown the coin is still AT its peak — nothing to add. */
+const PEAK_NOTE_MIN_RETRACE_PCT = 10;
+
+/**
+ * "peak $30M · 2.3x" — the fact every mark-to-market number leaves out.
+ *
+ * The board's headline is where a call sits NOW, so a coin printing 0.8x
+ * ($13M → $11M) reads identically whether it drifted sideways or touched $30M
+ * first and round-tripped. Those are opposite facts about opposite people
+ * (docs owner feedback), so the peak gets said on every call surface.
+ *
+ * It is a fact, never a verdict: no "missed", no "you should have". null
+ * whenever the peak adds nothing — no peak recorded, the coin never really left
+ * the call behind (< 1.2x), or it is sitting at/near that peak right now
+ * (< 10% off), where the live multiple IS the peak multiple.
+ *
+ * `· back under call` is appended when the coin has since fallen below where it
+ * was called: the round trip, stated as a position rather than a judgement.
+ */
+export function peakNote(card: BoardCard): string | null {
+  const { peakMcapSinceCall, peakMultiple, retraceFromPeakPct, multiple } = card;
+  if (peakMcapSinceCall === null || !Number.isFinite(peakMcapSinceCall)) return null;
+  if (peakMultiple === null || !Number.isFinite(peakMultiple)) return null;
+  if (peakMultiple < PEAK_NOTE_MIN_MULTIPLE) return null;
+  if (
+    retraceFromPeakPct !== null &&
+    Number.isFinite(retraceFromPeakPct) &&
+    retraceFromPeakPct < PEAK_NOTE_MIN_RETRACE_PCT
+  ) {
+    return null;
+  }
+  const note = `peak ${fmtUsd(peakMcapSinceCall)} · ${fmtMultiple(peakMultiple)}`;
+  const roundTripped = multiple !== null && Number.isFinite(multiple) && multiple < 1;
+  return roundTripped ? `${note} · back under call` : note;
 }
 
 /** Position inside a band as 0..1 — the Sleepers/Ranging tick. */

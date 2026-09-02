@@ -121,6 +121,9 @@ export function toCard(
     diedAt: death.at?.toISOString() ?? null,
     deathReason: death.reason,
     mcapAtDeath: death.mcapUsd,
+    // Round 21 fields, filled in by the member-verdict build; null until then.
+    deathMarkedBy: null,
+    txns24: null,
     dataAsOf: token.lastSnapshotAt?.toISOString() ?? null,
     watched,
     watchedByMe,

@@ -19,7 +19,12 @@ import {
   bundleExclusions,
 } from '../chain/addresses.js';
 import { TOTAL_SUPPLY_CALLDATA, computeLaunchBlockShare } from '../chain/bundle.js';
-import { summarizeRpcError, type ChainClient, type ChainLog } from '../chain/client.js';
+import {
+  LogRangeTooWideError,
+  summarizeRpcError,
+  type ChainClient,
+  type ChainLog,
+} from '../chain/client.js';
 import {
   planRange,
   readCursor,
@@ -250,92 +255,168 @@ async function readBundleFacts(
   );
 }
 
-/** Blocks in DISCOVERY.gradLaunchLookbackDays of chain. */
-const GRAD_LOOKBACK_BLOCKS = Math.round(
-  DISCOVERY.gradLaunchLookbackDays * 86_400 * DISCOVERY.blocksPerSecond,
-);
+/**
+ * WHEN a PONS coin launched, according to DexScreener: the creation instant of
+ * its curve pool.
+ *
+ * The curve is the first pool a PONS coin ever has — supply is minted straight
+ * into it (docs/research-onchain.md, "the curve is the SINK") — so its
+ * `pairCreatedAt` is the launch instant. DexScreener carries it for free on a
+ * route this build already calls, and that one free reading is what turns an
+ * unbounded `TokenLaunched` hunt over all of history into a single 400-block
+ * query.
+ *
+ * Null when DexScreener has no PONS pool for the coin, or could not answer.
+ * Absence is not a verdict here: the caller falls back to the unbounded query
+ * rather than inventing a window.
+ */
+async function ponsCurveCreatedAt(tokenAddress: string): Promise<Date | null> {
+  let pools: Array<{ dexId: string | null; pairCreatedAt: Date }>;
+  try {
+    pools = await ds.getTokenPools(tokenAddress);
+  } catch (err) {
+    console.warn(
+      `discovery: curve pool lookup failed for ${tokenAddress}: ${summarizeRpcError(err)}`,
+    );
+    return null;
+  }
+  let earliest: Date | null = null;
+  for (const pool of pools) {
+    // `pons-v2-dex` today; matched loosely so a renamed dex id does not silently
+    // turn every graduation's launch block into unknown.
+    if (!(pool.dexId ?? '').toLowerCase().includes('pons')) continue;
+    if (earliest === null || pool.pairCreatedAt.getTime() < earliest.getTime()) {
+      earliest = pool.pairCreatedAt;
+    }
+  }
+  return earliest;
+}
 
 /**
- * Is this failure the provider REFUSING THE RANGE — the one error a narrower
- * second query can fix?
+ * The block an instant falls in, located by bisection — or null when the chain
+ * would not say inside DISCOVERY.launchHuntMaxBlockReads reads.
  *
- * Two shapes, both observed: the JSON-RPC invalid-params code (-32602, which is
- * what the public Robinhood RPC answers to `earliest`), and the family of
- * "block range too wide / too many results" messages providers write instead.
- * The decision reads the RPC error's code and the provider's own text
- * (`details`, on the error or on its cause) and NEVER `message`: viem prints
- * the request body into `message`, and that body names fromBlock/toBlock on
- * every failure — a timeout and a 429 included.
+ * What comes back is the LOW end of a bracket at most
+ * DISCOVERY.launchHuntWindowBlocks wide that contains the instant, which is
+ * what the caller builds its log window around. The search is seeded with a
+ * linear estimate off the chain's nominal block rate, so a coin that launched
+ * an hour ago is bracketed in a couple of reads instead of bisected over all of
+ * history; the read budget is what stops a chain whose block times misbehave
+ * from turning one graduation into an open-ended search.
+ *
+ * Each read is an `eth_getBlockByNumber` (16 CU) — two orders cheaper than the
+ * `eth_getLogs` it replaces having to scan the same history.
  */
-export function isRangeRefusal(err: unknown): boolean {
-  const e = err as { code?: unknown; details?: unknown; cause?: unknown } | null;
-  const cause = (e?.cause ?? null) as { code?: unknown; details?: unknown } | null;
-  for (const code of [e?.code, cause?.code]) {
-    if (code === -32602 || code === '-32602') return true;
+export async function findBlockAtTime(
+  chain: ChainClient,
+  atSeconds: number,
+  headBlock: number,
+  nowSeconds: number,
+): Promise<number | null> {
+  const window = DISCOVERY.launchHuntWindowBlocks;
+  let reads = 0;
+  const secondsAt = async (block: number): Promise<number | null> => {
+    if (reads >= DISCOVERY.launchHuntMaxBlockReads) return null;
+    reads += 1;
+    return chain.getBlockTimestamp(block);
+  };
+
+  const behind = Math.max(0, nowSeconds - atSeconds) * DISCOVERY.blocksPerSecond;
+  let lo = Math.min(headBlock, Math.max(1, Math.round(headBlock - behind)));
+  let hi = lo;
+  const seeded = await secondsAt(lo);
+  if (seeded === null) return null;
+  let loSeconds = seeded;
+  let hiSeconds = seeded;
+
+  // Push whichever end sits on the wrong side of the instant outward, doubling
+  // the step. Only one of these two loops can run — the estimate is either
+  // early or late — and an estimate wrong by a factor still brackets in a
+  // handful of reads.
+  for (let step = window; loSeconds > atSeconds && lo > 1; step *= 2) {
+    lo = Math.max(1, lo - step);
+    const seconds = await secondsAt(lo);
+    if (seconds === null) return null;
+    loSeconds = seconds;
   }
-  const text = [e?.details, cause?.details]
-    .filter((part): part is string => typeof part === 'string')
-    .join(' ')
-    .toLowerCase();
-  if (text === '') return false;
-  return (
-    text.includes('block range') ||
-    text.includes('range too') ||
-    text.includes('too many results') ||
-    text.includes('too many logs') ||
-    text.includes('response size exceeded') ||
-    text.includes('query returned more than')
-  );
+  for (let step = window; hiSeconds < atSeconds && hi < headBlock; step *= 2) {
+    hi = Math.min(headBlock, hi + step);
+    const seconds = await secondsAt(hi);
+    if (seconds === null) return null;
+    hiSeconds = seconds;
+  }
+
+  while (hi - lo > window) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (mid <= lo || mid >= hi) break;
+    const seconds = await secondsAt(mid);
+    if (seconds === null) return null;
+    if (seconds <= atSeconds) lo = mid;
+    else hi = mid;
+  }
+  return lo;
 }
 
 /**
  * A graduating coin's ORIGINAL launch: the block it launched in and the PONS
  * curve that sold its supply. `TokenLaunched` indexes the token, so this is a
- * point lookup — but it is a lookup over all of history, because a coin may
- * have sat on its curve for weeks before graduating.
+ * point lookup — but a coin may have sat on its curve for weeks, so the
+ * question is WHERE to look, not what to look for.
  *
- * A provider that refuses an unbounded RANGE gets ONE retry over the last
- * DISCOVERY.gradLaunchLookbackDays; a coin older than that reports its launch
- * block as unknown rather than as a guess. Only a range refusal is retried:
- * a timeout, a 429 or an auth failure would fail the narrow query the same way
- * and cost a second call to learn it, so those return null at once. The
- * graduation is then stored with its share UNKNOWN (never 0) and, being a known
- * pool from that moment, is not re-measured — the accepted trade-off: one
- * failed hunt can neither wedge the listener nor spend a second call.
+ * The primary path never scans history at all. DexScreener dates the coin's
+ * curve pool for free; a bisection over block timestamps turns that instant
+ * into a block; and ONE `eth_getLogs` over 2 x DISCOVERY.launchHuntWindowBlocks
+ * around it finds the log. That is ~4-8 block reads (16 CU each) plus one log
+ * query per graduation, and the query is narrow enough to be a single request
+ * on PAYG and exactly one chunk budget on a capped tier.
+ *
+ * The fallback, when DexScreener knows no PONS pool for the coin, is the
+ * unbounded `earliest` query — ONE attempt. There is no wide historic scan
+ * behind it: a provider that refuses the range (the public Robinhood RPC does)
+ * answers unknown, the graduation is stored with its share null rather than 0,
+ * and being a known pool from that moment it is never re-measured. One failed
+ * hunt can neither wedge the listener nor spend a second call.
  */
 export async function findTokenLaunch(
   chain: ChainClient,
   tokenAddress: string,
   headBlock: number,
 ): Promise<{ launchBlock: number; curve: string } | null> {
-  const topics = [TOPICS.tokenLaunched, addressTopic(tokenAddress)];
+  const curveAt = await ponsCurveCreatedAt(tokenAddress);
+  let range: { fromBlock: number | 'earliest'; toBlock: number };
+  if (curveAt === null) {
+    range = { fromBlock: 'earliest', toBlock: headBlock };
+  } else {
+    const block = await findBlockAtTime(
+      chain,
+      Math.floor(curveAt.getTime() / 1000),
+      headBlock,
+      Date.now() / 1000,
+    );
+    if (block === null) {
+      console.warn(
+        `discovery: launch hunt for ${tokenAddress} could not place the curve instant on a block`,
+      );
+      return null;
+    }
+    const window = DISCOVERY.launchHuntWindowBlocks;
+    // The bisection's bracket is at most one window wide and starts at `block`,
+    // so half a window of slack below it and the rest above covers the launch
+    // either way — while the whole query stays 2 x window blocks.
+    const fromBlock = Math.max(1, block - Math.floor(window / 2));
+    range = { fromBlock, toBlock: Math.min(headBlock, fromBlock + 2 * window - 1) };
+  }
+
   let logs: ChainLog[];
   try {
     logs = await chain.getLogs({
       address: PONS_V2_FACTORY,
-      topics,
-      fromBlock: 'earliest',
-      toBlock: headBlock,
+      topics: [TOPICS.tokenLaunched, addressTopic(tokenAddress)],
+      ...range,
     });
   } catch (err) {
-    if (!isRangeRefusal(err)) {
-      console.warn(
-        `discovery: launch lookup failed for ${tokenAddress} (not a range refusal, not retried): ` +
-          summarizeRpcError(err),
-      );
-      return null;
-    }
-    try {
-      logs = await chain.getLogs({
-        address: PONS_V2_FACTORY,
-        topics,
-        fromBlock: Math.max(1, headBlock - GRAD_LOOKBACK_BLOCKS),
-        toBlock: headBlock,
-      });
-    } catch (err) {
-      console.warn(`discovery: launch lookup failed for ${tokenAddress}: ${summarizeRpcError(err)}`);
-      return null;
-    }
+    console.warn(`discovery: launch lookup failed for ${tokenAddress}: ${summarizeRpcError(err)}`);
+    return null;
   }
   // Oldest wins: a coin is launched once, and a later log for the same token
   // would be a re-listing rather than the launch the bundle question is about.
@@ -557,9 +638,10 @@ async function processRange(
  * row's whole job is to point at the new market.
  *
  * The DEDUPE happens before any of the reads, not at the insert: a replayed
- * range would otherwise pay for a whole launch hunt (an unbounded `eth_getLogs`,
- * an `eth_call` and a window of Transfers) per graduation only for
- * `onConflictDoNothing` to throw the row away. One `seenPools` query per range
+ * range would otherwise pay for a whole launch hunt (a DexScreener call, a
+ * handful of block reads, an `eth_getLogs`, an `eth_call` and a window of
+ * Transfers) per graduation only for `onConflictDoNothing` to throw the row
+ * away. One `seenPools` query per range
  * answers it for every graduation in that range, and a Set catches the same pool
  * twice inside one range.
  */
@@ -1013,9 +1095,31 @@ export async function runDiscoveryTick(db: Db, chain: ChainClient): Promise<Disc
   // that caps eth_getLogs at N blocks, one request spans at most N times the
   // chunk budget, so a catch-up can always be read — slowly, but never refused
   // whole and never stuck.
-  const requestBlocks = requestBlocksFor(chain.maxLogRange?.());
-  for (const range of splitRanges(plan, requestBlocks)) {
-    detected += await processRange(db, chain, clock, head, range);
+  let ranges = splitRanges(plan, requestBlocksFor(chain.maxLogRange?.()));
+  let replanned = false;
+  for (let i = 0; i < ranges.length; i += 1) {
+    const range = ranges[i]!;
+    try {
+      detected += await processRange(db, chain, clock, head, range);
+    } catch (err) {
+      // The FIRST wide request of a process is what teaches the client the
+      // provider's ceiling, so this tick sized its ranges against a cap nobody
+      // knew yet. Re-plan from the range that failed — the cursor has only
+      // advanced over ranges actually read — and try again at the real size. A
+      // second one in the same tick is not a stale plan any more, so it goes to
+      // the caller's isolate and the same blocks are re-read next tick.
+      if (!(err instanceof LogRangeTooWideError) || replanned) throw err;
+      replanned = true;
+      console.log(
+        `discovery: re-planning this tick at the provider's ${err.ceiling}-block ceiling`,
+      );
+      ranges = splitRanges(
+        { ...plan, fromBlock: range.fromBlock },
+        requestBlocksFor(chain.maxLogRange?.()),
+      );
+      i = -1;
+      continue;
+    }
     // The cursor is written to the block actually READ, never to the head: a
     // tick that covered half the gap must resume from the middle.
     await writeCursor(db, range.toBlock);

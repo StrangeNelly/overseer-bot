@@ -270,10 +270,62 @@ export function summarizeRpcError(err: unknown): string {
   return parts.join(' ');
 }
 
+/**
+ * Is this failure the provider refusing on THROUGHPUT — HTTP 429, or the
+ * JSON-RPC code providers answer their per-second limits with?
+ *
+ * Read off `status`/`code` on the error and on its cause, never off `message`:
+ * viem prints the request body into `message`, so a range that happens to
+ * contain the digits 429 would read as a rate limit. Alchemy's own body
+ * ("exceeded its compute units per second capacity") arrives as an
+ * `HttpRequestError` with `status = 429`, which is the shape this matches.
+ */
+export function isThrottled(err: unknown): boolean {
+  if (err === null || typeof err !== 'object') return false;
+  const e = err as Record<string, unknown>;
+  const cause = (typeof e.cause === 'object' && e.cause !== null
+    ? (e.cause as Record<string, unknown>)
+    : null) ?? null;
+  return [e.status, e.code, cause?.status, cause?.code].some(
+    (value) => firstNumber(value) === 429,
+  );
+}
+
 /* ------------------------------------------------ the provider's log ceiling */
 
 /** The narrowest chunk a blind halving will ever try. */
 export const MIN_LOG_CHUNK = 10;
+
+/**
+ * One logical `eth_getLogs` needs more chunks than a single query may spend,
+ * at the ceiling the provider has just been seen to enforce.
+ *
+ * A DEDICATED type rather than a plain Error, because the caller's only useful
+ * response is to re-plan: the cap is usually learned INSIDE this very call (the
+ * first wide request of a process is what teaches it), so the tick that sized
+ * its ranges a moment ago sized them against a ceiling nobody knew yet. It
+ * deliberately carries no RPC code and no provider `details`, so neither
+ * `logRangeRefusal` nor `isThrottled` can mistake it for something to retry
+ * narrower or to back off from.
+ */
+export class LogRangeTooWideError extends Error {
+  readonly name = 'LogRangeTooWideError';
+  constructor(
+    /** Blocks the caller asked for. */
+    readonly span: number,
+    /** Blocks the provider will serve in one query. */
+    readonly ceiling: number,
+    /** Chunks that span needs at that ceiling. */
+    readonly chunks: number,
+    /** The most chunks one query may be split into. */
+    readonly cap: number,
+  ) {
+    super(
+      `eth_getLogs range of ${span} block(s) needs ${chunks} chunks at the provider's ` +
+        `${ceiling}-block ceiling, over the ${cap}-chunk cap for one query`,
+    );
+  }
+}
 
 const RANGE_REFUSAL_CODES = [-32600, -32602];
 
@@ -356,6 +408,11 @@ function rpcMethodsOf(body: unknown): string[] {
   return out;
 }
 
+/** Even pacing between the chunks of one query (see DISCOVERY.logChunkGapMs). */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** The shared client, or null when no RPC URL is configured. */
 export function createChainClient(rpcUrl: string | null): ChainClient | null {
   if (!rpcUrl) return null;
@@ -436,9 +493,8 @@ export function createChainClient(rpcUrl: string | null): ChainClient | null {
     },
     async getLogs(query) {
       // A hash query and an `earliest` hunt have no numeric span to divide, so
-      // they are sent as they are: they either work, or they fall to the
-      // caller's own refusal path (scan.ts retries the graduation hunt over a
-      // bounded window instead).
+      // they are sent as they are: they either work, or the caller reads the
+      // failure as unknown (the graduation hunt's fallback is one attempt).
       if (query.blockHash !== undefined || query.fromBlock === 'earliest') {
         return decodeLogRows(await sendGetLogs(query, query.fromBlock ?? 0, query.toBlock ?? 0));
       }
@@ -451,22 +507,26 @@ export function createChainClient(rpcUrl: string | null): ChainClient | null {
       for (;;) {
         const chunks = Math.ceil(span / chunk);
         if (chunks > DISCOVERY.maxLogChunksPerQuery) {
-          // A PLAIN error on purpose: no RPC code, no provider text, so nothing
-          // upstream mistakes it for a range refusal worth retrying. The caller
-          // isolates it, the cursor does NOT advance past blocks nobody read,
-          // and the same range is attempted again next tick.
-          throw new Error(
-            `eth_getLogs range of ${span} block(s) needs ${chunks} chunks at the provider's ` +
-              `${chunk}-block ceiling, over the ${DISCOVERY.maxLogChunksPerQuery}-chunk cap ` +
-              'for one query',
+          // Typed, and carrying no RPC code or provider text: the caller re-plans
+          // its ranges against the ceiling that was just learned, the cursor does
+          // NOT advance past blocks nobody read, and nothing mistakes this for a
+          // range refusal worth retrying narrower.
+          throw new LogRangeTooWideError(
+            span,
+            chunk,
+            chunks,
+            DISCOVERY.maxLogChunksPerQuery,
           );
         }
         try {
-          // Sequential, in block order: the chunks are one logical query, and a
-          // burst of parallel requests is exactly what a tier that caps the
-          // range also rate-limits.
+          // Sequential, in block order, and PACED: the chunks are one logical
+          // query, and a burst of parallel — or back-to-back — requests is
+          // exactly what a tier that caps the range also rate-limits.
           const out: ChainLog[] = [];
+          let first = true;
           for (let start = fromBlock; start <= toBlock; start += chunk) {
+            if (!first) await sleep(DISCOVERY.logChunkGapMs);
+            first = false;
             const end = Math.min(toBlock, start + chunk - 1);
             out.push(...decodeLogRows(await sendGetLogs(query, start, end)));
           }

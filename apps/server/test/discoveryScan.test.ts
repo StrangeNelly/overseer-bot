@@ -15,10 +15,12 @@ import {
 import type { DsPair } from '../src/market/dexscreener.js';
 import type { ChainClient, ChainLog, LogQuery } from '../src/chain/client.js';
 import {
+  LogRangeTooWideError,
   METHOD_CU,
   RequestMeter,
   chainRpcUrl,
   createChainClient,
+  isThrottled,
   logRangeRefusal,
   summarizeRpcError,
 } from '../src/chain/client.js';
@@ -48,7 +50,7 @@ vi.mock('../src/market/geckoterminal.js', async (importOriginal) => {
 
 const ds = await import('../src/market/dexscreener.js');
 const gt = await import('../src/market/geckoterminal.js');
-const { runDiscoveryTick, runEnrichment, runLockReads, runReEnrichment, isRangeRefusal } =
+const { findBlockAtTime, runDiscoveryTick, runEnrichment, runLockReads, runReEnrichment } =
   await import('../src/discovery/scan.js');
 const { startDiscovery } = await import('../src/discovery/runner.js');
 
@@ -63,9 +65,20 @@ const STRIDE = '0x446d76590389b371fbbf53a5d9649522d1946d7e';
 const STRIDE_POOL_ID = '0x5564cb672e00e6bc03200b0f13d0377180544201f550da352b632efae7b8ee88';
 const STRIDE_CURVE = '0x7b2864c490875f64ec2666d7055074c1c9e182af';
 const STRIDE_LAUNCH_BLOCK = 52_216_963;
+/** The pons-v2-dex pool DexScreener dates that launch by. */
+const STRIDE_CURVE_POOL = '0x9fdb7bdd16b820f088d2055e211512b15782ca6f';
 const NEW_TOKEN = '0xdd050541fc432d4ce93f3286246a3bd086440ccd';
 const NEW_PAIR = '0x887c2718bfc9133ce881c09f0df18ba572189236';
 const WALLET = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+const nowSeconds = () => Math.floor(Date.now() / 1000);
+/**
+ * The fake chain's block clock: HEAD is "now" and blocks run backwards at
+ * `rate` per second. A LINEAR map on purpose — the launch hunt's bisection is
+ * only meaningful against a chain whose timestamps actually order its blocks.
+ */
+const blockSecondsAt = (block: number, rate: number = DISCOVERY.blocksPerSecond) =>
+  Math.floor(nowSeconds() - (HEAD - block) / rate);
 
 const pad = (address: string) => `0x000000000000000000000000${address.slice(2)}`;
 const word = (value: bigint) => value.toString(16).padStart(64, '0');
@@ -154,6 +167,10 @@ interface FakeChain extends ChainClient {
   receipts: 'ok' | null;
   /** Throw this instead of answering a query the predicate matches. */
   failLogs: ((query: LogQuery) => unknown) | null;
+  /** Blocks per second this fake chain's timestamps run at. */
+  blockRate: number;
+  /** How many block timestamps have been read — the launch hunt's budget. */
+  timestampReads: number;
 }
 
 function fakeChain(logs: ChainLog[]): FakeChain {
@@ -189,8 +206,13 @@ function fakeChain(logs: ChainLog[]): FakeChain {
     txValue: null,
     receipts: 'ok',
     failLogs: null,
+    blockRate: DISCOVERY.blocksPerSecond,
+    timestampReads: 0,
     getBlockNumber: async () => HEAD,
-    getBlockTimestamp: async () => Math.floor(Date.now() / 1000) - 30,
+    getBlockTimestamp: async (block) => {
+      chain.timestampReads += 1;
+      return blockSecondsAt(block, chain.blockRate);
+    },
     getLogs: async (query) => {
       queries.push(query);
       const failure = chain.failLogs?.(query);
@@ -301,6 +323,17 @@ const rangeQueries = (chain: FakeChain) => chain.queries.filter((q) => Array.isA
 /** A cursor 100 blocks behind the head — one ordinary tick's worth. */
 const CURSOR_ROW = [[{ lastBlock: HEAD - 100 }]];
 
+/** DexScreener dating STRIDE's PONS curve pool at its real launch block. */
+const mockCurvePool = () => {
+  vi.mocked(ds.getTokenPools).mockResolvedValue([
+    {
+      pairAddress: STRIDE_CURVE_POOL,
+      dexId: 'pons-v2-dex',
+      pairCreatedAt: new Date(blockSecondsAt(STRIDE_LAUNCH_BLOCK) * 1000),
+    },
+  ]);
+};
+
 beforeEach(() => {
   vi.mocked(ds.getTokenPools).mockResolvedValue([]);
   vi.mocked(ds.getEthPriceUsd).mockResolvedValue(4_000);
@@ -338,6 +371,57 @@ describe('runDiscoveryTick', () => {
     expect(ranges[ranges.length - 1]?.toBlock).toBe(SAFE_HEAD);
     const written = find(calls, 'insert:chainCursor').map((c) => (c.values as { lastBlock: number }).lastBlock);
     expect(written[written.length - 1]).toBe(SAFE_HEAD);
+  });
+
+  it('RE-PLANS when the provider ceiling is learned inside the tick', async () => {
+    // The 2026-09-02 production shape: the first tick after boot sizes its
+    // requests before any cap is known, the client learns the 10-block ceiling
+    // from the refusal, and the whole tick used to be lost to the chunk-cap
+    // error. Now the tick re-splits what is left and reads it.
+    const chain = fakeChain([]);
+    let learned: number | null = null;
+    chain.maxLogRange = () => learned;
+    chain.failLogs = (query) => {
+      if (learned !== null || !Array.isArray(query.address)) return null;
+      learned = 10;
+      return new LogRangeTooWideError(997, 10, 100, DISCOVERY.maxLogChunksPerQuery);
+    };
+    const { db, calls } = makeDb({ 'select:chainCursor': [[{ lastBlock: HEAD - 1_000 }]] });
+    await runDiscoveryTick(db, chain);
+
+    const ranges = rangeQueries(chain);
+    // One refused request, then the same gap at the size the provider will serve.
+    expect(ranges[0]).toMatchObject({ fromBlock: HEAD - 999, toBlock: SAFE_HEAD });
+    const served = ranges.slice(1);
+    expect(served.length).toBeGreaterThan(1);
+    const cap = 10 * DISCOVERY.maxLogChunksPerQuery;
+    for (const query of served) {
+      expect((query.toBlock as number) - (query.fromBlock as number) + 1).toBeLessThanOrEqual(cap);
+    }
+    // Nothing skipped: the re-plan starts at the range that failed, because the
+    // cursor only ever moved over ranges that were actually read.
+    expect(served[0]?.fromBlock).toBe(HEAD - 999);
+    expect(served[served.length - 1]?.toBlock).toBe(SAFE_HEAD);
+    for (let i = 1; i < served.length; i++) {
+      expect(served[i]?.fromBlock).toBe((served[i - 1]?.toBlock as number) + 1);
+    }
+    const written = find(calls, 'insert:chainCursor').map(
+      (c) => (c.values as { lastBlock: number }).lastBlock,
+    );
+    expect(written[written.length - 1]).toBe(SAFE_HEAD);
+  });
+
+  it('re-plans ONCE: a second too-wide range is a real failure, not a stale plan', async () => {
+    const chain = fakeChain([]);
+    chain.maxLogRange = () => 10;
+    chain.failLogs = (query) =>
+      Array.isArray(query.address)
+        ? new LogRangeTooWideError(400, 1, 400, DISCOVERY.maxLogChunksPerQuery)
+        : null;
+    const { db, calls } = makeDb({ 'select:chainCursor': [[{ lastBlock: HEAD - 1_000 }]] });
+    await expect(runDiscoveryTick(db, chain)).rejects.toBeInstanceOf(LogRangeTooWideError);
+    // ...and the cursor did not move over blocks nobody read.
+    expect(find(calls, 'insert:chainCursor')).toHaveLength(0);
   });
 
   it('records a launch with its DEPOSIT and its bundle facts', async () => {
@@ -427,6 +511,7 @@ describe('runDiscoveryTick', () => {
   });
 
   it('measures a graduation bundle from the coin ORIGINAL launch block', async () => {
+    mockCurvePool();
     const chain = fakeChain([poolGraduated, poolRegistered, tokenLaunched, curveBuy]);
     const { db, calls } = makeDb({
       'select:chainCursor': CURSOR_ROW,
@@ -438,10 +523,12 @@ describe('runDiscoveryTick', () => {
       launchBlockPct: 6,
       launchBlockWallets: 1,
     });
-    // ...found by a point lookup on the token, over all of history.
+    // ...found by a point lookup on the token, over the window its curve pool's
+    // creation date placed it in.
     const lookup = chain.queries.find((q) => q.topics?.[0] === TOPICS.tokenLaunched);
-    expect(lookup?.fromBlock).toBe('earliest');
     expect(lookup?.topics?.[1]).toBe(pad(STRIDE));
+    expect(lookup?.fromBlock).toBeLessThanOrEqual(STRIDE_LAUNCH_BLOCK);
+    expect(lookup?.toBlock).toBeGreaterThanOrEqual(STRIDE_LAUNCH_BLOCK);
   });
 
   it('skips a graduation whose destination pool is not in the range', async () => {
@@ -653,16 +740,43 @@ const rangeRefusal = () =>
     code: -32602,
   });
 
-const GRAD_LOOKBACK_BLOCKS =
-  DISCOVERY.gradLaunchLookbackDays * 86_400 * DISCOVERY.blocksPerSecond;
-
 const gradScript = () => ({
   'select:chainCursor': CURSOR_ROW,
   'insert:discoveryEvents': [[{ id: 1 }]],
 });
 
 describe('graduation bundle reads', () => {
+  it('finds the launch by DATE, in one narrow window, instead of scanning history', async () => {
+    // DexScreener dates the coin's PONS curve pool for free; a bisection over
+    // block timestamps turns that instant into a block; ONE bounded eth_getLogs
+    // reads the TokenLaunched log there. No `earliest` query at all.
+    mockCurvePool();
+    const chain = fakeChain([poolGraduated, poolRegistered, tokenLaunched, curveBuy]);
+    const { db, calls } = makeDb(gradScript());
+    await runDiscoveryTick(db, chain);
+
+    const hunts = chain.queries.filter((q) => q.topics?.[0] === TOPICS.tokenLaunched);
+    expect(hunts).toHaveLength(1);
+    const [hunt] = hunts;
+    expect(hunt?.fromBlock).not.toBe('earliest');
+    expect(hunt?.topics?.[1]).toBe(pad(STRIDE));
+    const from = hunt?.fromBlock as number;
+    const to = hunt?.toBlock as number;
+    // The window contains the launch block, and is narrow enough to be one
+    // request on PAYG and one chunk budget on a 10-block-capped tier.
+    expect(from).toBeLessThanOrEqual(STRIDE_LAUNCH_BLOCK);
+    expect(to).toBeGreaterThanOrEqual(STRIDE_LAUNCH_BLOCK);
+    expect(to - from + 1).toBeLessThanOrEqual(2 * DISCOVERY.launchHuntWindowBlocks + 1);
+    expect(to - from + 1).toBeLessThanOrEqual(10 * DISCOVERY.maxLogChunksPerQuery);
+    // ...and the share is still measured off the original launch block.
+    expect(rowsOf(find(calls, 'insert:discoveryEvents')[0])[0]).toMatchObject({
+      launchBlockPct: 6,
+      launchBlockWallets: 1,
+    });
+  });
+
   it('reads totalSupply AT the launch window, not at the head', async () => {
+    mockCurvePool();
     const chain = fakeChain([poolGraduated, poolRegistered, tokenLaunched, curveBuy]);
     const { db } = makeDb(gradScript());
     await runDiscoveryTick(db, chain);
@@ -674,50 +788,71 @@ describe('graduation bundle reads', () => {
     ]);
   });
 
-  it('retries a REFUSED unbounded hunt exactly once, over the lookback window', async () => {
+  it('falls back to ONE unbounded query when DexScreener knows no PONS pool', async () => {
     const chain = fakeChain([poolGraduated, poolRegistered, tokenLaunched, curveBuy]);
-    chain.failLogs = (q) => (q.fromBlock === 'earliest' ? rangeRefusal() : null);
     const { db, calls } = makeDb(gradScript());
     await runDiscoveryTick(db, chain);
     const hunts = chain.queries.filter((q) => q.topics?.[0] === TOPICS.tokenLaunched);
-    expect(hunts).toHaveLength(2);
-    expect(hunts[1]).toMatchObject({
-      fromBlock: Math.max(1, HEAD - GRAD_LOOKBACK_BLOCKS),
-      toBlock: HEAD,
-    });
-    // ...and the narrower window still finds the launch, so the share is measured.
+    expect(hunts).toHaveLength(1);
+    expect(hunts[0]?.fromBlock).toBe('earliest');
     expect(rowsOf(find(calls, 'insert:discoveryEvents')[0])[0]).toMatchObject({
       launchBlockPct: 6,
       launchBlockWallets: 1,
     });
   });
 
-  it('stores the graduation with an UNKNOWN share when both hunts fail', async () => {
+  it('stores the graduation with an UNKNOWN share when that fallback is refused', async () => {
+    // The public Robinhood RPC really does refuse `earliest`. There is no wide
+    // historic scan behind it any more: one attempt, then unknown — never 0%.
     const chain = fakeChain([poolGraduated, poolRegistered, tokenLaunched, curveBuy]);
     chain.failLogs = (q) => (q.topics?.[0] === TOPICS.tokenLaunched ? rangeRefusal() : null);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { db, calls } = makeDb(gradScript());
     await runDiscoveryTick(db, chain);
+    expect(chain.queries.filter((q) => q.topics?.[0] === TOPICS.tokenLaunched)).toHaveLength(1);
     expect(rowsOf(find(calls, 'insert:discoveryEvents')[0])[0]).toMatchObject({
       kind: 'graduation',
       poolAddress: STRIDE_POOL_ID,
       launchBlockPct: null,
       launchBlockWallets: null,
     });
+    // Logged through summarizeRpcError: a summary, never the error object.
+    expect(warn.mock.calls.flat().map(String).join(' ')).toContain('launch lookup failed');
+    warn.mockRestore();
   });
 
-  it('does NOT retry a hunt that failed for any other reason, and stores the share as unknown', async () => {
+  it('spends nothing at all when the curve instant cannot be placed on a block', async () => {
+    mockCurvePool();
     const chain = fakeChain([poolGraduated, poolRegistered, tokenLaunched, curveBuy]);
-    // viem prints the request body — fromBlock and all — into `message` on every
-    // transport failure; only the RPC code / provider text may decide a retry.
+    // A node that will not serve block timestamps: unknown, and no log query is
+    // sent on a window nobody could locate.
+    chain.getBlockTimestamp = async () => {
+      chain.timestampReads += 1;
+      return null;
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { db, calls } = makeDb(gradScript());
+    await runDiscoveryTick(db, chain);
+    expect(chain.queries.filter((q) => q.topics?.[0] === TOPICS.tokenLaunched)).toHaveLength(0);
+    expect(rowsOf(find(calls, 'insert:discoveryEvents')[0])[0]).toMatchObject({
+      kind: 'graduation',
+      launchBlockPct: null,
+      launchBlockWallets: null,
+    });
+    warn.mockRestore();
+  });
+
+  it('never retries a hunt that failed for a reason a narrower query cannot fix', async () => {
+    mockCurvePool();
+    const chain = fakeChain([poolGraduated, poolRegistered, tokenLaunched, curveBuy]);
     chain.failLogs = (q) =>
-      q.fromBlock === 'earliest'
-        ? Object.assign(
-            new Error(
-              'HTTP request failed.\n\nRequest body: {"method":"eth_getLogs","params":[{"fromBlock":"earliest","toBlock":"0x1"}]}',
-            ),
-            { details: 'Too Many Requests', status: 429 },
-          )
+      q.topics?.[0] === TOPICS.tokenLaunched
+        ? Object.assign(new Error('HTTP request failed.'), {
+            details: 'Too Many Requests',
+            status: 429,
+          })
         : null;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { db, calls } = makeDb(gradScript());
     await runDiscoveryTick(db, chain);
     expect(chain.queries.filter((q) => q.topics?.[0] === TOPICS.tokenLaunched)).toHaveLength(1);
@@ -726,6 +861,7 @@ describe('graduation bundle reads', () => {
       launchBlockPct: null,
       launchBlockWallets: null,
     });
+    warn.mockRestore();
   });
 
   it('spends NOTHING on a duplicate PoolGraduated inside one range', async () => {
@@ -873,31 +1009,49 @@ describe('runEnrichment', () => {
   });
 });
 
-describe('isRangeRefusal', () => {
-  it('recognises the two refusal shapes by code and provider text', () => {
-    expect(isRangeRefusal(rangeRefusal())).toBe(true);
-    expect(isRangeRefusal({ code: '-32602' })).toBe(true);
-    expect(isRangeRefusal({ cause: { code: -32602 } })).toBe(true);
-    expect(isRangeRefusal({ details: 'block range too wide' })).toBe(true);
-    expect(isRangeRefusal({ cause: { details: 'query returned more than 10000 results' } })).toBe(
-      true,
-    );
-    expect(isRangeRefusal({ details: 'Log response size exceeded.' })).toBe(true);
+describe('findBlockAtTime', () => {
+  it('brackets an instant within one window, off a linear estimate plus bisection', async () => {
+    const chain = fakeChain([]);
+    // A chain running SLOWER than the nominal rate, so the linear seed is wrong
+    // by thousands of blocks and the bisection has real work to do.
+    chain.blockRate = 8;
+    const target = blockSecondsAt(STRIDE_LAUNCH_BLOCK, 8);
+    const block = await findBlockAtTime(chain, target, HEAD, nowSeconds());
+    expect(block).not.toBeNull();
+    // The answer is the LOW end of a bracket at most one window wide that holds
+    // the instant — which is what makes the caller's 2 x window query cover it.
+    expect(block!).toBeLessThanOrEqual(STRIDE_LAUNCH_BLOCK);
+    expect(STRIDE_LAUNCH_BLOCK - block!).toBeLessThanOrEqual(DISCOVERY.launchHuntWindowBlocks);
+    expect(chain.timestampReads).toBeLessThanOrEqual(DISCOVERY.launchHuntMaxBlockReads);
   });
 
-  it('never decides on `message`, which viem fills with the request body', () => {
-    const transportFailure = Object.assign(
-      new Error(
-        'HTTP request failed.\n\nRequest body: {"method":"eth_getLogs","params":[{"fromBlock":"earliest","toBlock":"0x2"}]}',
-      ),
-      { details: 'Too Many Requests', status: 429 },
+  it('costs a couple of reads when the estimate is already right', async () => {
+    const chain = fakeChain([]);
+    const block = await findBlockAtTime(
+      chain,
+      blockSecondsAt(STRIDE_LAUNCH_BLOCK),
+      HEAD,
+      nowSeconds(),
     );
-    expect(isRangeRefusal(transportFailure)).toBe(false);
-    expect(isRangeRefusal(new Error('The request took too long to respond. fromBlock toBlock'))).toBe(
-      false,
-    );
-    expect(isRangeRefusal(null)).toBe(false);
-    expect(isRangeRefusal({ details: 'unauthorized' })).toBe(false);
+    expect(block).not.toBeNull();
+    expect(chain.timestampReads).toBeLessThanOrEqual(3);
+  });
+
+  it('gives up rather than hunting forever when the block clock will not converge', async () => {
+    const chain = fakeChain([]);
+    const frozen = nowSeconds();
+    chain.getBlockTimestamp = async () => {
+      chain.timestampReads += 1;
+      return frozen;
+    };
+    expect(await findBlockAtTime(chain, frozen - 3_000_000, HEAD, frozen)).toBeNull();
+    expect(chain.timestampReads).toBe(DISCOVERY.launchHuntMaxBlockReads);
+  });
+
+  it('answers unknown when the node will not serve a block at all', async () => {
+    const chain = fakeChain([]);
+    chain.getBlockTimestamp = async () => null;
+    expect(await findBlockAtTime(chain, nowSeconds() - 600, HEAD, nowSeconds())).toBeNull();
   });
 });
 
@@ -1164,11 +1318,19 @@ describe('eth_getLogs adaptive block range', () => {
     // Nothing was spent and nothing was read: the caller isolates this, the
     // cursor stays put, and the same range is attempted again next tick.
     expect(fetchMock.mock.calls.length).toBe(before);
-    // A PLAIN error — no RPC code, no provider text — so no caller mistakes it
-    // for a refusal worth retrying narrower.
+    // TYPED, and carrying the ceiling the tick re-plans against — but with no
+    // RPC code and no provider text, so nothing mistakes it for a range refusal
+    // worth retrying narrower or for a throughput refusal worth backing off.
     const err = await wide.catch((e: unknown) => e);
-    expect(isRangeRefusal(err)).toBe(false);
+    expect(err).toBeInstanceOf(LogRangeTooWideError);
+    expect(err).toMatchObject({
+      span: 500,
+      ceiling: 10,
+      chunks: 50,
+      cap: DISCOVERY.maxLogChunksPerQuery,
+    });
     expect(logRangeRefusal(err)).toBeNull();
+    expect(isThrottled(err)).toBe(false);
   });
 
   it('never chunks an `earliest` hunt', async () => {
@@ -1187,7 +1349,26 @@ describe('eth_getLogs adaptive block range', () => {
     // ONE attempt, unbounded, straight to the caller's own refusal path
     // (findTokenLaunch retries it over a bounded window).
     expect(spans).toEqual([{ fromBlock: 'earliest', toBlock: 5_000 }]);
-    expect(isRangeRefusal(await hunt.catch((e: unknown) => e))).toBe(true);
+    expect(logRangeRefusal(await hunt.catch((e: unknown) => e))).not.toBeNull();
+  });
+
+  it('PACES the chunks: N-1 gaps for N chunks, nothing before the first', async () => {
+    // The other half of the 2026-09-02 incident: the tier that caps the range
+    // also caps compute units per second, and 20 back-to-back chunks a tick
+    // drew "exceeded its compute units per second capacity" every 20 seconds.
+    vi.useFakeTimers();
+    const client = provider(10, FREE_TIER_ERROR);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const query = client.getLogs({ address: WETH, fromBlock: 100, toBlock: 129 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await query;
+    const gaps = timers.mock.calls.filter((call) => call[1] === DISCOVERY.logChunkGapMs);
+    expect(gaps).toHaveLength(2);
+    expect(spans).toHaveLength(4);
+    timers.mockRestore();
+    log.mockRestore();
+    vi.useRealTimers();
   });
 
   it('reads the cap off the provider text, never off viem message', () => {
@@ -1322,5 +1503,129 @@ describe('dormant without a key', () => {
     handle.stop();
     expect(handle.running).toBe(false);
     timers.mockRestore();
+  });
+});
+
+/* ------------------------------------------------------ the 429 back-off */
+
+/**
+ * Alchemy's free tier answered every 20s tick with "Your app has exceeded its
+ * compute units per second capacity" on 2026-09-02. Retrying at the poll cadence
+ * spends the budget on more 429s and keeps the provider's meter pinned, so the
+ * chain loop stops asking for a while — and doubles the wait each time it is
+ * refused again.
+ */
+describe('provider throttling', () => {
+  const throttled = () =>
+    Object.assign(new Error('HTTP request failed.'), {
+      name: 'HttpRequestError',
+      status: 429,
+      shortMessage: 'HTTP request failed.',
+      details:
+        '{"code":429,"message":"Your app has exceeded its compute units per second capacity."}',
+    });
+
+  /** The pause a warn line announced, in seconds. */
+  const pausedSeconds = (warn: { mock: { calls: unknown[][] } }): number[] =>
+    warn.mock.calls
+      .flat()
+      .map(String)
+      .filter((line) => line.includes('provider throttled'))
+      .map((line) => Number(/for (\d+)s$/.exec(line)?.[1] ?? -1));
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('reads 429 off status/code — on the error or its cause — and never off the message', () => {
+    expect(isThrottled(throttled())).toBe(true);
+    expect(isThrottled({ code: 429 })).toBe(true);
+    expect(isThrottled({ cause: { status: 429 } })).toBe(true);
+    expect(isThrottled({ cause: { code: '429' } })).toBe(true);
+    expect(isThrottled({ status: 400 })).toBe(false);
+    // viem prints the request body into `message`; a range of 429 blocks is not
+    // a rate limit.
+    expect(isThrottled(new Error('range of 429 block(s)'))).toBe(false);
+    expect(isThrottled(null)).toBe(false);
+  });
+
+  it('pauses the chain loop, says so ONCE, and leaves the heartbeat alone', async () => {
+    vi.useFakeTimers();
+    const chain = fakeChain([]);
+    let failing = true;
+    chain.getBlockNumber = async () => {
+      if (failing) throw throttled();
+      return HEAD;
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { db, calls } = makeDb({ 'select:chainCursor': [[{ lastBlock: SAFE_HEAD }]] });
+    const handle = startDiscovery(db, chain);
+
+    await vi.advanceTimersByTimeAsync(DISCOVERY.pollIntervalMs);
+    expect(pausedSeconds(warn)).toEqual([DISCOVERY.throttleBackoffMs / 1000]);
+
+    // Every tick inside the pause is skipped in SILENCE, and nothing stamps the
+    // cursor: a paused listener reads as stalled on the board, which is honest.
+    failing = false;
+    await vi.advanceTimersByTimeAsync(DISCOVERY.pollIntervalMs * 2);
+    expect(pausedSeconds(warn)).toHaveLength(1);
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(find(calls, 'update:chainCursor')).toHaveLength(0);
+
+    // ...and once the pause elapses, a good tick clears the back-off.
+    await vi.advanceTimersByTimeAsync(DISCOVERY.throttleBackoffMs);
+    expect(find(calls, 'update:chainCursor').length).toBeGreaterThan(0);
+    handle.stop();
+    warn.mockRestore();
+    error.mockRestore();
+    log.mockRestore();
+  });
+
+  it('doubles the pause on each further 429, up to the ceiling', async () => {
+    vi.useFakeTimers();
+    const chain = fakeChain([]);
+    chain.getBlockNumber = async () => {
+      throw throttled();
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { db } = makeDb({ 'select:chainCursor': [[{ lastBlock: SAFE_HEAD }]] });
+    const handle = startDiscovery(db, chain);
+    for (let i = 0; i < 4; i++) {
+      await vi.advanceTimersByTimeAsync(DISCOVERY.throttleBackoffMaxMs);
+    }
+    handle.stop();
+    const seconds = pausedSeconds(warn);
+    expect(seconds.slice(0, 5)).toEqual([60, 120, 240, 480, 600]);
+    for (const value of seconds) {
+      expect(value).toBeLessThanOrEqual(DISCOVERY.throttleBackoffMaxMs / 1000);
+    }
+    warn.mockRestore();
+    error.mockRestore();
+    log.mockRestore();
+  });
+
+  it('does NOT pause on a failure that is not a throughput refusal', async () => {
+    vi.useFakeTimers();
+    const chain = fakeChain([]);
+    chain.getBlockNumber = async () => {
+      throw Object.assign(new Error('upstream exploded'), { status: 500 });
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { db } = makeDb({ 'select:chainCursor': [[{ lastBlock: SAFE_HEAD }]] });
+    const handle = startDiscovery(db, chain);
+    await vi.advanceTimersByTimeAsync(DISCOVERY.pollIntervalMs * 3);
+    handle.stop();
+    // Three ticks, three failures, no pause: a 500 is worth retrying at once.
+    expect(error).toHaveBeenCalledTimes(3);
+    expect(pausedSeconds(warn)).toHaveLength(0);
+    warn.mockRestore();
+    error.mockRestore();
+    log.mockRestore();
   });
 });

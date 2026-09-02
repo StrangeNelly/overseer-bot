@@ -1,6 +1,6 @@
 import type { Db } from '@groupie/db';
 import { DISCOVERY } from '@groupie/shared';
-import { summarizeRpcError, type ChainClient } from '../chain/client.js';
+import { isThrottled, summarizeRpcError, type ChainClient } from '../chain/client.js';
 import { deliverDiscoveryAlerts, retireStaleDiscoveryAlerts } from './alerts.js';
 import {
   pruneDiscovery,
@@ -52,16 +52,47 @@ export function startDiscovery(db: Db, chain: ChainClient | null): DiscoveryHand
   }
 
   let chainRunning = false;
+  /**
+   * The 429 back-off. A throughput refusal is the one failure the next tick
+   * cannot fix: retrying at the poll cadence spends budget on more 429s and
+   * keeps the provider's per-second meter pinned, so the loop stops asking for
+   * a while and doubles the wait each time it is refused again.
+   *
+   * Deliberately NOT touching the cursor heartbeat: a paused listener reads as
+   * stalled on the board after five minutes, which is exactly what it is.
+   */
+  let backoffMs = 0;
+  let pausedUntilMs = 0;
   const chainTimer = setInterval(async () => {
     if (chainRunning) return;
+    // Silent: the pause was announced once, and one line per skipped tick would
+    // bury the reason under the symptom.
+    if (Date.now() < pausedUntilMs) return;
     chainRunning = true;
     try {
       await runDiscoveryTick(db, chain);
+      if (backoffMs > 0) {
+        console.log('discovery: provider accepting reads again, chain ticks resumed');
+        backoffMs = 0;
+        pausedUntilMs = 0;
+      }
     } catch (err) {
       // Summarised, never the error object: this is the one log line an RPC
       // failure reaches, and viem's error carries the API-keyed URL in its
       // message, metaMessages and url.
       console.error(`discovery tick failed: ${summarizeRpcError(err)}`);
+      if (isThrottled(err)) {
+        backoffMs =
+          backoffMs === 0
+            ? DISCOVERY.throttleBackoffMs
+            : Math.min(DISCOVERY.throttleBackoffMaxMs, backoffMs * 2);
+        pausedUntilMs = Date.now() + backoffMs;
+        console.warn(
+          `discovery: provider throttled (429), pausing chain ticks for ${Math.round(
+            backoffMs / 1000,
+          )}s`,
+        );
+      }
     } finally {
       chainRunning = false;
     }

@@ -224,25 +224,49 @@ and is never hidden by the bundle filter.
 block (round 20: "measured from the launch"). One `eth_getLogs` on the PONS
 factory filtered to `[tokenLaunched, addressTopic(token)]` gives the launch block
 and the curve address (`topics[2]`); the token's `Transfer` logs over that
-window, with the curve as the sink, give the share. The range is `earliest` — a
-coin can sit on its curve for weeks — and a provider that REFUSES THE RANGE gets
-ONE retry over the last `DISCOVERY.gradLaunchLookbackDays` (35) of blocks. (The
-public Robinhood RPC does refuse it: it answered `expected fromBlock to be a hex
-string starting with 0x` to `earliest`, which is why the retry exists rather than
-being theoretical.) Only a range refusal is retried — JSON-RPC `-32602`, or a
-provider text (`details`, never viem's `message`, which always carries the
-request body) naming the block range / too many results; a timeout, a 429 or an
-auth failure would fail the narrower query identically, so those are NOT retried:
-the graduation is stored with its share unknown (null, printed as unknown) and,
-being a known pool from then on, is not re-measured. That is the accepted
-trade-off — one failed hunt can neither wedge the listener nor spend a second
-call. `totalSupply()` is read AT the
-launch window (`eth_call` with an explicit block tag, which assumes the archive
-`eth_call` Alchemy serves on this plan): the share is a fraction of the supply
-that existed when those Transfers happened, and a coin that minted or burned in
-the weeks it sat on its curve would otherwise be divided by a denominator from a
-different day. Any read that fails leaves the row's bundle facts null and the
-board says "launch block unknown".
+window, with the curve as the sink, give the share.
+
+The question is WHERE to look. A coin can sit on its curve for weeks, so the
+first cut asked `earliest` and, when refused, re-asked over 35 days of blocks —
+which on a 10-block-per-query tier is 30 million blocks and three million chunks,
+i.e. never. **The hunt is now timestamp-guided** and never scans history:
+
+1. `ds.getTokenPools(token)` (DexScreener, free, already on the token route)
+   names the coin's **PONS curve pool** — `dexId` containing `pons`, earliest
+   `pairCreatedAt`. The curve is the first pool a PONS coin ever has (supply is
+   minted straight into it, see "the curve is the SINK"), so that instant is the
+   launch instant.
+2. That instant is turned into a BLOCK by bisection over
+   `eth_getBlockByNumber`, seeded with a linear estimate
+   `head − (now − T) × DISCOVERY.blocksPerSecond` and then bracketed by doubling
+   steps before the bisection narrows it to `DISCOVERY.launchHuntWindowBlocks`
+   (200). The search is bounded at `DISCOVERY.launchHuntMaxBlockReads` (12)
+   reads and answers **null** past it — a chain whose block times misbehave
+   costs twelve cheap reads, not an open-ended search.
+3. ONE `eth_getLogs` over `2 × launchHuntWindowBlocks` = **400 blocks** around
+   that block. 400 is deliberate: one request on PAYG, and exactly the
+   40 × 10-block chunk budget on a capped tier.
+
+Cost per graduation: **~4–8 `eth_getBlock` reads at 16 CU** plus one
+`eth_getLogs` — against an unbounded historic scan that no capped plan will
+serve at all.
+
+When DexScreener knows no PONS pool for the coin (or cannot answer), the
+fallback is the old unbounded `earliest` query — **ONE attempt, and nothing
+behind it**. The public Robinhood RPC does refuse it (`expected fromBlock to be
+a hex string starting with 0x`), and a refusal now simply answers unknown: the
+graduation is stored with its share null (printed as unknown, never 0%) and,
+being a known pool from then on, is never re-measured. Same for a 429, a timeout
+or an auth failure — every one of them is one attempt, one `summarizeRpcError`
+line, and unknown. That is the accepted trade-off: one failed hunt can neither
+wedge the listener nor spend a second call.
+
+`totalSupply()` is read AT the launch window (`eth_call` with an explicit block
+tag, which assumes the archive `eth_call` Alchemy serves on this plan): the share
+is a fraction of the supply that existed when those Transfers happened, and a
+coin that minted or burned in the weeks it sat on its curve would otherwise be
+divided by a denominator from a different day. Any read that fails leaves the
+row's bundle facts null and the board says "launch block unknown".
 
 Graduations are also DEDUPED before any of that is spent: one `seenPools` query
 per block range, plus a per-range set of pool ids, so a replayed range cannot pay
@@ -273,23 +297,47 @@ to discard the row.
   `planRange`/`splitRanges` are untouched — the cursor keeps its tick-sized
   ranges and the client does the dividing, so a chunked read still advances the
   cursor exactly one range at a time.
-- **`DISCOVERY.maxLogChunksPerQuery` = 40**, and the free tier does not fit
-  under it for long. A steady-state 20s tick is ~200 blocks of a ~100ms chain =
-  20 chunks × 75 CU = 1,500 CU per tick, ~270K CU/hour, ~195M CU/month against
-  the free tier's 30M — so the free tier reads the stream for about four days a
-  month and then stops. It is a stopgap, not a plan. A 2,000-block catch-up
-  range would be 200 chunks, over the cap: that range throws a PLAIN error
-  (no RPC code, no provider text, so nothing mistakes it for a refusal to retry
-  narrower), the tick isolate logs one line, and **the cursor does not advance
-  past blocks nobody read** — the same range is attempted again next tick. The
-  honest consequence on the free tier: a gap wider than 40 × 10 = 400 blocks
-  (~40 seconds of chain, i.e. two skipped ticks) can never be caught up, because
-  every retry asks for the same too-wide range. That is a second reason the free
-  tier is a stopgap; on PAYG the whole range is one query and the question does
-  not arise.
-  `fromBlock: 'earliest'` hunts (the graduation's `TokenLaunched` lookup) are
-  never chunked: they have no numeric span, and they already have their own
-  bounded-window retry.
+- **`DISCOVERY.maxLogChunksPerQuery` = 40.** A 2,000-block catch-up range at a
+  10-block ceiling is 200 chunks, over the cap: that range throws
+  `LogRangeTooWideError` (a DEDICATED type carrying `span`, `ceiling`, `chunks`
+  and `cap`, and deliberately no RPC code or provider text, so neither
+  `logRangeRefusal` nor `isThrottled` mistakes it for something to retry
+  narrower or back off from) and **the cursor does not advance past blocks
+  nobody read**.
+  `fromBlock: 'earliest'` hunts are never chunked: they have no numeric span.
+- **A ceiling learned MID-TICK re-plans the tick** (fixed 2026-09-02, second
+  incident). The first tick of a process sizes its requests before any ceiling
+  is known — 2,000 blocks — and the client learns the real one, 10, from that
+  very request's refusal. The old code then threw the chunk-cap error and lost
+  the whole tick, every tick, forever. `runDiscoveryTick` now catches
+  `LogRangeTooWideError` ONCE per tick, recomputes `requestBlocksFor(maxLogRange)`
+  and re-splits the ranges **from the one that failed onward** — safe precisely
+  because the cursor only ever advanced over ranges that were actually read. A
+  second one in the same tick is not a stale plan any more, so it goes to the
+  isolate and the same blocks are re-read next tick.
+- **Free tier verdict: NOT VIABLE.** Two independent caps, and the second one is
+  the fatal one. (1) `eth_getLogs` serves 10 blocks per query, so a steady-state
+  20s tick is ~200 blocks = 20 chunks × 75 CU = 1,500 CU per tick, ~270K
+  CU/hour, ~195M CU/month against the free tier's 30M — four days of stream a
+  month. (2) A compute-units-per-SECOND ceiling on top of that: on 2026-09-02
+  every tick came back
+  `{"code":429,"message":"Your app has exceeded its compute units per second capacity"}`,
+  so the listener never got as far as spending the monthly budget. The two fixes
+  below make the free tier degrade honestly rather than thrash; they do not make
+  it a plan. PAYG serves the whole range in one query and neither cap applies.
+- **Chunks are PACED** — `DISCOVERY.logChunkGapMs` (250ms) between consecutive
+  chunks of one query, none before the first. A tier that caps the block range
+  also caps throughput, and 20 back-to-back chunks a tick is exactly the burst
+  that draws the 429 above.
+- **A 429 pauses the chain loop** (`isThrottled` in `chain/client.ts`, read off
+  `status`/`code` on the error and its cause — never off `message`, which viem
+  fills with the request body). The pause starts at
+  `DISCOVERY.throttleBackoffMs` (60s), doubles per further 429 up to
+  `throttleBackoffMaxMs` (600s), and resets on the next successful tick. ONE log
+  line per back-off change, not one per skipped tick. The ENRICHMENT loop is
+  untouched (its own provider, its own budget), and so is the cursor
+  heartbeat — a paused listener reads as stalled on the board after five
+  minutes, which is what it is.
 - **No chain error is ever logged as an object.** viem writes the request URL
   into `message`, `metaMessages` and `url` on every transport failure, and that
   URL is `https://robinhood-mainnet.g.alchemy.com/v2/<API KEY>` — so

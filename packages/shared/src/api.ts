@@ -76,6 +76,19 @@ export interface BoardCard {
    * does not have.
    */
   mcapAtDeath: number | null;
+  /**
+   * Round 21: a member's verdict. When deathReason is 'member', the display
+   * name of who marked it (as the bot would print it); null for every
+   * rule-driven death. A member-marked death is never auto-revived — only
+   * a member can restore it (DELETE /calls/:id/dead, `/overseer undead`).
+   */
+  deathMarkedBy: string | null;
+  /**
+   * DexScreener 24h trade count at the last poll; null when unknown. With
+   * vol24Usd this is what a 'flatline' death prints ("flatlined · vol $120 /
+   * 24h · 3 trades") — the number, never a verdict.
+   */
+  txns24: number | null;
   /** tokens.lastSnapshotAt — when the market numbers were last real. */
   dataAsOf: string | null;
   /** on the group's alert watchlist */
@@ -212,6 +225,21 @@ export interface WatchlistEntry {
 export interface WatchByAddressRequest {
   address: string;
 }
+
+/* ------------------------------------------------ member verdict (round 21) */
+
+/**
+ * POST   /api/g/:slug/calls/:callId/dead  — mark a LIVE call dead by hand
+ *                                           (any member, group-wide): 204, or
+ *                                           409 when the call is not live.
+ * DELETE /api/g/:slug/calls/:callId/dead  — restore a member-marked death
+ *                                           (only deathReason 'member'): 204,
+ *                                           or 409 for a rule-driven death.
+ * No request body. Bot parity: `/overseer dead <symbol|CA>` and
+ * `/overseer undead <symbol|CA>`. Death reasons introduced by round 21:
+ * 'member' (a verdict; deathMarkedBy names who) and 'flatline' (the rule:
+ * far off its peak with no trades for hours — vol24Usd/txns24 print it).
+ */
 
 /* ------------------------------------------------ discovery (rounds 18 + 20) */
 

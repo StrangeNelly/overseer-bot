@@ -299,6 +299,22 @@ export const DISCOVERY = {
    */
   maxLogChunksPerQuery: 40,
   /**
+   * Milliseconds between CONSECUTIVE chunks of one chunked `eth_getLogs` (none
+   * before the first). A tier that caps the block range also caps throughput —
+   * Alchemy's free tier answered the 20-chunk steady-state tick with
+   * "exceeded its compute units per second capacity" every 20 seconds — so the
+   * chunks a range is split into are spread out rather than fired as a burst.
+   */
+  logChunkGapMs: 250,
+  /**
+   * How long the chain loop stops asking after the provider answers 429, and
+   * the ceiling that back-off doubles up to. A throughput refusal is not a
+   * failure the next tick can fix: retrying at the poll cadence spends the
+   * budget on more 429s and keeps the provider's per-second meter pinned.
+   */
+  throttleBackoffMs: 60_000,
+  throttleBackoffMaxMs: 600_000,
+  /**
    * The launch block plus this many after it: the window the bundle facts are
    * read over (round 20: "the launch block and the first few blocks").
    */
@@ -357,11 +373,21 @@ export const DISCOVERY = {
    */
   maxAlertAgeMinutes: 15,
   /**
-   * How far back the graduation bundle read hunts for a coin's `TokenLaunched`
-   * when the provider refuses an unbounded range. A PONS coin that took longer
-   * than this to graduate simply reports its launch block as unknown.
+   * Half-width, in blocks, of the window the graduation hunt reads for a coin's
+   * `TokenLaunched` once DexScreener has dated its PONS curve pool. 200 blocks
+   * is 20 seconds of a ~100ms chain either side of the located block — enough
+   * slack for a second-resolution timestamp and a bisection bracket, while the
+   * whole query stays at 400 blocks: one request on PAYG, and exactly the
+   * 40 x 10-block chunk budget on a capped tier.
    */
-  gradLaunchLookbackDays: 35,
+  launchHuntWindowBlocks: 200,
+  /**
+   * The most `eth_getBlockByNumber` reads one launch hunt may spend locating
+   * that block. A linear estimate plus a bisection converges in well under this;
+   * anything that does not is a chain whose block times do not behave, and the
+   * hunt gives up (unknown) rather than paying for an open-ended search.
+   */
+  launchHuntMaxBlockReads: 12,
 } as const;
 
 /** No mention for this long demotes a living token to the idle tier. */

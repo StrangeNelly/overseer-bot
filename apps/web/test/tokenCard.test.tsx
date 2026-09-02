@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { BoardCard } from '@groupie/shared';
 import { TokenCard } from '../src/components/TokenCard';
 import type { SectionKey } from '../src/components/SectionTabs';
+import { peakNote } from '../src/derive';
 
 /**
  * A dead card never renders as "unresolved" (docs/decisions.md round 17b
@@ -46,6 +47,8 @@ function card(over: Partial<BoardCard> = {}): BoardCard {
     diedAt: null,
     deathReason: null,
     mcapAtDeath: null,
+    deathMarkedBy: null,
+    txns24: null,
     dataAsOf: null,
     watched: false,
     watchedByMe: false,
@@ -105,5 +108,93 @@ describe('TokenCard — a dead card is never unresolved', () => {
     const html = render(card(), 'fresh');
     expect(html).toContain('not indexed yet');
     expect(html).toContain('awaiting first data');
+  });
+});
+
+/**
+ * The peak note: every headline number on the board is mark-to-market since the
+ * call, so a card at 0.8x reads the same whether it drifted there or touched
+ * $30M first. The note says where the coin has BEEN — as a fact, never a
+ * verdict — and stays silent whenever the live multiple already tells it.
+ */
+
+/** A live, resolved card: $13M call, $30M peak, back at $11M. */
+const roundTripped = card({
+  phase: 'graduated',
+  mcapUsd: 11e6,
+  mcapAtCall: 13e6,
+  multiple: 11 / 13,
+  peakMcapSinceCall: 30e6,
+  peakMultiple: 30 / 13,
+  retraceFromPeakPct: 63,
+  symbol: 'ORBIO',
+  dataAsOf: new Date(NOW - 60_000).toISOString(),
+});
+
+describe('peakNote', () => {
+  it('says nothing when the coin never went anywhere above the call', () => {
+    expect(peakNote({ ...roundTripped, peakMultiple: 1.1, peakMcapSinceCall: 14.3e6 })).toBeNull();
+  });
+
+  it('says nothing while the coin sits at its peak — the multiple already is it', () => {
+    expect(peakNote({ ...roundTripped, retraceFromPeakPct: 4 })).toBeNull();
+  });
+
+  it('says nothing without a recorded peak', () => {
+    expect(peakNote({ ...roundTripped, peakMcapSinceCall: null })).toBeNull();
+    expect(peakNote({ ...roundTripped, peakMultiple: null })).toBeNull();
+  });
+
+  it('prints peak and peak multiple for a retraced runner still above its call', () => {
+    // 2.3x offered, 1.1x now: up, but a long way off the high.
+    expect(peakNote({ ...roundTripped, mcapUsd: 14.3e6, multiple: 1.1 })).toBe('peak $30M · 2.3x');
+  });
+
+  it('names the round trip when the coin has fallen back under the call', () => {
+    expect(peakNote(roundTripped)).toBe('peak $30M · 2.3x · back under call');
+  });
+
+  it('still holds for a dead call — the 2.3x it offered first happened', () => {
+    expect(
+      peakNote({
+        ...roundTripped,
+        phase: 'dead',
+        callStatus: 'died',
+        multiple: 0.02,
+        diedAt: new Date(NOW - 3 * HOUR).toISOString(),
+      }),
+    ).toBe('peak $30M · 2.3x · back under call');
+  });
+});
+
+describe('TokenCard — the peak on every call surface', () => {
+  it('prints the peak note on a fresh card', () => {
+    const html = render(roundTripped, 'fresh');
+    expect(html).toContain('sub-peak');
+    expect(html).toContain('peak $30M · 2.3x · back under call');
+  });
+
+  it('...and on a died row, under the death line', () => {
+    const html = render(
+      { ...roundTripped, phase: 'dead', callStatus: 'died', diedAt: new Date(NOW - 3 * HOUR).toISOString() },
+      'died',
+    );
+    expect(html).toContain('died 3h ago');
+    expect(html).toContain('peak $30M · 2.3x');
+  });
+
+  it('but not on a card that never left its call behind', () => {
+    const html = render(
+      { ...roundTripped, peakMcapSinceCall: null, peakMultiple: null, retraceFromPeakPct: null },
+      'fresh',
+    );
+    expect(html).not.toContain('sub-peak');
+    expect(html).not.toContain('peak $');
+  });
+
+  it('and never twice on a Retraced row, which already says it', () => {
+    const html = render(roundTripped, 'retraced');
+    expect(html).toContain('-63% from peak $30M');
+    expect(html).not.toContain('sub-peak');
   });
 });
