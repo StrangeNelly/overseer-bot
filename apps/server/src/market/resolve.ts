@@ -35,6 +35,9 @@ function fromGt(info: gt.GtTokenInfo, pool: gt.GtPoolInfo): ResolvedToken {
       fdvUsd: info.fdvUsd ?? pool.fdvUsd,
       reserveUsd: pool.reserveUsd,
       vol24Usd: info.vol24Usd ?? pool.vol24Usd,
+      // Only the POOL resource carries a transactions block; the token one has
+      // none, so there is nothing to prefer it over.
+      txns24: pool.txns24,
     }),
   };
 }

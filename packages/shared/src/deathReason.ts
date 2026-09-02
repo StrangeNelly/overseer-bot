@@ -41,3 +41,42 @@ export function wrongChainOf(reason: string | null | undefined): string | null {
 export function isWrongChainDeath(reason: string | null | undefined): reason is string {
   return typeof reason === 'string' && reason.startsWith(WRONG_CHAIN_PREFIX);
 }
+
+/**
+ * A MEMBER's verdict (docs/decisions.md round 21) — the only death in the
+ * system a rule did not reach. Written on the CALL, never on the token: the
+ * coin still trades, the group has simply decided it is done with it.
+ *
+ * Its one hard consequence lives in the revival paths: a member-marked death is
+ * exempt from every automatic comeback, because the bar those comebacks use
+ * ($30K of market cap) is a bar a dumped coin with residual holders clears
+ * standing still. Only a member can undo it — RESTORE on the board, or
+ * `/overseer undead`.
+ */
+export const MEMBER_DEATH_REASON = 'member';
+
+/**
+ * The board's fallback name for a member verdict whose marker we cannot name
+ * (they have never posted here and Telegram gave us nothing). `deathMarkedBy`
+ * is null ONLY for rule deaths — attributing this one to nobody would read as
+ * one — so an unnamed member is still named as a member.
+ */
+export const UNNAMED_MEMBER = 'a member';
+
+/** Was this call killed by a member rather than by a rule? */
+export function isMemberDeath(reason: string | null | undefined): boolean {
+  return reason === MEMBER_DEATH_REASON;
+}
+
+/**
+ * The token DUMPED but never drained (docs/decisions.md round 21): far below
+ * its peak, with no volume and no trades, for six unbroken hours. Written by
+ * the poller on the token, exactly like the other rule deaths — and read again
+ * by the revival path, which asks a flatline corpse for volume as well as mcap.
+ */
+export const FLATLINE_DEATH_REASON = 'flatline';
+
+/** Was this death the round-21 quiet-tape rule? */
+export function isFlatlineDeath(reason: string | null | undefined): boolean {
+  return reason === FLATLINE_DEATH_REASON;
+}

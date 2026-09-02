@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { wrongChainOf, type BoardCard } from '@groupie/shared';
 import {
   RUNNER_MULTIPLE,
+  deathNote,
   isDied,
   isReviving,
   isStale,
@@ -26,8 +27,9 @@ import {
 } from '../format';
 import { canFlash, hoverCapable, requestMotion, useAlertBloom, useReducedMotion } from '../motion';
 import type { Ceremony } from '../motion';
-import { LinkPills, WatchPill } from './LinkPills';
+import { DeadPill, LinkPills, WatchPill } from './LinkPills';
 import type { WatchControl } from './LinkPills';
+import type { DeadControl } from '../dead';
 import { Odometer } from './Odometer';
 import { Sparkline } from './Sparkline';
 import type { SparkTone } from './Sparkline';
@@ -74,6 +76,12 @@ interface TokenCardProps {
   binning?: boolean;
   /** The watchlist toggle in the link row; omitted where there is no link row. */
   watch?: WatchControl;
+  /**
+   * The member verdict (docs/decisions.md round 21): MARK DEAD in the link row
+   * while the call is live, RESTORE beside BIN once a member has marked it.
+   * Undefined on surfaces that do not offer it, and on cards it cannot apply to.
+   */
+  dead?: DeadControl;
   /** The one state change this row should play, if any. */
   ceremony?: Ceremony;
   /** The single breathing glow on the board. */
@@ -187,6 +195,7 @@ export function TokenCard({
   onBin,
   binning,
   watch,
+  dead,
   ceremony,
   topRunner = false,
   animate = true,
@@ -259,17 +268,30 @@ export function TokenCard({
     };
   }, [ceremony, animate]);
 
-  const pills = <LinkPills target={card} watch={watch} compact={links === 'hover'} />;
+  const pills = <LinkPills target={card} watch={watch} dead={dead} compact={links === 'hover'} />;
+  const restore = dead && dead.mode === 'restore' ? dead : null;
 
   // ---- the died rail (desktop right column) is its own, flatter anatomy.
   if (size === 'rail') {
+    // The rail is 330px wide, so the note ellipses rather than wrapping — the
+    // title carries the whole sentence for the reader who wants it.
+    const railMeta = [
+      deathNote(card),
+      deathMcap(card),
+      fmtAge(card.diedAt ?? card.calledAt, now),
+    ]
+      .filter((part): part is string => part !== null)
+      .join(' · ');
     return (
       <div className="rail-row" data-call={card.callId}>
         <span className="rail-sym">{title}</span>
         {badge ? <span className={`badge badge-${badge.kind}`}>{badge.text}</span> : null}
-        <span className="rail-meta">
-          {`${deathMcap(card)} · ${fmtAge(card.diedAt ?? card.calledAt, now)}`}
+        <span className="rail-meta" title={railMeta}>
+          {railMeta}
         </span>
+        {/* Only a member can undo a member's verdict — so the pill exists
+            exactly where the corpse does (round 21). */}
+        {restore ? <DeadPill dead={restore} className="rail-dead" /> : null}
         {/* A watched corpse still holds someone's cap slot, and this rail is the
             only place desktop shows it — without an unwatch here the slot
             strands until the member finds the bot command (round 15 review).
@@ -308,6 +330,11 @@ export function TokenCard({
         : `${fmtSignedPct(revived)} since revival · ${fmtAge(card.revivingAt, now)}`,
     );
   } else if (died) {
+    // Round 21: the reasons that carry evidence say it here — who pronounced
+    // it, or the volume and trade count the flatline rule read. Every other
+    // death keeps its wording exactly.
+    const note = deathNote(card);
+    if (note) sub.push(note);
     sub.push(`died ${fmtAge(card.diedAt ?? card.calledAt, now)} ago`);
   } else if (retraceLine) {
     sub.push(
@@ -466,6 +493,11 @@ export function TokenCard({
           )}
         </div>
 
+        {/* RESTORE rides beside BIN, in every list a member-dead card can show
+            up in — the verdict is reversible wherever it is visible. On a
+            hover-strip row the strip covers this spot on mouse-over, so the
+            pill lives inside the strip instead (LinkPills, compact). */}
+        {restore && links !== 'hover' ? <DeadPill dead={restore} className="row-dead" /> : null}
         {section === 'died' && onBin ? (
           <button type="button" className="bin-btn" disabled={binning} onClick={() => onBin(card)}>
             {binning ? 'binning' : 'bin'}

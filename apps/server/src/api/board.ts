@@ -29,7 +29,8 @@ import {
   isWatched,
   removeWatch,
 } from '../watchlist.js';
-import type { ApiEnv } from './membership.js';
+import { markCallDead, restoreCall } from '../verdict.js';
+import { memberDisplayName, type ApiEnv } from './membership.js';
 import { classifySections, parseTzOffsetMin, startOfLocalDayMs } from './boardLogic.js';
 
 /** Contract: sparklines cover the last 24h regardless of the board window. */
@@ -121,9 +122,14 @@ export function toCard(
     diedAt: death.at?.toISOString() ?? null,
     deathReason: death.reason,
     mcapAtDeath: death.mcapUsd,
-    // Round 21 fields, filled in by the member-verdict build; null until then.
-    deathMarkedBy: null,
-    txns24: null,
+    // Round 21. Non-null EXACTLY for a member verdict (the column is only ever
+    // written by markCallDead), so the card can tell a verdict from a rule
+    // without parsing the reason. Taken from the CALL, like the rest of the
+    // death record — never from the token, which is alive.
+    deathMarkedBy: call.deathMarkedBy,
+    // The trade count behind a flatline death, and a live number the rest of
+    // the time. null = the last reading carried none, which prints as unknown.
+    txns24: token.txns24,
     dataAsOf: token.lastSnapshotAt?.toISOString() ?? null,
     watched,
     watchedByMe,
@@ -503,6 +509,52 @@ export function createBoardRoutes(db: Db): Hono<ApiEnv> {
     )[0];
     if (!existing) return c.json({ error: 'not found' }, 404);
     return c.json({ error: `only died calls can be binned (status: ${existing.status})` }, 409);
+  });
+
+  /**
+   * MARK DEAD (docs/decisions.md round 21) — the member verdict. Any member,
+   * group-wide, exactly the standing binning has: the rules cannot see a coin
+   * that was dumped without its pool draining ($VLR at 0.4x on $19K of intact
+   * liquidity), so the group is allowed to say so.
+   *
+   * Only a LIVE call can be marked: a call that a rule already killed keeps the
+   * rule's record, and one that is binned is off the board entirely.
+   */
+  app.post('/api/g/:slug/calls/:callId/dead', async (c) => {
+    const group = c.get('group');
+    const callId = parsePathId(c.req.param('callId'));
+    if (callId === null) return c.json({ error: 'not found' }, 404);
+
+    // The name is stamped into the row at the moment of the verdict (see
+    // markCallDead) — the session's member, never the request body's.
+    const markedBy = await memberDisplayName(db, group.id, c.get('userId'));
+    const outcome = await markCallDead(db, group.id, callId, markedBy);
+    if (outcome === 'marked') return c.body(null, 204);
+    if (outcome === 'not_found') return c.json({ error: 'not found' }, 404);
+    return c.json({ error: 'only live calls can be marked dead' }, 409);
+  });
+
+  /**
+   * RESTORE — the only way back from a member verdict, and a member action too
+   * (round 21: a marked death is exempt from every automatic revival, so
+   * nothing else will ever undo it). A rule death is not restorable here: it
+   * has its own comeback path, and reversing it by hand would erase a record
+   * the poller is still using.
+   */
+  app.delete('/api/g/:slug/calls/:callId/dead', async (c) => {
+    const group = c.get('group');
+    const callId = parsePathId(c.req.param('callId'));
+    if (callId === null) return c.json({ error: 'not found' }, 404);
+
+    const outcome = await restoreCall(db, group.id, callId);
+    if (outcome === 'restored') return c.body(null, 204);
+    if (outcome === 'not_found') return c.json({ error: 'not found' }, 404);
+    // Round 21 amendment (d): the verdict still stands, but a rule has killed
+    // the coin since — there is nothing live to put the call back onto.
+    if (outcome === 'token_dead') {
+      return c.json({ error: 'the coin is dead — nothing to restore it to' }, 409);
+    }
+    return c.json({ error: 'only a member-marked death can be restored' }, 409);
   });
 
   /**

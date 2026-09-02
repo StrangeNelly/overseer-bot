@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { SLEEPER_BANDS, SLEEPERS, requiredVolumeUsd } from '@groupie/shared';
 import {
+  DROP_REASONS,
   bandFor,
   carriedResidencyHours,
   computeResidency,
   computeShortResidency,
   dedupeByToken,
+  dropReason,
   inferSupply,
   needsFullMeasurement,
   qualify,
@@ -13,6 +15,7 @@ import {
   type Candle,
   type PoolCandidate,
   type PrevResidency,
+  type SleeperDropReason,
 } from '../src/poller/sleeperLogic.js';
 
 const HOUR = 3_600_000;
@@ -819,5 +822,107 @@ describe('carriedResidencyHours', () => {
 
   it('never runs backwards on a clock that did', () => {
     expect(carriedResidencyHours({ ...base, scanAtMs: NOW + HOUR }, NOW)).toBe(12);
+  });
+});
+
+/* ------------------------------------------- drop telemetry (round 21) */
+
+describe('dropReason', () => {
+  const kept = (inBandHours: number | null) => ({ kept: true, inBandHours });
+  const notKept = { kept: false };
+
+  it('names the first failing gate, in the order the scan applies them', () => {
+    const table: Array<[string, Partial<PoolCandidate>, SleeperDropReason]> = [
+      // A missing reading is named apart from the floor it fails, so the
+      // breakdown can tell an upstream gap from a measured shortfall.
+      ['an unreadable market cap', { mcapUsd: null }, 'mcap_unknown'],
+      ['an unreadable liquidity', { liquidityUsd: null }, 'lp_unknown'],
+      ['a non-finite liquidity', { liquidityUsd: Number.NaN }, 'lp_unknown'],
+      ['an unreadable 24h volume', { vol24Usd: null }, 'volume_unknown'],
+      ['an unreadable 24h trade count', { txns24: null }, 'txns24_unknown'],
+      ['an unknown pool age', { poolCreatedAt: null }, 'age_floor'],
+      ['a pool under the absolute LP floor', { liquidityUsd: 5_000 }, 'lp_floor'],
+      // Clears $10K, but $15K against a $1M cap is 1.5% — the FORESKIN shape.
+      ['LP too thin for the cap', { mcapUsd: 1_000_000, liquidityUsd: 15_000 }, 'lp_ratio'],
+      ['too few trades in 24h', { txns24: 5 }, 'txns24_floor'],
+      ['a pool younger than an hour', { poolCreatedAt: new Date(NOW - 30 * 60_000) }, 'age_floor'],
+      ['a pool past the scan ceiling', { poolCreatedAt: new Date(NOW - 40 * DAY) }, 'age_ceiling'],
+      ['volume under the tapering floor', { vol24Usd: 5_000 }, 'volume_floor'],
+      ['a cap outside every band', { mcapUsd: 20_000 }, 'out_of_band'],
+    ];
+    for (const [label, over, expected] of table) {
+      expect(dropReason(candidate(over), NOW, notKept), label).toBe(expected);
+      // The floors are read before anything the scan did with the candidate, so
+      // a floor failure reads the same whether or not it won a slot.
+      expect(dropReason(candidate(over), NOW, kept(5)), label).toBe(expected);
+    }
+  });
+
+  it('reports a qualified candidate that lost its band slot', () => {
+    expect(dropReason(candidate(), NOW, notKept)).toBe('band_slots');
+  });
+
+  it('reports the stopped-trading gate ahead of a bare silence', () => {
+    // Kept, but zero trades this hour: no 15-minute bucket can be fresh, so the
+    // scan recorded 0 hours and no duration view will show it.
+    expect(dropReason(candidate({ txns1h: 0 }), NOW, kept(0))).toBe('last_hour_trades');
+    // Same silence, no listing evidence for it.
+    expect(dropReason(candidate({ txns1h: 4 }), NOW, kept(0))).toBe('no_residency');
+    expect(dropReason(candidate({ txns1h: null }), NOW, kept(0))).toBe('no_residency');
+  });
+
+  it('treats an unmeasured residency as no residency, never as a pass', () => {
+    expect(dropReason(candidate(), NOW, kept(null))).toBe('no_residency');
+    expect(dropReason(candidate(), NOW, { kept: true })).toBe('no_residency');
+    expect(dropReason(candidate(), NOW, kept(Number.NaN))).toBe('no_residency');
+  });
+
+  it('returns null for a kept entry with residency a view can show', () => {
+    expect(dropReason(candidate(), NOW, kept(2.5))).toBeNull();
+    expect(dropReason(candidate({ txns1h: 0 }), NOW, kept(6))).toBeNull();
+  });
+
+  it('can produce every reason it declares — no unreachable label', () => {
+    const produced = new Set<SleeperDropReason>();
+    const cases: Array<[Partial<PoolCandidate>, { kept: boolean; inBandHours?: number | null }]> = [
+      [{ mcapUsd: null }, notKept],
+      [{ liquidityUsd: null }, notKept],
+      [{ vol24Usd: null }, notKept],
+      [{ txns24: null }, notKept],
+      [{ liquidityUsd: 5_000 }, notKept],
+      [{ mcapUsd: 1_000_000, liquidityUsd: 15_000 }, notKept],
+      [{ txns24: 5 }, notKept],
+      [{ poolCreatedAt: null }, notKept],
+      [{ poolCreatedAt: new Date(NOW - 40 * DAY) }, notKept],
+      [{ vol24Usd: 5_000 }, notKept],
+      [{ mcapUsd: 20_000 }, notKept],
+      [{}, notKept],
+      [{ txns1h: 0 }, kept(0)],
+      [{}, kept(0)],
+    ];
+    for (const [over, outcome] of cases) {
+      const reason = dropReason(candidate(over), NOW, outcome);
+      if (reason !== null) produced.add(reason);
+    }
+    expect([...produced].sort()).toEqual([...DROP_REASONS].sort());
+  });
+
+  it('agrees with qualify on every floor: a reason iff the scan refused it', () => {
+    const cases: Array<Partial<PoolCandidate>> = [
+      {},
+      { mcapUsd: null },
+      { liquidityUsd: 5_000 },
+      { mcapUsd: 1_000_000, liquidityUsd: 15_000 },
+      { txns24: 5 },
+      { poolCreatedAt: new Date(NOW - 40 * DAY) },
+      { vol24Usd: 5_000 },
+      { mcapUsd: 20_000 },
+    ];
+    for (const over of cases) {
+      const pool = candidate(over);
+      const qualified = qualify(pool, NOW) !== null;
+      // Kept with real residency, so only a FLOOR can produce a reason here.
+      expect(dropReason(pool, NOW, kept(5)) === null).toBe(qualified);
+    }
   });
 });

@@ -9,6 +9,8 @@ import {
   rankRunners,
   rankReviving,
 } from '../derive';
+import type { DeadProps } from '../dead';
+import { deadForCard } from '../dead';
 import type { Ceremony } from '../motion';
 import type { WatchProps } from '../watch';
 import { watchForCard } from '../watch';
@@ -86,6 +88,8 @@ interface BoardProps {
   binningId: number | null;
   onBin: (card: BoardCard) => void;
   watch: WatchProps;
+  /** MARK DEAD / RESTORE, the member verdict (docs/decisions.md round 21). */
+  dead: DeadProps;
   /** Ranging tab body (its own controls + list); it has its own endpoint. */
   ranging: ReactNode;
   /** null until the ranging board has loaded once. */
@@ -131,6 +135,7 @@ export function Board({
   binningId,
   onBin,
   watch,
+  dead,
   ranging,
   rangingCount,
   sleepers,
@@ -202,6 +207,7 @@ export function Board({
               rows={watchRows}
               now={now}
               watch={watch}
+              dead={dead}
               mode="mobile"
               openKey={openWatch}
               onToggle={toggleWatch}
@@ -224,6 +230,7 @@ export function Board({
             binningId={binningId}
             onBin={onBin}
             watch={watch}
+            dead={dead}
             ceremonies={ceremonies}
             openId={openId}
             onToggle={toggle}
@@ -262,6 +269,7 @@ function TabBody({
   binningId,
   onBin,
   watch,
+  dead,
   ceremonies,
   openId,
   onToggle,
@@ -272,6 +280,7 @@ function TabBody({
   binningId: number | null;
   onBin: (card: BoardCard) => void;
   watch: WatchProps;
+  dead: DeadProps;
   ceremonies: ReadonlyMap<number, Ceremony>;
   openId: number | null;
   onToggle: (callId: number) => void;
@@ -288,6 +297,7 @@ function TabBody({
             now={now}
             featured={index === 0}
             watch={watchForCard(card, watch)}
+            dead={deadForCard(card, dead)}
           />
         ))}
       </div>
@@ -304,9 +314,21 @@ function TabBody({
       {hero ? (
         <div className="spotlights spotlights-tab">
           {section === 'runners' ? (
-            <RunnerHero key={hero.callId} card={hero} now={now} breathing watch={watchForCard(hero, watch)} />
+            <RunnerHero
+              key={hero.callId}
+              card={hero}
+              now={now}
+              breathing
+              watch={watchForCard(hero, watch)}
+              dead={deadForCard(hero, dead)}
+            />
           ) : (
-            <RetracedCard card={hero} now={now} watch={watchForCard(hero, watch)} />
+            <RetracedCard
+              card={hero}
+              now={now}
+              watch={watchForCard(hero, watch)}
+              dead={deadForCard(hero, dead)}
+            />
           )}
         </div>
       ) : null}
@@ -324,6 +346,7 @@ function TabBody({
               onBin={section === 'died' ? onBin : undefined}
               binning={binningId === card.callId}
               watch={watchForCard(card, watch)}
+              dead={deadForCard(card, dead)}
               ceremony={ceremonies.get(card.callId)}
             />
           ))}

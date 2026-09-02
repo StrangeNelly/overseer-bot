@@ -1,5 +1,11 @@
-import { THRESHOLDS, type TokenPhase, type WrongChainReason } from '@groupie/shared';
+import {
+  isFlatlineDeath,
+  THRESHOLDS,
+  type TokenPhase,
+  type WrongChainReason,
+} from '@groupie/shared';
 import type { MarketSnapshot } from '../market/types.js';
+import { flatlineVolumeRecovered } from './flatline.js';
 
 export interface TokenState {
   phase: TokenPhase;
@@ -45,6 +51,14 @@ export type DeathReason =
   | 'liquidity_floor'
   | 'never_graduated'
   | 'rug_floor'
+  /**
+   * Round 21: the token is far off its peak-since-call with no volume and no
+   * trades, and has been for six unbroken hours — a DUMP, which every rule
+   * above it misses because the pool is still there. Reached by the poller
+   * (flatline.ts judges the reading, scheduler.ts owns the clock), and the one
+   * reason whose revival asks for volume as well as market cap.
+   */
+  | 'flatline'
   /**
    * Round 17b: the address trades on ANOTHER chain and has no market here at
    * all, so nothing about it was ever measured (mcap-at-death is null by
@@ -188,13 +202,34 @@ export function callLiquidityDeath(
  * probation and back to dead (~25h zombie flap).
  *
  * The curve exception stays: completing the bonding curve while dead is a fact
- * about the token, not a price, and it revives on its own.
+ * about the token, not a price, and it revives on its own — for every death
+ * except round 21's flatline, which is judged on the tape and is therefore
+ * decided before the exception is reached.
  */
 export function isRevived(
   phaseBeforeDeath: 'curve' | 'graduated',
   snapshot: MarketSnapshot | null,
   poolGraduated: boolean | null,
+  deathReason?: string | null,
 ): boolean {
+  // Round 21: THE mcap bar is necessary for every corpse and sufficient for
+  // almost all of them — but not for a flatline death, whose whole finding was
+  // "the market cap is still there and nothing trades against it". $VLR died at
+  // $46K, well over the $30K bar, so the bar alone would have revived it on the
+  // next poll and re-killed it six hours later, forever. Volume has to come
+  // back too, and an unmeasured volume is not a comeback.
+  //
+  // Ahead of the curve exception, per amendment (b): completing the curve is a
+  // fact about the LAUNCHPAD, not about the tape, and a flatlined curve corpse
+  // whose flag flips to completed has still not traded. Letting the flag alone
+  // revive it would put it straight back into the same six quiet hours.
+  if (isFlatlineDeath(deathReason)) {
+    return (
+      (snapshot?.mcapUsd ?? 0) >= THRESHOLDS.revivalMcapUsd &&
+      flatlineVolumeRecovered(snapshot?.vol24Usd ?? null)
+    );
+  }
   if (phaseBeforeDeath === 'curve' && poolGraduated === true) return true;
-  return (snapshot?.mcapUsd ?? 0) >= THRESHOLDS.revivalMcapUsd;
+  if ((snapshot?.mcapUsd ?? 0) < THRESHOLDS.revivalMcapUsd) return false;
+  return true;
 }

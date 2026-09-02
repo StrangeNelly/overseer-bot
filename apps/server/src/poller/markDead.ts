@@ -48,6 +48,14 @@ export async function markTokenDead(
       // still the last thing the market said before the verdict.
       mcapAtDeath: sql`${tokens.mcapUsd}`,
       revivedAt: null,
+      // Round 21: a death ends the flatline clock, whatever killed the token.
+      // Leaving it set would hand a revived coin a six-hour head start on its
+      // next flatline verdict — a clock measured across a period in which it
+      // was not even being polled for a tape. The coverage counters go with it:
+      // they only ever describe the run the clock was timing.
+      flatSince: null,
+      flatReadings: 0,
+      flatLastAt: null,
       lastPolledAt: now,
     })
     .where(

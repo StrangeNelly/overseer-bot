@@ -22,6 +22,7 @@ import {
   createChainClient,
   isThrottled,
   logRangeRefusal,
+  shouldPauseTicks,
   summarizeRpcError,
 } from '../src/chain/client.js';
 
@@ -1624,6 +1625,98 @@ describe('provider throttling', () => {
     // Three ticks, three failures, no pause: a 500 is worth retrying at once.
     expect(error).toHaveBeenCalledTimes(3);
     expect(pausedSeconds(warn)).toHaveLength(0);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+    error.mockRestore();
+    log.mockRestore();
+  });
+
+  /* ------------------------------------------------- and a rejected key */
+
+  /**
+   * Round 21: a revoked, mistyped or over-quota KEY answers every 20-second
+   * tick identically, so it takes the same back-off — the failure the next tick
+   * cannot fix is the shape, not the status code. The wording is what separates
+   * them: one is waited out, the other is fixed in the Railway variables.
+   */
+  const rejected = (status: number) =>
+    Object.assign(new Error('HTTP request failed.'), {
+      name: 'HttpRequestError',
+      status,
+      shortMessage: 'HTTP request failed.',
+    });
+
+  const pauseLines = (warn: { mock: { calls: unknown[][] } }): string[] =>
+    warn.mock.calls
+      .flat()
+      .map(String)
+      .filter((line) => line.includes('pausing chain ticks'));
+
+  it('pauses on an auth refusal too, and names the cause', () => {
+    expect(shouldPauseTicks(rejected(401))).toBe(true);
+    expect(shouldPauseTicks(rejected(403))).toBe(true);
+    expect(shouldPauseTicks(throttled())).toBe(true);
+    // Read off status/code on the error and its cause, exactly like isThrottled.
+    expect(shouldPauseTicks({ code: 401 })).toBe(true);
+    expect(shouldPauseTicks({ cause: { status: '403' } })).toBe(true);
+    // Everything the next tick might fix keeps its cadence.
+    expect(shouldPauseTicks(rejected(500))).toBe(false);
+    expect(shouldPauseTicks({ status: 400 })).toBe(false);
+    expect(shouldPauseTicks(new Error('range of 401 block(s)'))).toBe(false);
+    expect(shouldPauseTicks(null)).toBe(false);
+    // ...and an auth refusal is NOT a throttle: the two answers stay distinct.
+    expect(isThrottled(rejected(401))).toBe(false);
+  });
+
+  it('a 401 pauses the chain loop on the same doubling schedule', async () => {
+    vi.useFakeTimers();
+    const chain = fakeChain([]);
+    chain.getBlockNumber = async () => {
+      throw rejected(401);
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { db, calls } = makeDb({ 'select:chainCursor': [[{ lastBlock: SAFE_HEAD }]] });
+    const handle = startDiscovery(db, chain);
+
+    await vi.advanceTimersByTimeAsync(DISCOVERY.pollIntervalMs);
+    expect(pauseLines(warn)).toEqual([
+      `discovery: provider rejected the key (401), pausing chain ticks for ${
+        DISCOVERY.throttleBackoffMs / 1000
+      }s`,
+    ]);
+    // A key that answers 429 is a different sentence, and this is not it.
+    expect(pausedSeconds(warn)).toHaveLength(0);
+    // Silent inside the pause, and nothing stamps the cursor — a paused
+    // listener reads as stalled on the board, which is honest.
+    await vi.advanceTimersByTimeAsync(DISCOVERY.pollIntervalMs * 2);
+    expect(pauseLines(warn)).toHaveLength(1);
+    expect(find(calls, 'update:chainCursor')).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(DISCOVERY.throttleBackoffMs);
+    expect(pauseLines(warn)).toHaveLength(2);
+    expect(pauseLines(warn)[1]).toContain(`for ${(DISCOVERY.throttleBackoffMs * 2) / 1000}s`);
+    handle.stop();
+    warn.mockRestore();
+    error.mockRestore();
+    log.mockRestore();
+  });
+
+  it('a 403 says the same thing with its own code', async () => {
+    vi.useFakeTimers();
+    const chain = fakeChain([]);
+    chain.getBlockNumber = async () => {
+      throw rejected(403);
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { db } = makeDb({ 'select:chainCursor': [[{ lastBlock: SAFE_HEAD }]] });
+    const handle = startDiscovery(db, chain);
+    await vi.advanceTimersByTimeAsync(DISCOVERY.pollIntervalMs);
+    handle.stop();
+    expect(pauseLines(warn)[0]).toContain('provider rejected the key (403)');
     warn.mockRestore();
     error.mockRestore();
     log.mockRestore();

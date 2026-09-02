@@ -395,6 +395,7 @@ function dsPair(tokenAddress: string, name: string, symbol: string): DsPair {
     mcapUsd: null,
     liquidityUsd: null,
     vol24Usd: null,
+    txns24: null,
     pairCreatedAt: null,
   };
 }
@@ -481,5 +482,291 @@ describe('the DexScreener name behind is_stock', () => {
     );
     expect(rowFor(calls, '0xqqq')).toMatchObject({ isStock: false, name: null });
     warn.mockRestore();
+  });
+});
+
+/* ------------------------------------------- drop telemetry (round 21) */
+
+/**
+ * The $CUM case (2026-09-02): a coin sat quietly in the $50K–$100K band across
+ * two scans, neither kept it, and the totals line could not say which gate did
+ * it. These lines are the answer — reporting only, nothing here decides
+ * anything.
+ */
+describe('drop telemetry', () => {
+  const logsOf = (log: ReturnType<typeof vi.spyOn>): string[] =>
+    log.mock.calls.map((c) => String(c[0]));
+
+  it('prints one summary line naming every non-zero reason, heaviest first', async () => {
+    vi.mocked(gt.getTopPools).mockImplementation(async (page: number) =>
+      page === 1
+        ? [
+            // Kept, and with residency: not a drop.
+            listing(),
+            // In band, but $9.2K of 24h volume against a $61K cap.
+            listing({
+              poolAddress: '0xpoolquiet',
+              baseTokenAddress: '0xquiet',
+              poolName: 'CUM / WETH 1%',
+              mcapUsd: 61_000,
+              vol24Usd: 9_200,
+              txns1h: 0,
+            }),
+            listing({
+              poolAddress: '0xpoolquiet2',
+              baseTokenAddress: '0xquiet2',
+              poolName: 'QUIET2 / WETH 1%',
+              vol24Usd: 1_000,
+            }),
+            // In band, LP is 1.5% of the cap.
+            listing({
+              poolAddress: '0xpoolthin',
+              baseTokenAddress: '0xthin',
+              poolName: 'THIN / WETH 1%',
+              mcapUsd: 1_000_000,
+              liquidityUsd: 15_000,
+            }),
+            // Outside every band by mcap — never a candidate, never a drop.
+            listing({
+              poolAddress: '0xpooltiny',
+              baseTokenAddress: '0xtiny',
+              poolName: 'TINY / WETH 1%',
+              mcapUsd: 20_000,
+            }),
+          ]
+        : [],
+    );
+    vi.mocked(gt.getOhlcv).mockResolvedValue(candles(4));
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    const { db } = makeDb({ 'select:sleeper_entries': [[previousRow]] });
+    await scan(db);
+
+    const summary = logsOf(log).filter((line) => line.startsWith('sleeper scan: in-band dropped'));
+    expect(summary).toEqual(['sleeper scan: in-band dropped 3 — volume_floor 2 · lp_ratio 1']);
+    log.mockRestore();
+  });
+
+  it('prints a line per dropped in-band coin, with unknown readings as unknown', async () => {
+    vi.mocked(gt.getTopPools).mockImplementation(async (page: number) =>
+      page === 1
+        ? [
+            listing({
+              poolAddress: '0xpoolquiet',
+              baseTokenAddress: '0xquiet',
+              poolName: 'CUM / WETH 1%',
+              mcapUsd: 61_000,
+              vol24Usd: 9_200,
+              liquidityUsd: 12_000,
+              txns1h: 0,
+            }),
+            // Same drop, but the listing carried no h1 block at all.
+            listing({
+              poolAddress: '0xpoolunknown',
+              baseTokenAddress: '0xunknown',
+              poolName: null,
+              mcapUsd: 61_000,
+              vol24Usd: 9_200,
+              txns1h: null,
+            }),
+          ]
+        : [],
+    );
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    const { db } = makeDb();
+    await scan(db);
+
+    const drops = logsOf(log).filter((line) => line.startsWith('sleeper drop:'));
+    expect(drops[0]).toBe(
+      'sleeper drop: $CUM band $50K–$100K mcap $61K vol24 $9.2K lp 19.7% txns1h 0 ' +
+        'residency unknown — volume_floor',
+    );
+    // Nothing the scan does not have is invented: no symbol, no h1 count.
+    expect(drops[1]).toContain('sleeper drop: unknown band $50K–$100K');
+    expect(drops[1]).toContain('txns1h unknown');
+    log.mockRestore();
+  });
+
+  it('counts a candidate whose market cap it could not read, band unknown', async () => {
+    vi.mocked(gt.getTopPools).mockImplementation(async (page: number) =>
+      page === 1
+        ? [
+            // No mcap at all: the scan cannot say which band it belongs to, so
+            // it was silently absent from the totals before round 21.
+            listing({
+              poolAddress: '0xpoolnomcap',
+              baseTokenAddress: '0xnomcap',
+              poolName: 'BLIND / WETH 1%',
+              mcapUsd: null,
+            }),
+            // Readable, and outside every band: never a candidate, never a drop.
+            listing({
+              poolAddress: '0xpooltiny',
+              baseTokenAddress: '0xtiny',
+              poolName: 'TINY / WETH 1%',
+              mcapUsd: 20_000,
+            }),
+            // Readable, outside every band, AND under the LP floor: the floors
+            // answer before the band check, and it is still not a drop.
+            listing({
+              poolAddress: '0xpooltinythin',
+              baseTokenAddress: '0xtinythin',
+              poolName: 'TINYTHIN / WETH 1%',
+              mcapUsd: 20_000,
+              liquidityUsd: 500,
+            }),
+          ]
+        : [],
+    );
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    const { db } = makeDb();
+    await scan(db);
+
+    const lines = logsOf(log);
+    expect(lines).toContain('sleeper scan: in-band dropped 1 — mcap_unknown 1');
+    expect(lines.filter((l) => l.startsWith('sleeper drop: $BLIND'))).toEqual([
+      'sleeper drop: $BLIND band unknown mcap unknown vol24 $200K lp unknown txns1h 5 ' +
+        'residency unknown — mcap_unknown',
+    ]);
+    log.mockRestore();
+  });
+
+  it('names the residency gate for a kept coin no duration view will show', async () => {
+    vi.mocked(gt.getTopPools).mockImplementation(async (page: number) =>
+      page === 1 ? [listing({ poolAddress: '0xpoolnew', baseTokenAddress: '0xnew', txns1h: 0 })] : [],
+    );
+    // Kept on the listing's trailing 24h figures, but nothing traded this hour,
+    // so the scan recorded 0 hours in band.
+    vi.mocked(gt.getOhlcv).mockResolvedValue(candles(0));
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    const { db, calls } = makeDb();
+    await scan(db);
+
+    expect(rowFor(calls, '0xnew')?.inBandHours).toBe(0);
+    const lines = logsOf(log);
+    // The row WAS written, so it is reported as kept-but-invisible, not dropped.
+    expect(
+      lines.some((l) => l.startsWith('sleeper hidden:') && l.endsWith('— last_hour_trades')),
+    ).toBe(true);
+    expect(lines.some((l) => l.startsWith('sleeper drop: $'))).toBe(false);
+    expect(lines).toContain('sleeper scan: kept but not shown 1 — last_hour_trades 1');
+    expect(lines).toContain('sleeper scan: in-band dropped 0');
+    log.mockRestore();
+  });
+
+  it('keeps the two populations apart, and prints no hidden line without one', async () => {
+    vi.mocked(gt.getTopPools).mockImplementation(async (page: number) =>
+      page === 1
+        ? [
+            // Kept and written, but nothing traded this hour: invisible, not dropped.
+            listing({ poolAddress: '0xpoolnew', baseTokenAddress: '0xnew', txns1h: 0 }),
+            // Refused outright.
+            listing({
+              poolAddress: '0xpoolquiet',
+              baseTokenAddress: '0xquiet',
+              poolName: 'QUIET / WETH 1%',
+              vol24Usd: 1_000,
+            }),
+          ]
+        : [],
+    );
+    vi.mocked(gt.getOhlcv).mockResolvedValue(candles(0));
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    const { db } = makeDb();
+    await scan(db);
+
+    const lines = logsOf(log);
+    expect(lines).toContain('sleeper scan: in-band dropped 1 — volume_floor 1');
+    expect(lines).toContain('sleeper scan: kept but not shown 1 — last_hour_trades 1');
+
+    // ...and a scan with nothing invisible says nothing about it.
+    log.mockClear();
+    vi.mocked(gt.getTopPools).mockImplementation(async (page: number) =>
+      page === 1
+        ? [
+            listing({
+              poolAddress: '0xpoolquiet',
+              baseTokenAddress: '0xquiet',
+              poolName: 'QUIET / WETH 1%',
+              vol24Usd: 1_000,
+            }),
+          ]
+        : [],
+    );
+    await scan(makeDb().db);
+    expect(logsOf(log).some((l) => l.startsWith('sleeper scan: kept but not shown'))).toBe(false);
+    log.mockRestore();
+  });
+
+  it('caps the per-coin lines and says how many it withheld', async () => {
+    // 45 in-band coins, every one of them under the volume floor.
+    vi.mocked(gt.getTopPools).mockImplementation(async (page: number) =>
+      page === 1
+        ? Array.from({ length: 45 }, (_, i) =>
+            listing({
+              poolAddress: `0xpool${i}`,
+              baseTokenAddress: `0xdrop${i}`,
+              poolName: `D${i} / WETH 1%`,
+              vol24Usd: 1_000,
+            }),
+          )
+        : [],
+    );
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    const { db } = makeDb();
+    await scan(db);
+
+    const lines = logsOf(log);
+    expect(lines.filter((l) => /^sleeper drop: \$D/.test(l))).toHaveLength(40);
+    expect(lines).toContain('sleeper drop: 5 more in-band drops not logged (cap 40)');
+    // The count is complete even though the lines are not.
+    expect(lines).toContain('sleeper scan: in-band dropped 45 — volume_floor 45');
+    log.mockRestore();
+  });
+
+  it('spends one line budget across both populations', async () => {
+    vi.mocked(gt.getTopPools).mockImplementation(async (page: number) =>
+      page === 1
+        ? [
+            // Twelve kept (the band's whole keep cut), every one of them with
+            // zero trades this hour, so every one is invisible.
+            ...Array.from({ length: 12 }, (_, i) =>
+              listing({
+                poolAddress: `0xpoolhide${i}`,
+                baseTokenAddress: `0xhide${i}`,
+                poolName: `H${i} / WETH 1%`,
+                txns1h: 0,
+              }),
+            ),
+            ...Array.from({ length: 30 }, (_, i) =>
+              listing({
+                poolAddress: `0xpool${i}`,
+                baseTokenAddress: `0xdrop${i}`,
+                poolName: `D${i} / WETH 1%`,
+                vol24Usd: 1_000,
+              }),
+            ),
+          ]
+        : [],
+    );
+    vi.mocked(gt.getOhlcv).mockResolvedValue(candles(0));
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    const { db } = makeDb();
+    await scan(db);
+
+    const lines = logsOf(log);
+    const perCoin = lines.filter((l) => /^sleeper (drop|hidden): \$[HD]/.test(l));
+    expect(perCoin).toHaveLength(40);
+    expect(perCoin.filter((l) => l.startsWith('sleeper hidden:'))).toHaveLength(12);
+    expect(lines).toContain('sleeper drop: 2 more in-band drops not logged (cap 40)');
+    expect(lines).toContain('sleeper scan: in-band dropped 30 — volume_floor 30');
+    expect(lines).toContain('sleeper scan: kept but not shown 12 — last_hour_trades 12');
+    log.mockRestore();
   });
 });

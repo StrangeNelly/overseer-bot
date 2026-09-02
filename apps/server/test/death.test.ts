@@ -30,12 +30,14 @@ const snap = (
     mcapUsd: number | null;
     liquidityUsd: number | null;
     vol24Usd: number | null;
+    txns24: number | null;
   }> = {},
 ) => ({
   priceUsd: null,
   mcapUsd: null,
   liquidityUsd: null,
   vol24Usd: null,
+  txns24: null,
   ...over,
 });
 
@@ -317,6 +319,7 @@ const pair = (over: Partial<DsPair>): DsPair => ({
   tokenAddress: '0xtoken',
   pairAddress: '0xother',
   dexId: null,
+  txns24: null,
   symbol: null,
   name: null,
   imageUrl: null,

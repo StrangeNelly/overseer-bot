@@ -136,6 +136,8 @@ describe('parsePoolsMulti', () => {
       mcapUsd: 250_000,
       liquidityUsd: 30_000,
       vol24Usd: 12_000,
+      // Round 21: the trade count rides the same reading as the volume.
+      txns24: single.txns24,
     });
   });
 

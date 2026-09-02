@@ -3,7 +3,7 @@
  * above, never scientific notation, and an em dash for every missing value.
  */
 
-import { SLEEPERS, wrongChainOf } from '@groupie/shared';
+import { SLEEPERS, isMemberDeath, wrongChainOf } from '@groupie/shared';
 
 const DASH = '—';
 
@@ -188,6 +188,9 @@ export function fmtDeathReason(reason: string | null | undefined): string | null
   const chain = wrongChainOf(reason);
   if (chain) return `WRONG CHAIN · ${chain.toUpperCase()}`;
   if (reason === 'liquidity_floor') return 'LIQ FLOOR';
+  // Round 21: the column says WHO decided ('member'); the badge has to say what
+  // happened. The name itself rides the subline ("marked dead by @name").
+  if (isMemberDeath(reason)) return 'MARKED DEAD';
   return reason.replace(/_/g, ' ').toUpperCase();
 }
 

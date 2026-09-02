@@ -3,6 +3,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { BoardCard } from '@groupie/shared';
 import { TokenCard } from '../src/components/TokenCard';
 import type { SectionKey } from '../src/components/SectionTabs';
+import { deadForCard } from '../src/dead';
+import type { DeadProps } from '../src/dead';
 import { peakNote } from '../src/derive';
 
 /**
@@ -196,5 +198,208 @@ describe('TokenCard — the peak on every call surface', () => {
     const html = render(roundTripped, 'retraced');
     expect(html).toContain('-63% from peak $30M');
     expect(html).not.toContain('sub-peak');
+  });
+});
+
+/**
+ * The member verdict on a card (docs/decisions.md round 21).
+ *
+ * $VLR is the case: 0.4x on intact liquidity, so no rule could kill it and the
+ * group had to be able to. MARK DEAD rides every LIVE call surface; RESTORE
+ * exists only where a member's own verdict does.
+ */
+
+const DEAD_PROPS: DeadProps = {
+  onMarkDead: () => {},
+  onRestore: () => {},
+  pending: new Set<number>(),
+};
+
+/** A live call, resolved: $106K called, $46K now, LP intact. */
+const dumped = card({
+  phase: 'graduated',
+  symbol: 'VLR',
+  mcapUsd: 46_000,
+  mcapAtCall: 106_000,
+  multiple: 46 / 106,
+  liquidityUsd: 19_000,
+  dataAsOf: new Date(NOW - 60_000).toISOString(),
+});
+
+const markedDead = card({
+  ...dumped,
+  phase: 'dead',
+  callStatus: 'died',
+  deathReason: 'member',
+  deathMarkedBy: '@pwnzssg',
+  diedAt: new Date(NOW - 2 * HOUR).toISOString(),
+  mcapAtDeath: 46_000,
+});
+
+const flatlined = card({
+  ...dumped,
+  phase: 'dead',
+  callStatus: 'died',
+  deathReason: 'flatline',
+  diedAt: new Date(NOW - 2 * HOUR).toISOString(),
+  mcapAtDeath: 46_000,
+  vol24Usd: 120,
+  txns24: 3,
+});
+
+/** Rendered the way a desktop row is: the hover strip is always in the markup. */
+const withVerdict = (over: BoardCard, section: SectionKey = 'fresh') =>
+  renderToStaticMarkup(
+    <TokenCard
+      card={over}
+      section={section}
+      now={NOW}
+      size="desk"
+      links="hover"
+      animate={false}
+      dead={deadForCard(over, DEAD_PROPS)}
+    />,
+  );
+
+describe('TokenCard — MARK DEAD', () => {
+  it('is offered on a live call', () => {
+    const html = withVerdict(dumped);
+    expect(html).toContain('MARK DEAD');
+    expect(html).toContain('Mark $VLR dead for the whole group');
+  });
+
+  it('...and on an ON WATCH row, which is a live call too', () => {
+    expect(withVerdict(dumped, 'watch')).toContain('MARK DEAD');
+  });
+
+  it('is never offered on a card that is already dead', () => {
+    expect(withVerdict(markedDead, 'died')).not.toContain('MARK DEAD');
+    expect(withVerdict(flatlined, 'died')).not.toContain('MARK DEAD');
+    expect(
+      withVerdict(
+        card({ phase: 'dead', callStatus: 'died', deathReason: 'liquidity_floor' }),
+        'died',
+      ),
+    ).not.toContain('MARK DEAD');
+  });
+
+  it('...and on a live call the poller cannot resolve (round 21 amendment (e))', () => {
+    // The Base dud: the board still says "not indexed yet", and the group is
+    // allowed to know better. Liveness of the CALL is the only scope.
+    const html = withVerdict(card());
+    expect(html).toContain('not indexed yet');
+    expect(html).toContain('MARK DEAD');
+  });
+
+  it('is absent entirely where the surface does not offer the verdict', () => {
+    const html = renderToStaticMarkup(
+      <TokenCard card={dumped} section="fresh" now={NOW} size="desk" links="hover" animate={false} />,
+    );
+    expect(html).not.toContain('MARK DEAD');
+    expect(html).not.toContain('pill-dead');
+  });
+
+  it('starts at rest — the guard only asks after the first tap', () => {
+    expect(withVerdict(dumped)).not.toContain('SURE?');
+  });
+});
+
+describe('TokenCard — RESTORE', () => {
+  it('is offered on a member death, beside bin', () => {
+    const html = withVerdict(markedDead, 'died');
+    expect(html).toContain('RESTORE');
+    expect(html).toContain('Put $VLR back on the board');
+  });
+
+  it('rides the hover strip on a desktop row, never the row head the strip covers', () => {
+    // The strip paints over the row head the moment the mouse arrives, so a
+    // pill in the head would vanish exactly when the reader reaches for it.
+    const html = withVerdict(markedDead, 'watch');
+    expect(html).toContain('RESTORE');
+    expect(html).not.toContain('row-dead');
+    const strip = html.slice(html.indexOf('row-hoverlinks'));
+    expect(strip).toContain('RESTORE');
+  });
+
+  it('sits in the row head on a tap row, where there is no strip', () => {
+    const html = renderToStaticMarkup(
+      <TokenCard
+        card={markedDead}
+        section="died"
+        now={NOW}
+        links="tap"
+        onToggle={() => {}}
+        animate={false}
+        dead={deadForCard(markedDead, DEAD_PROPS)}
+      />,
+    );
+    expect(html).toContain('row-dead');
+    expect(html).toContain('RESTORE');
+  });
+
+  it('is never offered on a rule-driven death', () => {
+    expect(withVerdict(flatlined, 'died')).not.toContain('RESTORE');
+    expect(
+      withVerdict(
+        card({ phase: 'dead', callStatus: 'died', deathReason: 'liquidity_floor' }),
+        'died',
+      ),
+    ).not.toContain('RESTORE');
+  });
+
+  it('...nor on a live one', () => {
+    expect(withVerdict(dumped)).not.toContain('RESTORE');
+  });
+
+  it('reaches the desktop died rail, where the corpse actually sits', () => {
+    const html = renderToStaticMarkup(
+      <TokenCard
+        card={markedDead}
+        section="died"
+        now={NOW}
+        size="rail"
+        animate={false}
+        dead={deadForCard(markedDead, DEAD_PROPS)}
+      />,
+    );
+    expect(html).toContain('RESTORE');
+    expect(html).toContain('marked dead by @pwnzssg');
+  });
+});
+
+describe('TokenCard — round 21 death wording', () => {
+  it('names who marked it, and what it was worth at death', () => {
+    const html = withVerdict(markedDead, 'died');
+    expect(html).toContain('marked dead by @pwnzssg');
+    expect(html).toContain('$46K at death');
+    expect(html).toContain('MARKED DEAD');
+  });
+
+  it('prints the flatline evidence — volume and trades', () => {
+    const html = withVerdict(flatlined, 'died');
+    expect(html).toContain('flatlined · vol $120 / 24h · 3 trades');
+    expect(html).toContain('$46K at death');
+  });
+
+  it('drops a clause it does not have rather than printing a zero', () => {
+    const html = withVerdict({ ...flatlined, txns24: null }, 'died');
+    expect(html).toContain('flatlined · vol $120 / 24h');
+    expect(html).not.toContain('trades');
+  });
+
+  it('leaves every other death wording untouched', () => {
+    const html = withVerdict(
+      card({
+        phase: 'dead',
+        callStatus: 'died',
+        deathReason: 'liquidity_floor',
+        diedAt: new Date(NOW - 3 * HOUR).toISOString(),
+      }),
+      'died',
+    );
+    expect(html).toContain('LIQ FLOOR');
+    expect(html).toContain('died 3h ago');
+    expect(html).not.toContain('marked dead');
+    expect(html).not.toContain('flatlined');
   });
 });

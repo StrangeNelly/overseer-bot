@@ -1,7 +1,9 @@
-import { and, eq, gte, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 import { calls, snapshots, tokens, watches, type Db } from '@groupie/db';
 import {
+  DEATH,
   IDLE_AFTER_HOURS,
+  isFlatlineDeath,
   isWrongChainDeath,
   POLL_TIERS,
   ROBINHOOD_SLUG,
@@ -22,7 +24,9 @@ import {
   isRevived,
   type LiquidityReading,
 } from './death.js';
+import { flatlineDeathDue, flatlineVerdict, type FlatlineVerdict } from './flatline.js';
 import { markTokenDead, releaseWatches } from './markDead.js';
+import { isMemberDeadCall, notMemberDeath } from '../verdict.js';
 import { runProbationSweep } from './rugSweep.js';
 import { runSleeperScan } from './sleeperScan.js';
 
@@ -411,6 +415,11 @@ async function applySnapshot(
       mcapUsd: snap.mcapUsd,
       liquidityUsd: snap.liquidityUsd,
       vol24Usd: snap.vol24Usd,
+      // Round 21. Written with its siblings, nulls included, so every cached
+      // market column on this row describes the SAME reading — the one
+      // last_snapshot_at dates. A source that stopped reporting trades leaves
+      // "unknown" here rather than yesterday's count masquerading as today's.
+      txns24: snap.txns24,
       lastPolledAt: now,
       lastSnapshotAt: now,
     })
@@ -420,14 +429,28 @@ async function applySnapshot(
 
   // Peak-since-call: SET expressions see the OLD row, so the peak_at CASE
   // compares against the pre-update peak. Only active calls track peaks.
+  //
+  // RETURNING the new peaks costs nothing and is what round 21's flatline rule
+  // is judged against (the highest peak across the token's ACTIVE calls) — so
+  // the rule reads the peak this very poll established, without a query of its
+  // own. No active call means no peak, which the rule reads as "not applicable"
+  // rather than as a retrace of 100%.
+  let peakSinceCall: number | null = null;
   if (snap.mcapUsd !== null) {
-    await db
+    const peaks = await db
       .update(calls)
       .set({
         peakMcapSinceCall: sql`greatest(coalesce(${calls.peakMcapSinceCall}, 0), ${snap.mcapUsd})`,
         peakAt: sql`case when ${snap.mcapUsd} > coalesce(${calls.peakMcapSinceCall}, 0) then ${isoNow()}::timestamptz else ${calls.peakAt} end`,
       })
-      .where(and(eq(calls.tokenId, token.id), eq(calls.status, 'active')));
+      .where(and(eq(calls.tokenId, token.id), eq(calls.status, 'active')))
+      .returning({ peak: calls.peakMcapSinceCall });
+    for (const row of peaks) {
+      const peak = typeof row.peak === 'string' ? Number(row.peak) : row.peak;
+      if (peak !== null && Number.isFinite(peak) && (peakSinceCall === null || peak > peakSinceCall)) {
+        peakSinceCall = peak;
+      }
+    }
   }
 
   // Per-call liquidity-collapse death (>95% down from call-time liquidity).
@@ -470,7 +493,122 @@ async function applySnapshot(
   // death pass above so a still-collapsed call isn't flipped and re-killed.
   await applyCallRevivals(db, token, snap, series, age);
 
+  // Round 21's flatline clock, judged on the peak this poll just wrote.
+  await applyFlatline(db, token, snap, peakSinceCall);
+
   publish({ type: 'price_update', tokenId: token.id, mcapUsd: snap.mcapUsd });
+}
+
+/** The widest hole a flatline run may contain, as SQL (round 21 amendment a). */
+const FLAT_GAP = sql.raw(`interval '${DEATH.flatlineMaxGapMinutes} minutes'`);
+
+/**
+ * Round 21's flatline rule (docs/decisions.md round 21): a coin can be finished
+ * with its pool intact — $VLR sat at 0.4x on $19K of liquidity with nothing
+ * trading against it — so the death that catches that shape watches the TAPE,
+ * not the pool.
+ *
+ * flatline.ts judges the reading; this owns the clock, and the clock is the
+ * whole rule: the condition holding once means nothing, holding for
+ * `DEATH.flatlineHours` without a break is the death.
+ *
+ * Three transitions, each a guarded statement so a concurrent poll (the bot's
+ * immediate one) can only ever be a no-op rather than a clock that drifts:
+ *
+ *  - holds and no clock  -> start it (coalesce, so the first writer's stamp is
+ *    the one that counts);
+ *  - fails / unmeasurable -> clear it, guarded on it being set. Unknown clears
+ *    exactly as failure does: a poll that could not read volume is not six
+ *    hours of silence, it is an absence of evidence;
+ *  - holds and the run is covered as well as old -> markTokenDead('flatline'),
+ *    which stamps mcap-at-death from the reading this poll just cached.
+ *
+ * Amendment (a) is why the clock is three columns rather than one: elapsed time
+ * says nothing about whether anything was WATCHING. `flat_readings` counts the
+ * polls that held the condition and `flat_last_at` dates the last of them, so
+ * an outage cannot be mistaken for six quiet hours — a reading whose
+ * predecessor is older than `DEATH.flatlineMaxGapMinutes` starts a NEW run
+ * rather than extending one it has no evidence for. That branch has to be
+ * judged inside the statement (SET sees the OLD row, which is the only place
+ * the previous reading's stamp still exists); flatlineDeathDue then re-states
+ * the whole rule against this poll's own RETURNING.
+ *
+ * Watches are deliberately NOT released: unlike a permanent rug or a wrong
+ * chain, a flatline has a comeback path (mcap AND volume back — see
+ * death.ts's isRevived), so the slots must survive to fire when it comes back.
+ */
+async function applyFlatline(
+  db: Db,
+  token: TokenRow,
+  snap: MarketSnapshot,
+  peakMcapSinceCall: number | null,
+): Promise<void> {
+  // Only a LIVE token flatlines. A corpse's clock was cleared when it died and
+  // an unresolved address has no tape to go quiet in the first place.
+  if (token.phase !== 'curve' && token.phase !== 'graduated') return;
+
+  const verdict: FlatlineVerdict = flatlineVerdict({
+    mcapUsd: snap.mcapUsd,
+    peakMcapSinceCall,
+    vol24Usd: snap.vol24Usd,
+    txns24: snap.txns24,
+  });
+
+  if (verdict !== 'holds') {
+    // Guarded so the overwhelming majority of polls — coins that are simply
+    // trading — write nothing at all. The counters go with the clock: a run
+    // that has been broken has no readings to its name either.
+    await db
+      .update(tokens)
+      .set({ flatSince: null, flatReadings: 0, flatLastAt: null })
+      .where(
+        and(
+          eq(tokens.id, token.id),
+          or(isNotNull(tokens.flatSince), ne(tokens.flatReadings, 0), isNotNull(tokens.flatLastAt)),
+        ),
+      );
+    return;
+  }
+
+  const at = isoNow();
+  // The previous holding reading, read from the OLD row: a hole wider than the
+  // ceiling means this reading opens a new run instead of inheriting hours
+  // nothing observed. A run that has never had a reading is a new run too.
+  const brokenRun = sql`${tokens.flatLastAt} is null or ${tokens.flatLastAt} < ${at}::timestamptz - ${FLAT_GAP}`;
+  const started = await db
+    .update(tokens)
+    .set({
+      flatSince: sql`case when ${brokenRun} then ${at}::timestamptz else coalesce(${tokens.flatSince}, ${at}::timestamptz) end`,
+      flatReadings: sql`case when ${brokenRun} then 1 else ${tokens.flatReadings} + 1 end`,
+      flatLastAt: sql`${at}::timestamptz`,
+    })
+    .where(and(eq(tokens.id, token.id), ne(tokens.phase, 'dead')))
+    .returning({ flatSince: tokens.flatSince, flatReadings: tokens.flatReadings });
+  const clock = started[0];
+  const readings = clock === undefined ? null : Number(clock.flatReadings);
+  if (
+    !flatlineDeathDue(
+      {
+        flatSince: clock?.flatSince ?? null,
+        readings,
+        // The stamp this statement just overwrote — the run's PREVIOUS reading.
+        // A concurrent poll that moved it on makes this look older than it is,
+        // which costs one poll's delay and never a death nothing observed.
+        previousReadingAt: token.flatLastAt,
+      },
+      Date.now(),
+    )
+  ) {
+    return;
+  }
+
+  const died = await markTokenDead(db, token, 'flatline');
+  if (died) {
+    console.log(
+      `token ${token.symbol ?? token.address} flatlined: ${DEATH.flatlineHours}h at ` +
+        `vol $${Math.round(snap.vol24Usd ?? 0)} / ${snap.txns24 ?? 0} trades`,
+    );
+  }
 }
 
 async function applyCallRevivals(
@@ -481,7 +619,12 @@ async function applyCallRevivals(
   age: number,
 ): Promise<void> {
   const requested = await db
-    .select({ id: calls.id, status: calls.status, liquidityAtCall: calls.liquidityAtCall })
+    .select({
+      id: calls.id,
+      status: calls.status,
+      deathReason: calls.deathReason,
+      liquidityAtCall: calls.liquidityAtCall,
+    })
     .from(calls)
     .where(and(eq(calls.tokenId, token.id), eq(calls.reviveRequested, true)));
   if (requested.length === 0) return;
@@ -496,6 +639,10 @@ async function applyCallRevivals(
   if (snap.liquidityUsd === null) return; // unknown is never evidence, either way
   for (const call of requested) {
     if (call.status !== 'died') continue;
+    // Round 21: a repost of a member-marked coin is inert, exactly like every
+    // other repost of a dead call. The group said it was done with it; only a
+    // member takes that back (`/overseer undead`, RESTORE on the card).
+    if (isMemberDeadCall(call)) continue;
     // Still collapsed on the same persistence rule that killed it — one healthy
     // reading is enough to break the run, which is exactly the repost's point.
     if (callLiquidityDeath(call.liquidityAtCall, series, Date.now(), age)) continue;
@@ -810,13 +957,19 @@ async function pollGraduatedBatch(db: Db, batch: TokenRow[], opts: PollOpts): Pr
  * 'curve_floor' is no longer produced (round 6 retired it), but rows written
  * before that still carry it and must still route to the curve read.
  *
+ * Round 21 amendment (c) puts 'flatline' in the same position as 'rug_floor':
+ * it kills either phase, so a flatlined token with no graduation on record was
+ * still on its curve — and DexScreener never indexes a curve token, so reading
+ * it there would answer "no pair" for ever and the corpse could never revive.
+ *
  * Exported so the tick can batch the curve-read corpses into one call.
  */
 export function deadReadsCurve(token: TokenRow): boolean {
   return (
     token.deathReason === 'curve_floor' ||
     token.deathReason === 'never_graduated' ||
-    (token.deathReason === 'rug_floor' && token.graduatedAt === null)
+    (token.deathReason === 'rug_floor' && token.graduatedAt === null) ||
+    (isFlatlineDeath(token.deathReason) && token.graduatedAt === null)
   );
 }
 
@@ -894,7 +1047,10 @@ export async function pollDead(
     })
     .where(and(eq(calls.tokenId, token.id), eq(calls.status, 'active')));
 
-  if (snap && isRevived(wasCurve ? 'curve' : 'graduated', snap, pool?.graduated ?? null)) {
+  if (
+    snap &&
+    isRevived(wasCurve ? 'curve' : 'graduated', snap, pool?.graduated ?? null, token.deathReason)
+  ) {
     // Phase comes from the launchpad flag, never from liquidity: a bonding
     // pool's reserve is the curve's own float, so it always looks "liquid".
     const phase = wasCurve ? (pool?.graduated === true ? 'graduated' : 'curve') : 'graduated';
@@ -920,7 +1076,15 @@ export async function pollDead(
       await db
         .update(calls)
         .set({ status: 'active' })
-        .where(and(eq(calls.tokenId, token.id), eq(calls.status, 'died')));
+        .where(
+          and(
+            eq(calls.tokenId, token.id),
+            eq(calls.status, 'died'),
+            // Round 21: the token coming back does not undo a member's verdict
+            // about it. That call stays dead until a member restores it.
+            notMemberDeath,
+          ),
+        );
       publish({ type: 'token_revived', tokenId: token.id });
       console.log(`token ${token.symbol ?? token.address} REVIVED`);
     }

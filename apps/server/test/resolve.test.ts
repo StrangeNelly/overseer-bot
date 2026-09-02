@@ -188,6 +188,7 @@ function poolInfo(over: Partial<GtPoolInfo> = {}): GtPoolInfo {
     fdvUsd: 250_000,
     reserveUsd: 30_000,
     vol24Usd: 12_000,
+    txns24: 40,
     poolCreatedAt: new Date(NOW - 3_600_000),
     graduationPct: 42.5,
     graduated: false,
@@ -203,6 +204,7 @@ function dsPair(over: Partial<DsPair> = {}): DsPair {
     tokenAddress: '0xdud',
     pairAddress: '0xpair',
     dexId: 'uniswap',
+    txns24: 25,
     symbol: 'DUD',
     name: 'Dud Coin',
     imageUrl: null,
@@ -267,6 +269,8 @@ describe('resolveTokens (round 17b)', () => {
       mcapUsd: 200_000,
       liquidityUsd: 30_000,
       vol24Usd: 10_000,
+      // Round 21: only the POOL resource carries trades, so this is the pool's.
+      txns24: 40,
     });
   });
 

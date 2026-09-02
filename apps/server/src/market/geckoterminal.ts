@@ -249,12 +249,33 @@ export async function getTokensMulti(addresses: string[]): Promise<Map<string, G
   return out;
 }
 
+/**
+ * `transactions.<window>.buys + .sells` off a pool resource's attributes.
+ *
+ * null when the block is missing ENTIRELY — GeckoTerminal not reporting trades
+ * is not the same claim as zero of them, and round 21's flatline rule is
+ * allowed to kill a coin on a low trade count, so the difference is load
+ * bearing. One side present and the other absent counts the side we have.
+ */
+export function sumTxns(
+  attributes: Record<string, unknown> | undefined,
+  window: 'h24' | 'h1',
+): number | null {
+  const transactions = attributes?.transactions as Record<string, unknown> | undefined;
+  const block = transactions?.[window] as Record<string, unknown> | undefined;
+  const buys = num(block?.buys);
+  const sells = num(block?.sells);
+  return buys === null && sells === null ? null : (buys ?? 0) + (sells ?? 0);
+}
+
 export interface GtPoolInfo {
   poolAddress: string;
   priceUsd: number | null;
   fdvUsd: number | null;
   reserveUsd: number | null;
   vol24Usd: number | null;
+  /** buys + sells over 24h; null when the block is missing entirely. */
+  txns24: number | null;
   poolCreatedAt: Date | null;
   graduationPct: number | null;
   graduated: boolean | null;
@@ -292,6 +313,7 @@ export function parsePoolResource(resource: JsonApiResource, poolAddress: string
     fdvUsd: num(a.fdv_usd) ?? num(a.market_cap_usd),
     reserveUsd: num(a.reserve_in_usd),
     vol24Usd: num((a.volume_usd as Record<string, unknown> | undefined)?.h24),
+    txns24: sumTxns(a, 'h24'),
     poolCreatedAt: created && !Number.isNaN(created.getTime()) ? created : null,
     graduationPct: num(launchpad?.graduation_percentage),
     graduated: typeof launchpad?.completed === 'boolean' ? launchpad.completed : null,
@@ -539,13 +561,6 @@ export async function getTopPools(
     const baseTokenAddress = poolIdToAddress(base?.id);
     if (!poolAddress || !baseTokenAddress) continue;
 
-    const transactions = a.transactions as Record<string, unknown> | undefined;
-    const sumTxns = (window: 'h24' | 'h1'): number | null => {
-      const block = transactions?.[window] as Record<string, unknown> | undefined;
-      const buys = num(block?.buys);
-      const sells = num(block?.sells);
-      return buys === null && sells === null ? null : (buys ?? 0) + (sells ?? 0);
-    };
     const created = typeof a.pool_created_at === 'string' ? new Date(a.pool_created_at) : null;
 
     out.push({
@@ -558,8 +573,8 @@ export async function getTopPools(
       priceUsd: num(a.base_token_price_usd),
       liquidityUsd: num(a.reserve_in_usd),
       vol24Usd: num((a.volume_usd as Record<string, unknown> | undefined)?.h24),
-      txns24: sumTxns('h24'),
-      txns1h: sumTxns('h1'),
+      txns24: sumTxns(a, 'h24'),
+      txns1h: sumTxns(a, 'h1'),
       poolCreatedAt: created && !Number.isNaN(created.getTime()) ? created : null,
     });
   }
@@ -571,11 +586,15 @@ export function gtSnapshot(info: {
   fdvUsd: number | null;
   reserveUsd?: number | null;
   vol24Usd: number | null;
+  txns24?: number | null;
 }): MarketSnapshot {
   return {
     priceUsd: info.priceUsd,
     mcapUsd: info.fdvUsd,
     liquidityUsd: info.reserveUsd ?? null,
     vol24Usd: info.vol24Usd,
+    // Optional on the way in: the token resource carries no transactions block
+    // at all, so a caller assembling a snapshot from one has nothing to pass.
+    txns24: info.txns24 ?? null,
   };
 }

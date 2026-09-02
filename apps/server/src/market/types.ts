@@ -5,6 +5,13 @@ export interface MarketSnapshot {
   mcapUsd: number | null;
   liquidityUsd: number | null;
   vol24Usd: number | null;
+  /**
+   * Trades in the last 24h (docs/decisions.md round 21) — DexScreener's
+   * txns.h24 buys+sells, GeckoTerminal's transactions.h24 the same way. null
+   * when the source did not carry them, which the flatline rule reads as "no
+   * evidence" rather than "no trades".
+   */
+  txns24: number | null;
 }
 
 export interface ResolvedToken {

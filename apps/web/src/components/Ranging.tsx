@@ -6,6 +6,8 @@ import {
   fmtDurationHours,
   rangeHoursAllowed,
 } from '@groupie/shared';
+import type { DeadProps } from '../dead';
+import { deadForCard } from '../dead';
 import { bandPosition } from '../derive';
 import {
   avatarHue,
@@ -100,6 +102,12 @@ interface RangingProps {
   now: number;
   /** Round 16: every coin the app shows carries watch/unwatch, this one too. */
   watch: WatchProps;
+  /**
+   * Round 21 amendment (e): these are the group's own live calls, so the member
+   * verdict rides them here as well — a coiler that has stopped being a coin is
+   * exactly the thing a member spots on this view.
+   */
+  dead?: DeadProps;
 }
 
 /**
@@ -133,6 +141,7 @@ export function Ranging({
   onRetry,
   now,
   watch,
+  dead,
 }: RangingProps) {
   const custom = controls.presetIndex === null;
   // One open link row at a time, exactly like the board's rows.
@@ -268,6 +277,7 @@ export function Ranging({
             loading={loading}
             now={now}
             watch={watch}
+            dead={dead}
             openAddress={openAddress}
             onToggle={(address) => setOpenAddress((prev) => (prev === address ? null : address))}
           />
@@ -282,6 +292,7 @@ function RangeList({
   loading,
   now,
   watch,
+  dead,
   openAddress,
   onToggle,
 }: {
@@ -289,6 +300,7 @@ function RangeList({
   loading: boolean;
   now: number;
   watch: WatchProps;
+  dead?: DeadProps;
   openAddress: string | null;
   onToggle: (address: string) => void;
 }) {
@@ -311,6 +323,7 @@ function RangeList({
           hiUsd={data.hiUsd}
           now={now}
           watch={watch}
+          dead={dead}
           expanded={openAddress === card.address}
           onToggle={onToggle}
         />
@@ -358,6 +371,7 @@ function RangeRow({
   hiUsd,
   now,
   watch,
+  dead,
   expanded,
   onToggle,
 }: {
@@ -366,6 +380,7 @@ function RangeRow({
   hiUsd: number;
   now: number;
   watch: WatchProps;
+  dead?: DeadProps;
   expanded: boolean;
   onToggle: (address: string) => void;
 }) {
@@ -398,7 +413,7 @@ function RangeRow({
         {/* The reveal: pills take the meta line's place, so nothing reflows. */}
         <span className="range-meta">{meta.join(' · ')}</span>
         <span className="range-links">
-          <LinkPills target={card} watch={watchForCard(card, watch)} />
+          <LinkPills target={card} watch={watchForCard(card, watch)} dead={deadForCard(card, dead)} />
         </span>
         <button
           type="button"

@@ -101,6 +101,61 @@ export const THRESHOLDS = {
   retraceMaxFromPeakRatio: 0.85,
 } as const;
 
+/**
+ * Round 21's two new death rules, kept together because they answer the same
+ * question the THRESHOLDS above could not: a coin can be DUMPED without its
+ * pool ever draining.
+ *
+ * The live case is $VLR — 0.4x, $106K -> $46K on $19K of liquidity — alive by
+ * every rule in THRESHOLDS (liquidity intact, mcap far above the rug floor)
+ * and yet finished: the residual holders are too small to bother selling, so
+ * the market cap simply sits there with nothing trading against it. $DOSS has
+ * the same shape.
+ *
+ * So: members may call it (the manual verdict, `death_reason = 'member'`), and
+ * the poller can see it on its own when the tape goes quiet for six hours
+ * (`death_reason = 'flatline'`). Both live here rather than in THRESHOLDS
+ * because both are about ACTIVITY, not about price levels.
+ */
+export const DEATH = {
+  /**
+   * The flatline condition must hold CONTINUOUSLY for this long before the
+   * token dies. The clock is `tokens.flat_since`; any reading that fails the
+   * condition — or that cannot measure it — resets it to null.
+   */
+  flatlineHours: 6,
+  /** ...retrace from peak-since-call, in percent, at or above which it holds. */
+  flatlineRetracePct: 85,
+  /** ...and 24h volume STRICTLY below this. */
+  flatlineVolumeUsd: 500,
+  /** ...and at most this many trades in 24h. Both readings are required. */
+  flatlineTxns24: 5,
+  /**
+   * A flatline corpse needs VOLUME back, not only market cap: the usual
+   * `revivalMcapUsd` bar alone would resurrect it on the very next poll, since
+   * a flatlined coin keeps the mcap that killed it. Unknown volume is not
+   * evidence of a comeback either — it revives nothing.
+   */
+  flatlineRevivalVolumeUsd: 2_000,
+  /**
+   * COVERAGE, not just elapsed time (round 21 amendment a): an OUTAGE is not
+   * six quiet hours. `tokens.flat_readings` counts the polls that actually held
+   * the condition, and the death needs at least this many of them. Sized to the
+   * SLOWEST live tier: an idle coin (POLL_TIERS.idleSeconds, hourly) yields six
+   * readings in six hours, and the old quiet coin is exactly what this rule is
+   * for — a higher floor would make flatline unreachable for that tier.
+   */
+  flatlineMinReadings: 6,
+  /**
+   * ...and no HOLE in the run: a reading whose predecessor is older than this
+   * does not extend the previous run, it starts a new one. Without it, six
+   * readings taken in ten minutes plus a six-hour outage would read as six
+   * unbroken hours of silence. Just over two idle-tier polls, so one missed
+   * hourly poll does not restart the clock while a real outage still does.
+   */
+  flatlineMaxGapMinutes: 125,
+} as const;
+
 /** Poller tiers (seconds between polls per token). */
 export const POLL_TIERS = {
   /** Called or re-mentioned within the last 24h. */

@@ -30,6 +30,8 @@ import {
   fetchRange,
   fetchSleepers,
   fetchTelegramLoginAvailable,
+  markDead,
+  restoreCall,
   setWatch,
   setWatchByAddress,
   telegramLoginUrl,
@@ -58,9 +60,11 @@ import { Sleepers } from './components/Sleepers';
 import { GhostRows } from './components/Spotlight';
 import { WINDOWS, WindowSwitcher } from './components/WindowSwitcher';
 import { ViewHeader, Zone } from './components/Zone';
-import { bandPosition, derivePulse, isStale } from './derive';
+import { applyVerdicts, bandPosition, derivePulse, isStale } from './derive';
 import { fmtAge, fmtUsd, shortAddress } from './format';
 import { ANNOUNCEMENT_MS, suppressDiffAfter, useAnnouncementQueue, useBoardChange } from './motion';
+import type { DeadProps } from './dead';
+import { settleVerdicts } from './dead';
 import type { WatchProps, WatchTarget } from './watch';
 import { watchKey } from './watch';
 import {
@@ -103,6 +107,9 @@ const LIVE_EVENT_NAMES = ['update', 'price_update', 'new_call', 're_call', 'toke
 /** Telegram start params and our slugs share this alphabet. */
 const SLUG_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const NO_HIDDEN: ReadonlySet<number> = new Set<number>();
+/** Round 21: no member verdict is in flight, and none is waiting for a refetch. */
+const NO_VERDICTS: ReadonlySet<number> = new Set<number>();
+const NO_MARKS: ReadonlyMap<number, string> = new Map<number, string>();
 const NO_PENDING: ReadonlySet<string> = new Set<string>();
 /** Design 2b: at this width the board stops being tabs and becomes columns. */
 const DESKTOP_MIN_PX = 1100;
@@ -498,6 +505,16 @@ export default function App() {
   const [hidden, setHidden] = useState<ReadonlySet<number>>(NO_HIDDEN);
   const [binningId, setBinningId] = useState<number | null>(null);
   /**
+   * The member verdict's optimistic half (docs/decisions.md round 21), mirroring
+   * the bin machinery: `markedDead` maps a call to the instant it was
+   * pronounced (so the card can move to DIED with a death stamp), `restored`
+   * holds the ones just put back, and both are cleared by the refetch that
+   * makes them real. `verdictPending` is what greys the pill in flight.
+   */
+  const [markedDead, setMarkedDead] = useState<ReadonlyMap<number, string>>(NO_MARKS);
+  const [restored, setRestored] = useState<ReadonlySet<number>>(NO_VERDICTS);
+  const [verdictPending, setVerdictPending] = useState<ReadonlySet<number>>(NO_VERDICTS);
+  /**
    * Addresses whose watch toggle is in flight (round 16). Keyed by ADDRESS, not
    * by tokenId: a Sleepers lead has no tokenId, and the same coin can be toggled
    * from two surfaces at once — same coin, same key, no clobber.
@@ -546,6 +563,17 @@ export default function App() {
 
   const slug = boot.kind === 'ready' ? boot.slug : null;
   const slugRef = useRef<string | null>(null);
+  /**
+   * The three verdict overlays, as the board LOAD sees them: a refetch is
+   * asynchronous, so it has to settle against the calls that are in flight at
+   * the instant its payload lands, not the ones that were when it started.
+   */
+  const markedDeadRef = useRef(markedDead);
+  markedDeadRef.current = markedDead;
+  const restoredRef = useRef(restored);
+  restoredRef.current = restored;
+  const verdictPendingRef = useRef(verdictPending);
+  verdictPendingRef.current = verdictPending;
   const windowRef = useRef<BoardWindow>(boardWindow);
   const lastLoadRef = useRef(0);
   const loadSeqRef = useRef(0);
@@ -598,7 +626,7 @@ export default function App() {
 
   const loadBoard = useCallback(async (options: { silent?: boolean } = {}) => {
     const currentSlug = slugRef.current;
-    if (!currentSlug) return;
+    if (!currentSlug) return false;
     lastLoadRef.current = Date.now();
     // Latest-wins: a slower earlier response (window switch, or a refetch that
     // began before a bin committed) must not overwrite a newer one.
@@ -607,15 +635,29 @@ export default function App() {
     else setLoading(true);
     try {
       const data = await fetchBoard(currentSlug, windowRef.current);
-      if (seq !== loadSeqRef.current) return;
+      if (seq !== loadSeqRef.current) return false;
       paintedRef.current = true;
       setBoard(data);
       writeCachedBoard(currentSlug, windowRef.current, data);
       setBoardError(null);
       setHidden(NO_HIDDEN);
+      // The payload IS the verdict now — including whose name is on it — for
+      // every call the server has already answered. One still in flight keeps
+      // its overlay: this refetch cannot have seen a request that is still open.
+      const settled = settleVerdicts(
+        markedDeadRef.current,
+        restoredRef.current,
+        verdictPendingRef.current,
+      );
+      setMarkedDead(settled.markedDead);
+      setRestored(settled.restored);
       setNow(Date.now());
+      // True only when THIS load painted: a verdict's follow-up refetch drops
+      // its optimistic overlay on that answer alone, never on a load that was
+      // superseded or failed (which would repaint a card the server has killed).
+      return true;
     } catch (err) {
-      if (seq !== loadSeqRef.current) return;
+      if (seq !== loadSeqRef.current) return false;
       if (err instanceof ApiError && err.status === 403) {
         setBoot({
           kind: 'blocked',
@@ -623,7 +665,7 @@ export default function App() {
           message: 'You are not a member of this group.',
           retry: false,
         });
-        return;
+        return false;
       }
       if (err instanceof ApiError && err.status === 401) {
         setBoot({
@@ -632,7 +674,7 @@ export default function App() {
           message: 'Open the board again from your group’s pinned link.',
           retry: true,
         });
-        return;
+        return false;
       }
       if (err instanceof ApiError && err.status === 404) {
         setBoot({
@@ -641,9 +683,10 @@ export default function App() {
           message: 'That link does not match a group overseer is tracking.',
           retry: false,
         });
-        return;
+        return false;
       }
       setBoardError(describe(err));
+      return false;
     } finally {
       if (seq === loadSeqRef.current) {
         if (options.silent) setRevalidating(false);
@@ -1035,6 +1078,126 @@ export default function App() {
   );
 
   /**
+   * The member verdict (docs/decisions.md round 21).
+   *
+   * MARK DEAD is group-wide and instant, exactly like binning — but unlike
+   * binning it does not ask with a modal: the pill itself asks (one tap arms
+   * SURE?, the second fires), because it lives in a hover strip that a dialog
+   * would take away. The card moves to DIED optimistically reading "marked dead
+   * by you", and the refetch replaces that with the server's own name.
+   *
+   * A failure puts the card back exactly where it was and says why.
+   */
+  const runVerdict = useCallback(
+    async (card: BoardCard, mode: 'mark' | 'restore') => {
+      const currentSlug = slugRef.current;
+      if (!currentSlug) return;
+      const label = card.symbol ? `$${card.symbol}` : shortAddress(card.address);
+      const callId = card.callId;
+      const at = new Date().toISOString();
+
+      setVerdictPending((prev) => {
+        const next = new Set(prev);
+        next.add(callId);
+        return next;
+      });
+      setActionError(null);
+      // The two overlays are opposites: pronouncing clears a pending restore of
+      // the same call, and restoring clears a pending death.
+      if (mode === 'mark') {
+        setMarkedDead((prev) => {
+          const next = new Map(prev);
+          next.set(callId, at);
+          return next;
+        });
+        setRestored((prev) => {
+          if (!prev.has(callId)) return prev;
+          const next = new Set(prev);
+          next.delete(callId);
+          return next;
+        });
+      } else {
+        setRestored((prev) => {
+          const next = new Set(prev);
+          next.add(callId);
+          return next;
+        });
+        setMarkedDead((prev) => {
+          if (!prev.has(callId)) return prev;
+          const next = new Map(prev);
+          next.delete(callId);
+          return next;
+        });
+      }
+
+      // Drops this call's overlay — a rollback after a failure, and a handover
+      // after a success, because the payload that just landed says it better
+      // than we can. An overlay that outlived its payload would repaint a death
+      // a member has since undone from the chat.
+      const dropOverlay = () => {
+        if (mode === 'mark') {
+          setMarkedDead((prev) => {
+            if (!prev.has(callId)) return prev;
+            const next = new Map(prev);
+            next.delete(callId);
+            return next;
+          });
+        } else {
+          setRestored((prev) => {
+            if (!prev.has(callId)) return prev;
+            const next = new Set(prev);
+            next.delete(callId);
+            return next;
+          });
+        }
+      };
+
+      try {
+        if (mode === 'mark') await markDead(currentSlug, callId);
+        else await restoreCall(currentSlug, callId);
+        // RANGING draws its own payload, and a call this verdict just killed is
+        // still in it — so the view a verdict was pronounced FROM has to be
+        // re-read alongside the board (round 21 amendment (e)).
+        const query = rangeQueryRef.current;
+        const [painted] = await Promise.all([
+          loadBoard({ silent: true }),
+          query && rangeRef.current ? loadRange(query, { silent: true }) : null,
+        ]);
+        // A load that did not paint (superseded, or failed and swallowed) has
+        // not replaced the overlay with the server's answer; the overlay stays
+        // up and the next successful load settles it.
+        if (painted === true) dropOverlay();
+      } catch (err) {
+        // The board on screen is what the server still says, and a 409 means
+        // someone (or a rule) already answered this.
+        dropOverlay();
+        setActionError(
+          mode === 'mark'
+            ? `Could not mark ${label} dead. ${describe(err)}`
+            : `Could not restore ${label}. ${describe(err)}`,
+        );
+      } finally {
+        setVerdictPending((prev) => {
+          if (!prev.has(callId)) return prev;
+          const next = new Set(prev);
+          next.delete(callId);
+          return next;
+        });
+      }
+    },
+    [loadBoard, loadRange],
+  );
+
+  const deadProps = useMemo<DeadProps>(
+    () => ({
+      onMarkDead: (card: BoardCard) => void runVerdict(card, 'mark'),
+      onRestore: (card: BoardCard) => void runVerdict(card, 'restore'),
+      pending: verdictPending,
+    }),
+    [runVerdict, verdictPending],
+  );
+
+  /**
    * The watch toggle (docs/decisions.md rounds 15 and 16). Watching turns on the
    * group's Telegram alerts for a coin, so this is a group-wide action like
    * binning — and deliberately NOT optimistic: the server owns the per-member
@@ -1140,7 +1303,18 @@ export default function App() {
     void bootstrapOnce().then(setBoot);
   }, []);
 
-  const change = useBoardChange(board);
+  /**
+   * The board as the reader's own actions have left it: the server's payload
+   * with round 21's optimistic verdicts folded in. Everything that DRAWS reads
+   * this; the cache and the fetch layer keep the server's untouched copy, so a
+   * pending verdict is never persisted as fact.
+   */
+  const view = useMemo(
+    () => (board === null ? null : applyVerdicts(board, markedDead, restored)),
+    [board, markedDead, restored],
+  );
+
+  const change = useBoardChange(view);
   // One ceremony line at a time; a second one queues rather than replacing the
   // first. 3G: the coin the PRINTED line names is the row that blooms, so the
   // bloom never appears without the sentence that explains it.
@@ -1148,8 +1322,8 @@ export default function App() {
   const announcement = announced?.text ?? null;
   const alertedAddress = announced?.address ?? null;
   const pulse = useMemo(
-    () => (board ? derivePulse(board, now, hidden) : null),
-    [board, now, hidden],
+    () => (view ? derivePulse(view, now, hidden) : null),
+    [view, now, hidden],
   );
   // The desktop rail's RANGING summary: the top three coilers as band bars
   // (design pass 2, 3A) — the response is sorted by inRangeHours desc.
@@ -1226,6 +1400,7 @@ export default function App() {
       onRetry={onRangeRetry}
       now={now}
       watch={watchProps}
+      dead={deadProps}
     />
   );
 
@@ -1516,9 +1691,9 @@ export default function App() {
     );
   }
 
-  const title = board?.group.title ?? boot.slug;
+  const title = view?.group.title ?? boot.slug;
   const staleBoard =
-    board !== null && (board.sections.fresh ?? []).some((card) => isStale(card, now));
+    view !== null && (view.sections.fresh ?? []).some((card) => isStale(card, now));
 
   // ---- Telegram half-sheet (design 2a): its own surface, no tabs, one bridge.
   if (layout === 'mini') {
@@ -1539,9 +1714,9 @@ export default function App() {
             {actionError}
           </p>
         ) : null}
-        {board && pulse ? (
+        {view && pulse ? (
           <MiniBoard
-            board={board}
+            board={view}
             now={now}
             hiddenCallIds={hidden}
             pulse={pulse}
@@ -1550,6 +1725,7 @@ export default function App() {
             onFullBoard={() => void onFullBoard()}
             handoffPending={handoffPending}
             watch={watchProps}
+            dead={deadProps}
             onExpand={tgExpand}
           />
         ) : (
@@ -1608,7 +1784,7 @@ export default function App() {
         </div>
       </header>
 
-      {board && pulse ? (
+      {view && pulse ? (
         <Pulse
           data={pulse}
           variant="strip"
@@ -1639,7 +1815,7 @@ export default function App() {
           </p>
         ) : null}
 
-        {board ? (
+        {view ? (
           desktop ? (
             section === 'ranging' || section === 'sleepers' || section === 'discovery' ? (
               <div className="desk-view">
@@ -1651,12 +1827,13 @@ export default function App() {
               </div>
             ) : (
               <DesktopBoard
-                board={board}
+                board={view}
                 now={now}
                 hiddenCallIds={hidden}
                 binningId={binningId}
                 onBin={onBin}
                 watch={watchProps}
+                dead={deadProps}
                 ceremonies={change.ceremonies}
                 moved={change.moved}
                 rangeSummary={rangeSummary}
@@ -1668,7 +1845,7 @@ export default function App() {
             )
           ) : (
             <Board
-              board={board}
+              board={view}
               section={section}
               onSection={setSection}
               now={now}
@@ -1676,6 +1853,7 @@ export default function App() {
               binningId={binningId}
               onBin={onBin}
               watch={watchProps}
+              dead={deadProps}
               ceremonies={change.ceremonies}
               rangingCount={range === null ? null : range.cards.length}
               ranging={rangingTab}

@@ -1,6 +1,11 @@
 import type { Db } from '@groupie/db';
 import { DISCOVERY } from '@groupie/shared';
-import { isThrottled, summarizeRpcError, type ChainClient } from '../chain/client.js';
+import {
+  refusalStatus,
+  shouldPauseTicks,
+  summarizeRpcError,
+  type ChainClient,
+} from '../chain/client.js';
 import { deliverDiscoveryAlerts, retireStaleDiscoveryAlerts } from './alerts.js';
 import {
   pruneDiscovery,
@@ -53,10 +58,16 @@ export function startDiscovery(db: Db, chain: ChainClient | null): DiscoveryHand
 
   let chainRunning = false;
   /**
-   * The 429 back-off. A throughput refusal is the one failure the next tick
-   * cannot fix: retrying at the poll cadence spends budget on more 429s and
-   * keeps the provider's per-second meter pinned, so the loop stops asking for
-   * a while and doubles the wait each time it is refused again.
+   * The refusal back-off. A throughput refusal is one of two failures the next
+   * tick cannot fix: retrying at the poll cadence spends budget on more 429s
+   * and keeps the provider's per-second meter pinned, so the loop stops asking
+   * for a while and doubles the wait each time it is refused again.
+   *
+   * A REJECTED KEY (401/403) takes the same schedule for the same reason: a
+   * revoked or mistyped key answers every 20-second tick identically, and an
+   * error line every 20 seconds buries the one thing an operator needs to read.
+   * The wording names which of the two it was — one is waited out, the other is
+   * fixed in the Railway variables.
    *
    * Deliberately NOT touching the cursor heartbeat: a paused listener reads as
    * stalled on the board after five minutes, which is exactly what it is.
@@ -81,16 +92,18 @@ export function startDiscovery(db: Db, chain: ChainClient | null): DiscoveryHand
       // failure reaches, and viem's error carries the API-keyed URL in its
       // message, metaMessages and url.
       console.error(`discovery tick failed: ${summarizeRpcError(err)}`);
-      if (isThrottled(err)) {
+      const refusal = refusalStatus(err);
+      if (shouldPauseTicks(err)) {
         backoffMs =
           backoffMs === 0
             ? DISCOVERY.throttleBackoffMs
             : Math.min(DISCOVERY.throttleBackoffMaxMs, backoffMs * 2);
         pausedUntilMs = Date.now() + backoffMs;
+        const seconds = Math.round(backoffMs / 1000);
         console.warn(
-          `discovery: provider throttled (429), pausing chain ticks for ${Math.round(
-            backoffMs / 1000,
-          )}s`,
+          refusal === 429
+            ? `discovery: provider throttled (429), pausing chain ticks for ${seconds}s`
+            : `discovery: provider rejected the key (${refusal}), pausing chain ticks for ${seconds}s`,
         );
       }
     } finally {

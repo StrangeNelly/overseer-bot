@@ -67,7 +67,11 @@ if (!webOnly) {
   // failure here must not stop the bot (the command works regardless).
   bot.api
     .setMyCommands([
-      { command: 'overseer', description: 'board · watch <ca> · watchlist · alerts · set' },
+      {
+        command: 'overseer',
+        description:
+          'board · watch <ca> · dead <coin> · undead <coin> · watchlist · alerts · set',
+      },
     ])
     .catch((err) => console.warn('setMyCommands failed:', err));
   bot

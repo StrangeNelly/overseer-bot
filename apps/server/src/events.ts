@@ -23,6 +23,14 @@ export type GroupieEvent =
   // groupId lets the SSE layer deliver it only to that group's boards, rather
   // than to every group that happens to share the token (round 15 review).
   | { type: 'call_binned'; tokenId: number; callId: number; groupId: number }
+  // Round 21's member verdict and its reversal. Group-scoped for exactly the
+  // reasons a bin is: one member marking a coin dead moves the card into DIED
+  // on every open board in that group, the coin itself is untouched (other
+  // groups' calls on it stay live), and nobody should have to wait for an
+  // unrelated poll event to see it. Both are also raised by the bot, which is
+  // why they are events rather than a route-local refetch hint.
+  | { type: 'call_marked_dead'; tokenId: number; callId: number; groupId: number }
+  | { type: 'call_restored'; tokenId: number; callId: number; groupId: number }
   // So is the watchlist (docs/decisions.md round 15): one member pressing watch
   // turns on alerts for the whole chat, so every open board should show the
   // marker rather than waiting for a poll. Group-scoped for the same reason —

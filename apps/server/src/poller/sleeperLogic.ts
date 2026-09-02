@@ -116,32 +116,73 @@ export function dedupeByToken(candidates: readonly PoolCandidate[]): PoolCandida
 }
 
 /**
- * Every floor from round 9, applied to one candidate. Returns the qualified
- * entry (band and turnover already computed) or null.
+ * Every gate that can keep a pool off the list, in the order the scan applies
+ * them (docs/decisions.md rounds 9, 14, 17 for the floors; round 21 for the
+ * telemetry). `qualify` and `dropReason` both walk this ladder, so the reason
+ * the log prints is by construction the reason the scan acted on.
  *
- * A missing value NEVER passes: an unknown liquidity is not proof of a deep
- * pool, and an unknown age is not proof of a mature one.
+ * The `*_unknown` four are readings the listing did not carry. They reject the
+ * candidate exactly as the matching floor would — an unreadable reserve is not
+ * proof of a deep pool — but they are named apart from it so the breakdown can
+ * separate missing data from a measured shortfall: fifty `lp_unknown` is an
+ * upstream problem, fifty `lp_floor` is the chain.
+ *
+ * The three that are not floors:
+ *   - `band_slots` — qualified, but the band's per-kind keep cut was full;
+ *   - `last_hour_trades` — kept, but the listing's zero h1 count means no
+ *     15-minute bucket can be fresh, so residency is 0 and no duration view
+ *     shows it (measureResidency, round 17);
+ *   - `no_residency` — kept, but the candles established nothing (read failed,
+ *     stale window, or already out of band), which is the same silence.
  */
-export function qualify(candidate: PoolCandidate, nowMs: number): QualifiedSleeper | null {
+export const DROP_REASONS = [
+  'mcap_unknown',
+  'lp_unknown',
+  'volume_unknown',
+  'txns24_unknown',
+  'lp_floor',
+  'lp_ratio',
+  'txns24_floor',
+  'age_floor',
+  'age_ceiling',
+  'volume_floor',
+  'out_of_band',
+  'band_slots',
+  'last_hour_trades',
+  'no_residency',
+] as const;
+
+export type SleeperDropReason = (typeof DROP_REASONS)[number];
+
+/**
+ * The first floor this candidate fails, or null when it clears them all.
+ *
+ * An unknown value rejects the candidate at exactly the point its floor would —
+ * an unreadable liquidity is not proof of a deep pool — but reports a
+ * `*_unknown` reason so a missing reading is never counted as a measured
+ * shortfall. Kept in ONE place because `qualify` reads it — the telemetry
+ * cannot drift from the rule it is reporting on.
+ */
+function floorFailure(candidate: PoolCandidate, nowMs: number): SleeperDropReason | null {
   const { mcapUsd, liquidityUsd, vol24Usd, txns24, poolCreatedAt } = candidate;
-  if (mcapUsd === null || !Number.isFinite(mcapUsd) || mcapUsd <= 0) return null;
-  if (liquidityUsd === null || !Number.isFinite(liquidityUsd)) return null;
-  if (vol24Usd === null || !Number.isFinite(vol24Usd)) return null;
-  if (txns24 === null || !Number.isFinite(txns24)) return null;
-  if (poolCreatedAt === null) return null;
+  if (mcapUsd === null || !Number.isFinite(mcapUsd) || mcapUsd <= 0) return 'mcap_unknown';
+  if (liquidityUsd === null || !Number.isFinite(liquidityUsd)) return 'lp_unknown';
+  if (vol24Usd === null || !Number.isFinite(vol24Usd)) return 'volume_unknown';
+  if (txns24 === null || !Number.isFinite(txns24)) return 'txns24_unknown';
+  if (poolCreatedAt === null) return 'age_floor';
 
   // GeckoTerminal reports a NEGATIVE reserve_in_usd for some pools (seen live
   // 2026-09-02 on a launchpad pool); the floor comparison rejects those too,
   // which is the right answer — a reserve we cannot read is not $10K of depth.
-  if (liquidityUsd < SLEEPERS.minLiquidityUsd) return null;
+  if (liquidityUsd < SLEEPERS.minLiquidityUsd) return 'lp_floor';
 
   // ...and the same floor relative to size (round 14, the FORESKIN case): an
   // unlocked pool that was pulled mid-cycle still shows $10K+ of crumbs against
   // a market cap nobody has repriced yet. Below 2% there is no market here,
   // whatever the absolute number says. Inclusive: exactly 2% is a pass.
-  if (liquidityUsd < mcapUsd * SLEEPERS.liqToMcapMinRatio) return null;
+  if (liquidityUsd < mcapUsd * SLEEPERS.liqToMcapMinRatio) return 'lp_ratio';
 
-  if (txns24 < SLEEPERS.minTxns24) return null;
+  if (txns24 < SLEEPERS.minTxns24) return 'txns24_floor';
 
   // Age window, inclusive at both ends: exactly 1h old qualifies. The scan's
   // ceiling is inBandMaxDays, not maxPoolAgeDays — a coin with a month in band
@@ -151,12 +192,76 @@ export function qualify(candidate: PoolCandidate, nowMs: number): QualifiedSleep
   // a future timestamp is a bad reading, not a brand-new coin, and its
   // negative age fails the minimum.
   const ageMs = nowMs - poolCreatedAt.getTime();
-  if (!Number.isFinite(ageMs)) return null;
-  if (ageMs < SLEEPERS.minPoolAgeHours * HOUR_MS) return null;
-  if (ageMs > SLEEPERS.inBandMaxDays * DAY_MS) return null;
+  if (!Number.isFinite(ageMs)) return 'age_floor';
+  if (ageMs < SLEEPERS.minPoolAgeHours * HOUR_MS) return 'age_floor';
+  if (ageMs > SLEEPERS.inBandMaxDays * DAY_MS) return 'age_ceiling';
 
-  if (vol24Usd < requiredVolumeUsd(mcapUsd)) return null;
+  if (vol24Usd < requiredVolumeUsd(mcapUsd)) return 'volume_floor';
 
+  if (bandFor(mcapUsd) === null) return 'out_of_band';
+  return null;
+}
+
+/** What the scan did with a candidate that cleared (or did not clear) the floors. */
+export interface DropOutcome {
+  /** True when selectSleepers gave this address a band slot. */
+  kept: boolean;
+  /**
+   * Residency measured for a kept pick, in hours; null when the scan measured
+   * none (it was never kept, so nothing was ever read).
+   */
+  inBandHours?: number | null;
+}
+
+/**
+ * Why a pool that landed in a band by market cap is not on the list, or null
+ * when it is (kept, with residency a duration view can actually show).
+ *
+ * Pure telemetry (docs/decisions.md round 21): it decides nothing, it only
+ * names the FIRST gate the scan already applied — the $CUM case (quiet in the
+ * $50K–$100K band for five hours, then a 20x, and no scan kept it) could not be
+ * explained from a totals line alone.
+ */
+export function dropReason(
+  candidate: PoolCandidate,
+  nowMs: number,
+  outcome: DropOutcome,
+): SleeperDropReason | null {
+  const floor = floorFailure(candidate, nowMs);
+  if (floor !== null) return floor;
+  if (!outcome.kept) return 'band_slots';
+
+  const hours = outcome.inBandHours;
+  if (hours === null || hours === undefined || !Number.isFinite(hours)) return 'no_residency';
+  if (hours > 0) return null;
+  // Zero hours, and the listing already said why: nothing traded this hour, so
+  // no 15-minute bucket can be fresh enough to certify a sub-3h hold.
+  if (candidate.txns1h === 0) return 'last_hour_trades';
+  return 'no_residency';
+}
+
+/**
+ * Every floor from round 9, applied to one candidate. Returns the qualified
+ * entry (band and turnover already computed) or null.
+ *
+ * A missing value NEVER passes: an unknown liquidity is not proof of a deep
+ * pool, and an unknown age is not proof of a mature one.
+ */
+export function qualify(candidate: PoolCandidate, nowMs: number): QualifiedSleeper | null {
+  if (floorFailure(candidate, nowMs) !== null) return null;
+
+  const { mcapUsd, liquidityUsd, vol24Usd, txns24, poolCreatedAt } = candidate;
+  // floorFailure has already rejected every one of these; the re-check is what
+  // TypeScript cannot carry across the call, not a second rule.
+  if (
+    mcapUsd === null ||
+    liquidityUsd === null ||
+    vol24Usd === null ||
+    txns24 === null ||
+    poolCreatedAt === null
+  ) {
+    return null;
+  }
   const band = bandFor(mcapUsd);
   if (band === null) return null;
 

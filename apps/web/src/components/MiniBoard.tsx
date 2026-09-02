@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import type { BoardCard, BoardResponse } from '@groupie/shared';
+import type { DeadProps } from '../dead';
+import { deadForCard } from '../dead';
 import type { PulseData } from '../derive';
 import type { WatchProps } from '../watch';
 import { watchForCard } from '../watch';
@@ -19,6 +21,11 @@ interface MiniBoardProps {
   onFullBoard: () => void;
   handoffPending: boolean;
   watch: WatchProps;
+  /**
+   * The member verdict (round 21 amendment (e)): the half-sheet is where most
+   * members read the board, so MARK DEAD has to be reachable from it too.
+   */
+  dead?: DeadProps;
   /** Grow the sheet to full height — the member asked, we never do it on load. */
   onExpand: () => void;
 }
@@ -42,6 +49,7 @@ export function MiniBoard({
   onFullBoard,
   handoffPending,
   watch,
+  dead,
   onExpand,
 }: MiniBoardProps) {
   const [openId, setOpenId] = useState<number | null>(null);
@@ -64,27 +72,14 @@ export function MiniBoard({
         </button>
       </div>
 
-      <div className="mini-rows">
-        {rows.length === 0 ? (
-          <p className="empty">No calls in this window. Try a longer one.</p>
-        ) : (
-          rows.map((card) => (
-            <TokenCard
-              key={card.callId}
-              card={card}
-              section="fresh"
-              now={now}
-              size="mini"
-              links="tap"
-              expanded={openId === card.callId}
-              onToggle={(callId) => setOpenId((prev) => (prev === callId ? null : callId))}
-              watch={watchForCard(card, watch)}
-              // Design: list rows never animate in the half-sheet.
-              animate={false}
-            />
-          ))
-        )}
-      </div>
+      <MiniRows
+        rows={rows}
+        now={now}
+        watch={watch}
+        dead={dead}
+        openId={openId}
+        onToggle={(callId) => setOpenId((prev) => (prev === callId ? null : callId))}
+      />
 
       <div className="bridge">
         <button
@@ -97,6 +92,53 @@ export function MiniBoard({
         </button>
         <span className="bridge-note">opens in your browser · already signed in</span>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The half-sheet's rows, with the open one lifted out as a prop: the sheet owns
+ * which row is open, this owns what a row carries. Links (and with them WATCH
+ * and MARK DEAD) are tap-revealed here, because a 560px sheet has no hover and
+ * no room for a strip that is always on.
+ */
+export function MiniRows({
+  rows,
+  now,
+  watch,
+  dead,
+  openId,
+  onToggle,
+}: {
+  rows: BoardCard[];
+  now: number;
+  watch: WatchProps;
+  dead?: DeadProps;
+  openId: number | null;
+  onToggle: (callId: number) => void;
+}) {
+  return (
+    <div className="mini-rows">
+      {rows.length === 0 ? (
+        <p className="empty">No calls in this window. Try a longer one.</p>
+      ) : (
+        rows.map((card) => (
+          <TokenCard
+            key={card.callId}
+            card={card}
+            section="fresh"
+            now={now}
+            size="mini"
+            links="tap"
+            expanded={openId === card.callId}
+            onToggle={onToggle}
+            watch={watchForCard(card, watch)}
+            dead={deadForCard(card, dead)}
+            // Design: list rows never animate in the half-sheet.
+            animate={false}
+          />
+        ))
+      )}
     </div>
   );
 }

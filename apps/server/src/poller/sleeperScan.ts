@@ -4,14 +4,19 @@ import { SLEEPERS, twitterUrlFrom, websiteUrlFrom } from '@groupie/shared';
 import * as ds from '../market/dexscreener.js';
 import * as gt from '../market/geckoterminal.js';
 import {
+  DROP_REASONS,
+  bandFor,
   carriedResidencyHours,
   computeResidency,
   computeShortResidency,
   dedupeByToken,
+  dropReason,
   needsFullMeasurement,
   qualify,
   selectSleepers,
+  type Band,
   type PoolCandidate,
+  type SleeperDropReason,
   type PrevResidency,
   type SleeperPick,
 } from './sleeperLogic.js';
@@ -48,6 +53,17 @@ const PAGE_GAP_MS = 1_500;
  * the scan finishing a few minutes later costs nothing at a 3h cadence.
  */
 const OHLCV_GAP_MS = 4_000;
+
+/**
+ * How many per-coin drop lines one scan may print (docs/decisions.md round 21).
+ *
+ * Deliberately a module constant rather than a shared one: this is a logging
+ * budget, not a product rule — nothing outside this file may read it, and
+ * nothing the group sees changes when it moves. A sweep can drop 150 in-band
+ * pools; forty lines is enough to see a pattern without burying the scan's own
+ * totals in Railway's log view.
+ */
+const DROP_LOG_MAX = 40;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -481,6 +497,148 @@ async function recordSeen(db: Db, scanAt: Date, addresses: string[]): Promise<vo
   await db.delete(sleeperSeen).where(lt(sleeperSeen.lastListedAt, cutoff));
 }
 
+// ---------------------------------------------------------------------------
+// Drop telemetry (docs/decisions.md round 21)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compact USD, for log lines only — $61K, $9.2K, $1.5M. Never a UI string.
+ * A value the scan does not have prints as `unknown`, never as $0.
+ */
+function usd(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return 'unknown';
+  const abs = Math.abs(value);
+  const sign = value < 0 ? '-' : '';
+  const scaled = (divisor: number, suffix: string): string => {
+    const n = abs / divisor;
+    return `${sign}$${n < 10 ? n.toFixed(1) : Math.round(n)}${suffix}`;
+  };
+  if (abs >= 1_000_000) return scaled(1_000_000, 'M');
+  if (abs >= 1_000) return scaled(1_000, 'K');
+  return `${sign}$${Math.round(abs)}`;
+}
+
+function pct(numerator: number | null | undefined, denominator: number | null | undefined): string {
+  if (numerator === null || numerator === undefined || !Number.isFinite(numerator)) return 'unknown';
+  if (denominator === null || denominator === undefined || !Number.isFinite(denominator)) {
+    return 'unknown';
+  }
+  if (denominator <= 0) return 'unknown';
+  return `${((numerator / denominator) * 100).toFixed(1)}%`;
+}
+
+function bandLabel(band: Band): string {
+  return `${usd(band.loUsd)}–${usd(band.hiUsd)}`;
+}
+
+function hours(value: number | null | undefined): string {
+  return value === null || value === undefined || !Number.isFinite(value)
+    ? 'unknown'
+    : `${value.toFixed(1)}h`;
+}
+
+/** The symbol the scan can name this candidate by, before any enrichment. */
+function dropSymbol(candidate: PoolCandidate, pair: ds.DsPair | undefined): string {
+  const symbol = pair?.symbol ?? symbolFromPoolName(candidate.poolName);
+  return symbol === null ? 'unknown' : `$${symbol}`;
+}
+
+/**
+ * The two reasons that describe a row the scan KEPT and persisted: the entry is
+ * on the list, but its residency is 0, so no duration view will show it.
+ * Reporting them as "dropped" would say the scan refused a coin it did not.
+ */
+const HIDDEN_REASONS: readonly SleeperDropReason[] = ['last_hour_trades', 'no_residency'];
+
+/**
+ * Ordered by weight, then by the ladder's own order so two equal counts always
+ * print the same way round.
+ */
+function breakdownOf(counts: Map<SleeperDropReason, number>): string {
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || DROP_REASONS.indexOf(a[0]) - DROP_REASONS.indexOf(b[0]))
+    .map(([reason, count]) => `${reason} ${count}`)
+    .join(' · ');
+}
+
+/**
+ * Why every pool the scan saw is not on the list — or is on it and invisible.
+ *
+ * Motivated by $CUM (2026-09-02): it sat quietly in the $50K–$100K band through
+ * two scans, was kept by neither, then ran to $1.5M — and the totals line could
+ * not say which gate had answered. Reporting only; nothing here changes what is
+ * kept.
+ *
+ * Two populations, two summary lines, because they are two different problems:
+ * a genuine DROP is a coin the scan refused, while a HIDDEN row was kept and
+ * written and simply has no residency any duration view can show. They share
+ * the per-coin line budget.
+ *
+ * What is not counted at all: a pool whose (readable) market cap put it outside
+ * every band was never a sleeper candidate. The floors are read before the band
+ * check, so such a pool usually answers with a floor rather than `out_of_band`
+ * — the band is checked here too, so it is left out either way. An UNREADABLE
+ * cap is the exception and is counted: the coin might well have been in band,
+ * and that silence is exactly what this telemetry exists to make visible.
+ */
+function logDrops(
+  candidates: readonly PoolCandidate[],
+  scored: readonly ScoredPick[],
+  pairs: Map<string, ds.DsPair>,
+  nowMs: number,
+): void {
+  const keptByAddress = new Map(scored.map((pick) => [pick.address, pick]));
+  const dropCounts = new Map<SleeperDropReason, number>();
+  const hiddenCounts = new Map<SleeperDropReason, number>();
+  const lines: string[] = [];
+  let dropped = 0;
+  let hidden = 0;
+
+  for (const candidate of candidates) {
+    const kept = keptByAddress.get(candidate.address);
+    const reason = dropReason(candidate, nowMs, {
+      kept: kept !== undefined,
+      inBandHours: kept?.inBandHours ?? null,
+    });
+    if (reason === null) continue;
+    if (reason === 'out_of_band') continue;
+    const band = candidate.mcapUsd === null ? null : bandFor(candidate.mcapUsd);
+    if (band === null && reason !== 'mcap_unknown') continue;
+
+    const isHidden = HIDDEN_REASONS.includes(reason);
+    if (isHidden) {
+      hidden++;
+      hiddenCounts.set(reason, (hiddenCounts.get(reason) ?? 0) + 1);
+    } else {
+      dropped++;
+      dropCounts.set(reason, (dropCounts.get(reason) ?? 0) + 1);
+    }
+    if (lines.length < DROP_LOG_MAX) {
+      lines.push(
+        `sleeper ${isHidden ? 'hidden' : 'drop'}: ${dropSymbol(candidate, pairs.get(candidate.address))} ` +
+          `band ${band === null ? 'unknown' : bandLabel(band)} mcap ${usd(candidate.mcapUsd)} ` +
+          `vol24 ${usd(candidate.vol24Usd)} ` +
+          `lp ${pct(candidate.liquidityUsd, candidate.mcapUsd)} ` +
+          `txns1h ${candidate.txns1h ?? 'unknown'} ` +
+          `residency ${hours(kept?.inBandHours)} — ${reason}`,
+      );
+    }
+  }
+
+  const dropBreakdown = breakdownOf(dropCounts);
+  console.log(
+    `sleeper scan: in-band dropped ${dropped}${dropBreakdown.length > 0 ? ` — ${dropBreakdown}` : ''}`,
+  );
+  if (hidden > 0) {
+    console.log(`sleeper scan: kept but not shown ${hidden} — ${breakdownOf(hiddenCounts)}`);
+  }
+  for (const line of lines) console.log(line);
+  const withheld = dropped + hidden - lines.length;
+  if (withheld > 0) {
+    console.log(`sleeper drop: ${withheld} more in-band drops not logged (cap ${DROP_LOG_MAX})`);
+  }
+}
+
 /**
  * One full scan. Throwing is fine — the scheduler isolates this the same way it
  * isolates the rug sweep and the prune, and a failed scan simply leaves the
@@ -517,5 +675,8 @@ export async function runSleeperScan(db: Db): Promise<SleeperScanResult> {
       `${scored.filter((e) => e.isStock).length} tokenized stocks, ` +
       `${scored.filter((e) => e.inBandHours >= 24).length} in band 24h+)`,
   );
+  // Reported over the DEDUPED candidates: a token's second pool losing to its
+  // own first one is not a gate answering, and would double-count the coin.
+  logDrops(named, scored, pairs, nowMs);
   return { scanned: candidates.length, kept: scored.length, pages };
 }

@@ -21,6 +21,12 @@ export interface DsPair {
   mcapUsd: number | null;
   liquidityUsd: number | null;
   vol24Usd: number | null;
+  /**
+   * buys + sells over 24h (docs/decisions.md round 21). null when DexScreener
+   * carried no `txns.h24` block at all — which is "we were not told", never
+   * "nothing traded", and the flatline rule must not read it as the latter.
+   */
+  txns24: number | null;
   pairCreatedAt: Date | null;
 }
 
@@ -35,12 +41,24 @@ interface RawPair {
   fdv?: number;
   liquidity?: { usd?: number };
   volume?: { h24?: number };
+  txns?: { h24?: { buys?: number; sells?: number } };
   pairCreatedAt?: number;
   info?: {
     imageUrl?: string;
     websites?: Array<{ url?: string }>;
     socials?: Array<{ type?: string; url?: string }>;
   };
+}
+
+/**
+ * `txns.h24.buys + .sells`, or null when the block is absent entirely — the
+ * same "missing is not zero" rule GeckoTerminal's sumTxns follows. One side
+ * present and the other absent counts the side we have.
+ */
+function dsTxns24(raw: RawPair): number | null {
+  const buys = num(raw.txns?.h24?.buys);
+  const sells = num(raw.txns?.h24?.sells);
+  return buys === null && sells === null ? null : (buys ?? 0) + (sells ?? 0);
 }
 
 function toPair(raw: RawPair): DsPair | null {
@@ -67,6 +85,7 @@ function toPair(raw: RawPair): DsPair | null {
     // callers must not treat unknown as zero.
     liquidityUsd: num(raw.liquidity?.usd),
     vol24Usd: num(raw.volume?.h24),
+    txns24: dsTxns24(raw),
     pairCreatedAt: raw.pairCreatedAt ? new Date(raw.pairCreatedAt) : null,
   };
 }
@@ -213,5 +232,6 @@ export function dsSnapshot(pair: DsPair): MarketSnapshot {
     mcapUsd: pair.mcapUsd,
     liquidityUsd: pair.liquidityUsd,
     vol24Usd: pair.vol24Usd,
+    txns24: pair.txns24,
   };
 }

@@ -14,6 +14,7 @@ import {
 } from '../format';
 import { LinkPills } from './LinkPills';
 import type { WatchControl } from './LinkPills';
+import type { DeadControl } from '../dead';
 import { Gauge, LpChip, MoveChip } from './Zone';
 import { Odometer } from './Odometer';
 import { Sparkline } from './Sparkline';
@@ -61,10 +62,18 @@ function Disc({ card, size }: { card: BoardCard; size: number }) {
 }
 
 /** The spotlight cards' link strip: 20px of pills under a hairline, WATCH last. */
-function CardLinks({ card, watch }: { card: BoardCard; watch?: WatchControl }) {
+function CardLinks({
+  card,
+  watch,
+  dead,
+}: {
+  card: BoardCard;
+  watch?: WatchControl;
+  dead?: DeadControl;
+}) {
   return (
     <div className="card-links">
-      <LinkPills target={card} watch={watch} />
+      <LinkPills target={card} watch={watch} dead={dead} />
     </div>
   );
 }
@@ -82,11 +91,13 @@ export function RunnerHero({
   now,
   breathing,
   watch,
+  dead,
 }: {
   card: BoardCard;
   now: number;
   breathing: boolean;
   watch?: WatchControl;
+  dead?: DeadControl;
 }) {
   const peakMultiple = fmtMultiple(card.peakMultiple);
   // Design law: the top runner breathes WHILE its multiple climbs — a card
@@ -145,7 +156,7 @@ export function RunnerHero({
           <span className="spot-faint"> now</span>
         </span>
       </div>
-      <CardLinks card={card} watch={watch} />
+      <CardLinks card={card} watch={watch} dead={dead} />
     </article>
   );
 }
@@ -155,10 +166,12 @@ export function RetracedCard({
   card,
   now,
   watch,
+  dead,
 }: {
   card: BoardCard;
   now: number;
   watch?: WatchControl;
+  dead?: DeadControl;
 }) {
   const peakMultiple = fmtMultiple(card.peakMultiple);
   return (
@@ -194,7 +207,7 @@ export function RetracedCard({
           {` peak ${fmtUsd(card.peakMcapSinceCall)}${peakMultiple === '—' ? '' : ` · ${peakMultiple}`}`}
         </span>
       </div>
-      <CardLinks card={card} watch={watch} />
+      <CardLinks card={card} watch={watch} dead={dead} />
     </article>
   );
 }
@@ -209,11 +222,13 @@ export function RevivingCard({
   now,
   featured,
   watch,
+  dead,
 }: {
   card: BoardCard;
   now: number;
   featured: boolean;
   watch?: WatchControl;
+  dead?: DeadControl;
 }) {
   const delta = revivalDelta(card);
   const at = mcapAtRevival(card);
@@ -266,7 +281,7 @@ export function RevivingCard({
         <span className="spot-down">{`${fmtMultiple(card.multiple)} from call`}</span>
         {endsIn ? <span className="spot-ends">{`spotlight ends in ${endsIn}`}</span> : null}
       </div>
-      <CardLinks card={card} watch={watch} />
+      <CardLinks card={card} watch={watch} dead={dead} />
     </article>
   );
 }

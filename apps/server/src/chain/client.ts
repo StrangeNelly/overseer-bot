@@ -281,14 +281,49 @@ export function summarizeRpcError(err: unknown): string {
  * `HttpRequestError` with `status = 429`, which is the shape this matches.
  */
 export function isThrottled(err: unknown): boolean {
-  if (err === null || typeof err !== 'object') return false;
+  return statusCodes(err).includes(429);
+}
+
+/** Every numeric `status`/`code` the error and its cause carry. */
+function statusCodes(err: unknown): number[] {
+  if (err === null || typeof err !== 'object') return [];
   const e = err as Record<string, unknown>;
   const cause = (typeof e.cause === 'object' && e.cause !== null
     ? (e.cause as Record<string, unknown>)
     : null) ?? null;
-  return [e.status, e.code, cause?.status, cause?.code].some(
-    (value) => firstNumber(value) === 429,
-  );
+  const codes: number[] = [];
+  for (const value of [e.status, e.code, cause?.status, cause?.code]) {
+    const code = firstNumber(value);
+    if (code !== null) codes.push(code);
+  }
+  return codes;
+}
+
+/**
+ * The provider REFUSED this read for a reason the next tick cannot fix — the
+ * first of 429 (throughput), 401 or 403 (the key) found on the error or its
+ * cause, or null for everything else.
+ *
+ * The two auth codes join the throughput one because their failure mode is
+ * identical from the loop's side: a revoked, mistyped or over-quota key answers
+ * every 20-second tick the same way, so retrying at the poll cadence is a
+ * logged error every 20 seconds and nothing else. Backing off makes it one
+ * line, then one an hour.
+ *
+ * Read off `status`/`code`, never off `message`, for the reason isThrottled
+ * documents: viem prints the request body into the message.
+ */
+export function refusalStatus(err: unknown): number | null {
+  const codes = statusCodes(err);
+  // Throughput first, so an error carrying both is reported as the refusal the
+  // loop can wait out rather than as a dead key.
+  if (codes.includes(429)) return 429;
+  return codes.find((code) => code === 401 || code === 403) ?? null;
+}
+
+/** Should the chain loop stop asking for a while? */
+export function shouldPauseTicks(err: unknown): boolean {
+  return refusalStatus(err) !== null;
 }
 
 /* ------------------------------------------------ the provider's log ceiling */

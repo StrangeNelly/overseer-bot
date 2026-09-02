@@ -226,6 +226,29 @@ export function binCall(slug: string, callId: number): Promise<void> {
 }
 
 /**
+ * The member verdict (docs/decisions.md round 21): mark a LIVE call dead by
+ * hand. Any member, group-wide — the same standing as binning — and the same
+ * thing `/overseer dead <symbol|CA>` does. 204, or 409 when the call is not
+ * live any more (a rule got there first, or another member did).
+ */
+export function markDead(slug: string, callId: number): Promise<void> {
+  return request<void>(`${groupPath(slug)}/calls/${encodeURIComponent(String(callId))}/dead`, {
+    method: 'POST',
+  });
+}
+
+/**
+ * ...and its only reversal (`/overseer undead`): the call goes back to active,
+ * no re-alert, no probation. 409 for a rule-driven death — a member can undo a
+ * member's verdict, never the machinery's.
+ */
+export function restoreCall(slug: string, callId: number): Promise<void> {
+  return request<void>(`${groupPath(slug)}/calls/${encodeURIComponent(String(callId))}/dead`, {
+    method: 'DELETE',
+  });
+}
+
+/**
  * Turn the group's Telegram alerts on/off for one coin (docs/decisions.md round
  * 15) — the same watchlist `/overseer watch` writes to, and the same per-member
  * cap. A 409 carries the friendly over-cap sentence in `error`.

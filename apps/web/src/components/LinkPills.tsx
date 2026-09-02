@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { TradingLinkRow } from '@groupie/shared';
 import { copyText } from '../clipboard';
+import { CONFIRM_MS, confirmStep, pressedOutside } from '../confirm';
+import type { ConfirmState } from '../confirm';
+import type { DeadControl } from '../dead';
 
 /**
  * The link row, in one place (docs/decisions.md round 15).
@@ -54,6 +57,14 @@ interface LinkPillsProps {
   target: LinkTarget;
   watch?: WatchControl;
   /**
+   * The member verdict (round 21). The 'mark' pill rides every link row.
+   * RESTORE belongs beside BIN on the died row, where the reader is already
+   * looking at a corpse — EXCEPT on the desktop hover strip (`compact`), which
+   * paints over the row head the moment the mouse arrives: there the strip is
+   * the only place a pill can be clicked, so RESTORE rides it too.
+   */
+  dead?: DeadControl;
+  /**
    * Short labels (CA, WEB) for the narrow desktop rail, where the strip has to
    * share a 48px row with the symbol and the numbers — the 3A artboard's own
    * wording for that surface.
@@ -66,7 +77,7 @@ interface LinkPillsProps {
  * `.row-pills`, the desktop `.row-hoverlinks`, a spotlight card's `.card-links`)
  * and sizes them from it.
  */
-export function LinkPills({ target, watch, compact = false }: LinkPillsProps) {
+export function LinkPills({ target, watch, dead, compact = false }: LinkPillsProps) {
   const [copied, setCopied] = useState(false);
 
   const onCopy = useCallback(() => {
@@ -104,6 +115,7 @@ export function LinkPills({ target, watch, compact = false }: LinkPillsProps) {
         </a>
       ) : null}
       {watch ? <WatchPill target={target} watch={watch} /> : null}
+      {dead && (dead.mode === 'mark' || compact) ? <DeadPill dead={dead} /> : null}
     </>
   );
 }
@@ -168,6 +180,80 @@ export function WatchPill({
       ) : (
         'WATCH'
       )}
+    </button>
+  );
+}
+
+/**
+ * MARK DEAD / RESTORE — the member verdict (docs/decisions.md round 21).
+ *
+ * Same family as WATCH: dim by default, never green or red. A death is not a
+ * P&L colour and this pill is not an alarm; it is the group writing down what
+ * it already believes.
+ *
+ * Two taps, because it sits in a hover strip a thumb passes over: the first
+ * arms it into SURE?, the second commits. Four seconds, a tap elsewhere, or
+ * focus leaving all put it back — the machine is `confirmStep`, so the rule can
+ * be read (and tested) without a browser.
+ */
+export function DeadPill({ dead, className }: { dead: DeadControl; className?: string }) {
+  const [state, setState] = useState<ConfirmState>('idle');
+  const ref = useRef<HTMLButtonElement>(null);
+  const restore = dead.mode === 'restore';
+
+  useEffect(() => {
+    if (state !== 'armed') return;
+    const id = window.setTimeout(
+      () => setState(confirmStep('armed', 'timeout').state),
+      CONFIRM_MS,
+    );
+    // Capture, so a tap that lands on a control which stops propagation still
+    // disarms this one. The press that armed it is already past.
+    const onAway = (event: Event) => {
+      if (!pressedOutside(ref.current, event.target)) return;
+      setState(confirmStep('armed', 'outside').state);
+    };
+    document.addEventListener('pointerdown', onAway, true);
+    return () => {
+      window.clearTimeout(id);
+      document.removeEventListener('pointerdown', onAway, true);
+    };
+  }, [state]);
+
+  // A pill that goes into flight, or whose card changed underneath it, must not
+  // stay armed: the next render is a different question.
+  useEffect(() => {
+    if (dead.pending) setState((prev) => confirmStep(prev, 'disable').state);
+  }, [dead.pending]);
+
+  const armed = state === 'armed';
+  // Spelled out on every surface, including the 8.5px strip: a control that
+  // ends a call for the whole group does not get an abbreviation.
+  const label = restore ? 'RESTORE' : 'MARK DEAD';
+  const action = restore
+    ? `Put ${dead.label} back on the board`
+    : `Mark ${dead.label} dead for the whole group`;
+
+  return (
+    <button
+      ref={ref}
+      type="button"
+      className={`pill pill-dead${restore ? ' pill-dead-restore' : ''}${armed ? ' is-armed' : ''}${className ? ` ${className}` : ''}`}
+      aria-label={armed ? `${action} — press again to confirm` : action}
+      title={
+        restore
+          ? 'Only a member can undo a member’s verdict — the call goes back live, with no alert'
+          : 'Any member can call it: the card moves to DIED for the whole group. A member can restore it.'
+      }
+      disabled={dead.pending}
+      onBlur={() => setState(confirmStep(state, 'blur').state)}
+      onClick={() => {
+        const step = confirmStep(state, 'press');
+        setState(step.state);
+        if (step.fire) dead.onFire();
+      }}
+    >
+      {dead.pending ? '…' : armed ? 'SURE?' : label}
     </button>
   );
 }

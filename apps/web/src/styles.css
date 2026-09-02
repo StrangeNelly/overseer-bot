@@ -558,6 +558,7 @@ a {
 
 .row-head > .row-hit,
 .row-head > .row-hoverlinks,
+.row-head > .row-dead,
 .row-head > .bin-btn {
   pointer-events: auto;
 }
@@ -873,6 +874,44 @@ a {
   box-shadow: none;
 }
 
+/* MARK DEAD / RESTORE — the member verdict (docs/decisions.md round 21).
+   Dim, in the same family as an unlit WATCH: a death is not a P&L colour and
+   this is not an alarm. Armed (SURE?) it only gets BRIGHTER — still no hue —
+   because the second tap is the commitment, not the warning. */
+.pill-dead {
+  color: var(--dimmer);
+  border-color: var(--badge-border);
+  font-weight: 500;
+}
+
+.pill-dead.is-armed {
+  color: var(--text-2);
+  border-color: var(--dim);
+  background: var(--fill-1);
+  font-weight: 700;
+}
+
+.pill-dead:disabled {
+  opacity: 0.55;
+}
+
+/* Beside BIN on a died row, and on the 40px died rail: the same compact
+   footprint the rail watch pill takes.
+
+   position/z-index are load-bearing, not decoration: `.row-hit` is absolute
+   over the whole head, so a STATIC sibling paints (and hit-tests) underneath it
+   and RESTORE cannot be pressed at all. Same escape `.pill-x` takes — 1 sits
+   above the hit button and below the `.row-hoverlinks` strip (2). */
+.row-dead,
+.rail-dead {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  min-height: 20px;
+  padding: 2px 6px;
+  font-size: 8.5px;
+}
+
 /* Mobile: tap the row, a 34px pill row springs open (one at a time). */
 .row-pills {
   display: flex;
@@ -973,7 +1012,11 @@ a {
     inset 0 -1px 0 rgba(35, 217, 255, 0.28);
 }
 
+/* Lifted for the same reason as `.row-dead` above: on a mobile died row the
+   absolutely-positioned `.row-hit` covers this button too. */
 .bin-btn {
+  position: relative;
+  z-index: 1;
   flex: 0 0 auto;
   min-height: 26px;
   padding: 4px 9px;
@@ -1257,6 +1300,13 @@ a {
   color: var(--dimmer);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  /* Round 21 gave two death reasons a sentence of their own ("marked dead by
+     @name", "flatlined · vol $120 / 24h · 3 trades"). In a 330px rail that
+     ellipses rather than pushing the pills off the row; the title carries the
+     whole line. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .range-summary {

@@ -5,6 +5,12 @@
  */
 
 import type { BoardCard, BoardResponse, SparkPoint, WatchlistEntry } from '@groupie/shared';
+import {
+  MEMBER_DEATH_REASON,
+  UNNAMED_MEMBER,
+  isFlatlineDeath,
+  isMemberDeath as isMemberDeathReason,
+} from '@groupie/shared';
 import { ageMs, fmtMultiple, fmtUsd } from './format';
 
 /** Market numbers older than this get a visible "as of" hint. */
@@ -443,4 +449,112 @@ export function mySlots(board: BoardResponse): number {
 export function slotLabel(entry: WatchlistEntry): string {
   if (entry.watchedByMe) return 'your slot';
   return entry.addedByName ? `${entry.addedByName}’s slot` : 'another member’s slot';
+}
+
+// ---------------------------------------------------------------- round 21: verdicts
+
+function finite(value: number | null | undefined): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+/**
+ * A death a member pronounced (round 21) — the only one RESTORE may reverse.
+ * The reason string itself is shared's to define; this is the CARD-level
+ * question, which also asks whether the call is dead at all.
+ */
+export function isMemberDeath(card: BoardCard): boolean {
+  return isDied(card) && isMemberDeathReason(card.deathReason);
+}
+
+/**
+ * What a death SAYS beyond its badge (docs/decisions.md round 21).
+ *
+ * The two reasons round 21 introduced both carry evidence the badge cannot
+ * hold: WHO pronounced it, or the volume and trade count the rule read. Every
+ * clause is a number or a name — never a verdict — and a clause we do not have
+ * is dropped rather than printed as zero: an unknown 24h volume is not $0.
+ *
+ * null for every other reason, which keeps the existing wording untouched.
+ */
+export function deathNote(card: BoardCard): string | null {
+  if (isMemberDeathReason(card.deathReason)) {
+    const by = typeof card.deathMarkedBy === 'string' ? card.deathMarkedBy.trim() : '';
+    // A member-marked death whose name did not survive the join still says what
+    // kind of death it was: the badge alone reads as machinery.
+    return `marked dead by ${by.length > 0 ? by : UNNAMED_MEMBER}`;
+  }
+  if (isFlatlineDeath(card.deathReason)) {
+    const parts = ['flatlined'];
+    if (finite(card.vol24Usd)) parts.push(`vol ${fmtUsd(card.vol24Usd)} / 24h`);
+    if (finite(card.txns24)) {
+      const trades = Math.max(0, Math.round(card.txns24));
+      parts.push(`${trades} ${trades === 1 ? 'trade' : 'trades'}`);
+    }
+    return parts.join(' · ');
+  }
+  return null;
+}
+
+/**
+ * The optimistic half of a member verdict: the board as it will read once the
+ * server answers, drawn from what the reader just did.
+ *
+ * `markedDead` maps a callId to the instant the member pressed; `restored`
+ * holds the member-dead calls they have just put back. Both sets are cleared by
+ * the refetch, so this overlay only ever covers the round trip — exactly the
+ * bin machinery's contract, with a move instead of a hide.
+ *
+ * The optimistic card names the reader ("marked dead by you") because that is
+ * the one thing we honestly know before the payload lands; the server's own
+ * display name replaces it on the refetch.
+ */
+export function applyVerdicts(
+  board: BoardResponse,
+  markedDead: ReadonlyMap<number, string>,
+  restored: ReadonlySet<number>,
+): BoardResponse {
+  if (markedDead.size === 0 && restored.size === 0) return board;
+
+  const moved: BoardCard[] = [];
+  const taken = new Set<number>();
+  const strip = (cards: BoardCard[]): BoardCard[] =>
+    cards.filter((card) => {
+      const at = markedDead.get(card.callId);
+      if (at === undefined) return true;
+      if (!taken.has(card.callId)) {
+        taken.add(card.callId);
+        moved.push(asMemberDead(card, at));
+      }
+      return false;
+    });
+
+  const sections = board.sections;
+  const fresh = strip(sections.fresh ?? []);
+  const runners = strip(sections.runners ?? []);
+  const retraced = strip(sections.retraced ?? []);
+  const reviving = strip(sections.reviving ?? []);
+  // A restore leaves DIED and does not reappear anywhere until the payload says
+  // where it belongs — inventing a section for it would be a guess.
+  const serverDied = (sections.died ?? []).filter((card) => !restored.has(card.callId));
+  // The server's own version of a death always wins over ours: once the refetch
+  // has it, the optimistic copy would only differ by naming the wrong person.
+  const already = new Set(serverDied.map((card) => card.callId));
+  const died = [...moved.filter((card) => !already.has(card.callId)), ...serverDied];
+
+  return { ...board, sections: { fresh, runners, retraced, died, reviving } };
+}
+
+function asMemberDead(card: BoardCard, diedAt: string): BoardCard {
+  return {
+    ...card,
+    callStatus: 'died',
+    diedAt,
+    deathReason: MEMBER_DEATH_REASON,
+    deathMarkedBy: 'you',
+    // Mark-to-market at the instant of the verdict, which is what the server
+    // stamps too. Null stays null: no reading, no claim.
+    mcapAtDeath: card.mcapUsd,
+    // A dead call is not also a comeback.
+    revivingAt: null,
+  };
 }

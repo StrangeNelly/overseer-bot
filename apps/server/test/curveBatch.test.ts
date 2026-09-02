@@ -167,6 +167,7 @@ function poolInfo(over: Partial<GtPoolInfo> = {}): GtPoolInfo {
     fdvUsd: 250_000,
     reserveUsd: 30_000,
     vol24Usd: 12_000,
+    txns24: 40,
     poolCreatedAt: new Date(NOW - 7_200_000),
     graduationPct: 42.5,
     graduated: false,

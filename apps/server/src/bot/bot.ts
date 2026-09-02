@@ -37,7 +37,8 @@ import {
   tokenLabel,
 } from '../poller/alertLogic.js';
 import { pollTokenNow } from '../poller/scheduler.js';
-import { rememberMemberName } from '../api/membership.js';
+import { memberDisplayName, rememberMemberName } from '../api/membership.js';
+import { findGroupCall, markCallDead, restoreCall } from '../verdict.js';
 import type { Config } from '../config.js';
 import { ingestMessage, upsertToken } from './ingest.js';
 
@@ -323,6 +324,81 @@ async function handleUnwatch(
   await ctx.reply(stopped ? `Stopped watching ${label}.` : `${label} wasn't watched.`);
 }
 
+/**
+ * `/overseer dead <symbol|CA>` — the member verdict (docs/decisions.md round
+ * 21), the chat half of the board's MARK DEAD button. Any member, group-wide,
+ * the same standing binning has.
+ *
+ * One line back, whatever happens: the board is what says this, and the chat is
+ * already noisy enough (Rick and Phanes own the summaries). Exported for tests.
+ */
+export async function handleDead(
+  db: Db,
+  ctx: Context,
+  group: GroupRow,
+  args: string[],
+  userId: number,
+): Promise<void> {
+  const query = args.join(' ').trim();
+  if (!query) {
+    await ctx.reply('Usage: /overseer dead <symbol or contract address>');
+    return;
+  }
+  const call = await findGroupCall(db, group.id, query);
+  if (!call) {
+    await ctx.reply(`No live call for ${query}.`);
+    return;
+  }
+  const label = tokenLabel(call.symbol, call.address);
+  // The command proves membership and carries the sender's name — the same
+  // moment `/overseer watch` uses to keep group_members current, and the name
+  // the verdict is about to be stamped with.
+  const name = ctx.from && !ctx.from.is_bot ? displayName(ctx.from) : null;
+  await rememberMemberName(db, group.id, userId, name);
+  const markedBy = name ?? (await memberDisplayName(db, group.id, userId));
+  const outcome = await markCallDead(db, group.id, call.callId, markedBy);
+  if (outcome !== 'marked') {
+    await ctx.reply(`No live call for ${label}.`);
+    return;
+  }
+  await ctx.reply(`${label} marked dead${markedBy ? ` by ${markedBy}` : ''}.`);
+}
+
+/**
+ * `/overseer undead <symbol|CA>` — the reversal, and the ONLY one: a
+ * member-marked death is exempt from every automatic revival, so no rule will
+ * ever put this call back on its own.
+ */
+export async function handleUndead(
+  db: Db,
+  ctx: Context,
+  group: GroupRow,
+  args: string[],
+): Promise<void> {
+  const query = args.join(' ').trim();
+  if (!query) {
+    await ctx.reply('Usage: /overseer undead <symbol or contract address>');
+    return;
+  }
+  const call = await findGroupCall(db, group.id, query);
+  if (!call) {
+    await ctx.reply(`No call for ${query} here.`);
+    return;
+  }
+  const label = tokenLabel(call.symbol, call.address);
+  const outcome = await restoreCall(db, group.id, call.callId);
+  if (outcome === 'restored') {
+    await ctx.reply(`${label} restored.`);
+    return;
+  }
+  // The verdict is still a member's, the coin is what has gone (amendment d).
+  if (outcome === 'token_dead') {
+    await ctx.reply(`${label}'s coin has died since — nothing to restore.`);
+    return;
+  }
+  await ctx.reply(`${label} isn't a member-marked death.`);
+}
+
 async function handleWatchlist(
   db: Db,
   ctx: Context,
@@ -496,6 +572,15 @@ export async function handleGroupieCommand(
       return true;
     case 'unwatch':
       await handleUnwatch(db, ctx, group, args.slice(1));
+      return true;
+    // Round 21: both take a <symbol|CA>, and an address argument here is a
+    // verdict, not a call — `true` keeps ingestion from re-posting the coin.
+    case 'dead':
+      await handleDead(db, ctx, group, args.slice(1), userId);
+      return true;
+    case 'undead':
+    case 'restore':
+      await handleUndead(db, ctx, group, args.slice(1));
       return true;
     case 'watchlist':
       await handleWatchlist(db, ctx, group, userId);

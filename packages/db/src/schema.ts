@@ -72,6 +72,25 @@ export const tokens = pgTable(
     mcapUsd: doublePrecision('mcap_usd'),
     liquidityUsd: doublePrecision('liquidity_usd'),
     vol24Usd: doublePrecision('vol24_usd'),
+    // Trades in the last 24h as of the last poll that could measure them
+    // (docs/decisions.md round 21). DexScreener's txns.h24 buys+sells, or
+    // GeckoTerminal's transactions.h24 for the pool-batched tiers. NULL means
+    // the reading carried no trade count — never zero trades, and the flatline
+    // rule treats it as no evidence.
+    txns24: integer('txns24'),
+    // Round 21's flatline clock: when the "far off peak, no volume, no trades"
+    // condition FIRST held continuously. Set on the reading that starts the
+    // run, cleared by any reading that breaks it (a null reading breaks it —
+    // unknown is not evidence), and six hours of it is the death.
+    flatSince: timestamp('flat_since', { withTimezone: true }),
+    // ...and the COVERAGE behind that clock (round 21 amendment a): how many
+    // polls have actually held the condition inside the current run, and when
+    // the last of them was. An outage is not six quiet hours, so elapsed time
+    // alone may not kill: the death also needs the readings and an unbroken
+    // run (a reading whose predecessor is older than the gap ceiling starts a
+    // new run). Both are reset by the same reading that clears flat_since.
+    flatReadings: integer('flat_readings').notNull().default(0),
+    flatLastAt: timestamp('flat_last_at', { withTimezone: true }),
     firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull().defaultNow(),
     lastPolledAt: timestamp('last_polled_at', { withTimezone: true }),
     // As-of marker for the cached market fields above: set ONLY when they are
@@ -116,6 +135,12 @@ export const calls = pgTable(
     // rail printed the last polled mcap and labelled it "at death"; this is the
     // real number, and null means the rail must not make the claim at all.
     mcapAtDeath: doublePrecision('mcap_at_death'),
+    // Round 21's member verdict: the display name of whoever marked this call
+    // dead, as the bot would print it. Non-null EXACTLY when death_reason is
+    // 'member' — every rule death leaves it null, which is what lets the board
+    // tell a verdict from a rule without parsing the reason string. A member
+    // we cannot name is still stamped (UNNAMED_MEMBER), never left null.
+    deathMarkedBy: text('death_marked_by'),
     // Null on a binned call = the SYSTEM binned it (rug auto-removal,
     // docs/decisions.md round 5); a member's bin always records their user id.
     binnedBy: bigint('binned_by', { mode: 'number' }),

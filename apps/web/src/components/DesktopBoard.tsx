@@ -5,6 +5,8 @@ import { deriveInPlay, mySlots } from '../derive';
 import { DISCOVERY_DORMANT_LINE, feedStatusText } from '../discovery';
 import type { DiscoverySummary } from '../discovery';
 import { fmtAge, fmtHours, fmtUsd } from '../format';
+import type { DeadProps } from '../dead';
+import { deadForCard } from '../dead';
 import { canReorder, hasMotionRoom, prefersReducedMotion, requestMotion } from '../motion';
 import type { Ceremony } from '../motion';
 import type { WatchProps } from '../watch';
@@ -75,6 +77,8 @@ interface DesktopBoardProps {
   binningId: number | null;
   onBin: (card: BoardCard) => void;
   watch: WatchProps;
+  /** MARK DEAD / RESTORE, the member verdict (docs/decisions.md round 21). */
+  dead: DeadProps;
   ceremonies: ReadonlyMap<number, Ceremony>;
   /** Cards that changed section on this update — the transit set. */
   moved: ReadonlySet<number>;
@@ -141,6 +145,7 @@ export function DesktopBoard({
   binningId,
   onBin,
   watch,
+  dead,
   ceremonies,
   moved,
   rangeSummary,
@@ -249,6 +254,7 @@ export function DesktopBoard({
                   size="desk"
                   links="hover"
                   watch={watchForCard(card, watch)}
+                  dead={deadForCard(card, dead)}
                   ceremony={ceremonies.get(card.callId)}
                 />
               ))}
@@ -282,6 +288,7 @@ export function DesktopBoard({
                 now={now}
                 breathing
                 watch={watchForCard(topRunner, watch)}
+                dead={deadForCard(topRunner, dead)}
               />
               {runners.length > 1 ? (
                 <div className="feed feed-flat feed-attached">
@@ -294,6 +301,7 @@ export function DesktopBoard({
                       size="desk"
                       links="hover"
                       watch={watchForCard(card, watch)}
+                      dead={deadForCard(card, dead)}
                       ceremony={ceremonies.get(card.callId)}
                     />
                   ))}
@@ -313,7 +321,12 @@ export function DesktopBoard({
         >
           {topRetraced ? (
             <div data-zone="retraced">
-              <RetracedCard card={topRetraced} now={now} watch={watchForCard(topRetraced, watch)} />
+              <RetracedCard
+                card={topRetraced}
+                now={now}
+                watch={watchForCard(topRetraced, watch)}
+                dead={deadForCard(topRetraced, dead)}
+              />
               {retraced.length > 1 ? (
                 <div className="feed feed-flat feed-attached">
                   {retraced.slice(1).map((card) => (
@@ -325,6 +338,7 @@ export function DesktopBoard({
                       size="desk"
                       links="hover"
                       watch={watchForCard(card, watch)}
+                      dead={deadForCard(card, dead)}
                       ceremony={ceremonies.get(card.callId)}
                     />
                   ))}
@@ -354,6 +368,7 @@ export function DesktopBoard({
                   now={now}
                   featured={index === 0}
                   watch={watchForCard(card, watch)}
+                  dead={deadForCard(card, dead)}
                 />
               ))}
             </div>
@@ -380,6 +395,7 @@ export function DesktopBoard({
                 rows={watchRows}
                 now={now}
                 watch={watch}
+                dead={dead}
                 mode="desk"
                 alertedAddress={alertedAddress}
               />
@@ -410,6 +426,7 @@ export function DesktopBoard({
                     onBin={onBin}
                     binning={binningId === card.callId}
                     watch={watchForCard(card, watch)}
+                    dead={deadForCard(card, dead)}
                   />
                 ))}
               </div>

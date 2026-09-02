@@ -1,7 +1,7 @@
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
 import type { Api } from 'grammy';
-import { groupMembers, groups, type Db } from '@groupie/db';
+import { calls, groupMembers, groups, mentions, type Db } from '@groupie/db';
 import type { Config } from '../config.js';
 import { devAuthEnabled, readSession } from './auth.js';
 
@@ -95,6 +95,41 @@ export async function rememberMemberName(
       target: [groupMembers.groupId, groupMembers.userId],
       set: { displayName },
     });
+}
+
+/**
+ * What ONE member goes by in this group — the single-member form of the
+ * watchlist's loadSlotHolderNames, and the same two sources in the same order:
+ * `group_members.display_name` (written by every membership check and chat
+ * command, round 16c), then their most recent mention here as the fallback for
+ * members cached before that column existed.
+ *
+ * Round 21 needs it for the member verdict: "marked dead by @name" is written
+ * into the row at the moment of the verdict, so the board never has to re-look
+ * up a name that may have changed since.
+ *
+ * null when neither source knows them — the caller decides what an unnamed
+ * member is called, and must not invent one.
+ */
+export async function memberDisplayName(
+  db: Db,
+  groupId: number,
+  userId: number,
+): Promise<string | null> {
+  const [member] = await db
+    .select({ displayName: groupMembers.displayName })
+    .from(groupMembers)
+    .where(and(eq(groupMembers.groupId, groupId), eq(groupMembers.userId, userId)))
+    .limit(1);
+  if (member?.displayName) return member.displayName;
+  const [mentioned] = await db
+    .select({ userName: mentions.userName })
+    .from(mentions)
+    .innerJoin(calls, eq(calls.id, mentions.callId))
+    .where(and(eq(calls.groupId, groupId), eq(mentions.userId, userId)))
+    .orderBy(desc(mentions.at))
+    .limit(1);
+  return mentioned?.userName ?? null;
 }
 
 /**

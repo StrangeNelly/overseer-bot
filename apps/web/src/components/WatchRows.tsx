@@ -17,6 +17,8 @@ function baselineNote(entry: WatchlistEntry): string | null {
   return `watched at ${fmtUsd(base)}${since}`;
 }
 import { hoverCapable, useAlertBloom } from '../motion';
+import type { DeadProps } from '../dead';
+import { deadForCard } from '../dead';
 import type { WatchProps } from '../watch';
 import { targetFromWatchEntry, watchForCard, watchFor } from '../watch';
 import { LinkPills } from './LinkPills';
@@ -41,6 +43,12 @@ interface WatchRowsProps {
   rows: WatchRow[];
   now: number;
   watch: WatchProps;
+  /**
+   * The member verdict (round 21). Only the rows that HAVE a card can carry it:
+   * a chat or Sleepers watch is not one of the group's calls, so there is no
+   * call to pronounce dead.
+   */
+  dead?: DeadProps;
   /** Desktop hovers to reveal pills; mobile taps a row open, one at a time. */
   mode: 'desk' | 'mobile';
   openKey?: string | null;
@@ -53,6 +61,7 @@ export function WatchRows({
   rows,
   now,
   watch,
+  dead,
   mode,
   openKey,
   onToggle,
@@ -93,6 +102,7 @@ export function WatchRows({
               onToggle={onToggle ? () => onToggle(row.entry.address) : undefined}
               slotNote={[slotLabel(row.entry), baselineNote(row.entry)].filter(Boolean).join(' · ')}
               watch={watchForCard(row.card, watch)}
+              dead={deadForCard(row.card, dead)}
               alerted={alerted}
             />
           );
