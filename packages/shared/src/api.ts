@@ -453,5 +453,11 @@ export interface SleepersResponse {
   minHours: SleeperDurationHours;
   /** Whether tokenized stocks were excluded from this payload (the default). */
   excludeStocks: boolean;
+  /**
+   * Whether only entries with an X account were served (the default). Echoed
+   * so every line that describes the payload's counts reads its filters from
+   * the payload itself, never from a toggle that may already be ahead of it.
+   */
+  xOnly: boolean;
   bands: SleeperBand[];
 }
