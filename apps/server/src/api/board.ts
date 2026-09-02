@@ -166,6 +166,8 @@ export interface WatchlistRow {
   token: TokenRow;
   addedBy: number;
   addedAt: Date;
+  /** watches.mcap_at_watch — the BUY OPP baseline (round 19), null if unmeasured. */
+  mcapAtWatch: number | null;
   callId: number | null;
   /** Status of that call — what lets a row say "died" instead of "no call". */
   callStatus: CallStatus | null;
@@ -190,6 +192,7 @@ export async function loadWatchlistRows(db: Db, groupId: number): Promise<Watchl
       token: tokens,
       addedBy: watches.addedBy,
       addedAt: watches.addedAt,
+      mcapAtWatch: watches.mcapAtWatch,
       callId: calls.id,
       callStatus: calls.status,
     })
@@ -230,6 +233,9 @@ export function toWatchlistEntry(
     liquidityUsd: token.liquidityUsd,
     dataAsOf: token.lastSnapshotAt?.toISOString() ?? null,
     sparkline,
+    // The BUY OPP baseline (round 19): what this coin was worth when the slot
+    // was taken, so the row can print the drawdown the alert measures.
+    mcapAtWatch: row.mcapAtWatch,
     addedBy: row.addedBy,
     addedByName: names.get(row.addedBy) ?? null,
     addedAt: row.addedAt.toISOString(),
@@ -515,6 +521,13 @@ export function createBoardRoutes(db: Db): Hono<ApiEnv> {
     // 409, not 403: nothing is forbidden, the member's three slots are full.
     // The message is the one the bot sends, so the two surfaces read alike.
     if (!outcome.ok) return c.json({ error: watchCapMessage(outcome.cap), cap: outcome.cap }, 409);
+
+    // Same immediate poll as the address route and the bot: a card's coin can
+    // be minutes behind its tier, and the round-19 baseline is only stamped
+    // from a contemporaneous reading — this is the one that lands it.
+    pollTokenNow(db, tokenId).catch((err) =>
+      console.error(`immediate poll failed for watched token ${tokenId}:`, err),
+    );
     return c.body(null, 204);
   });
 

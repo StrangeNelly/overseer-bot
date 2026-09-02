@@ -1,11 +1,20 @@
 import { ALERT_DEFAULTS, type AlertSettings, type AlertType } from '@groupie/shared';
 
 /**
- * Watchlist alert rules (docs/decisions.md round 4). Two questions, both asked
- * of the same mcap series:
+ * Watchlist alert rules (docs/decisions.md rounds 4 and 19). Two questions,
+ * asked of the same mcap series but from different reference points:
  *
  * - NUKE: did this coin drop hard AND fast? (raw 45s snapshots, minutes-scale)
- * - BUY OPP: has it retraced meaningfully from a peak it left SLOWLY? (hours)
+ * - BUY OPP: is it far enough below the mcap it had WHEN THE WATCH WAS SET?
+ *
+ * Round 19 moved buy-opp off the peak: a retrace from a high nobody was
+ * watching is trivia, while a drawdown from the member's own entry point is the
+ * thing they asked to hear about. So the baseline is `mcapAtWatch`, not a peak,
+ * and the alert fires ONCE per fall below the line: the caller carries an armed
+ * flag (watches.buy_opp_armed), this file says what it should be next, and a
+ * recovery above the line re-arms it. The state is explicit rather than read
+ * off the last two readings because a polling gap, or a pass where the nuke
+ * guard suppresses the message, must not silently consume the fall.
  *
  * Everything here is pure: alerts.ts loads the series and owns cooldowns,
  * inserts and delivery; this file only judges numbers and writes the message.
@@ -26,19 +35,51 @@ export interface AlertSnapshot {
   mcapUsd: number;
 }
 
-export interface AlertCandidate {
-  type: AlertType;
-  /** How far current sits below the peak, 0-100. */
-  dropPct: number;
-  peakMcapUsd: number;
-  peakAtMs: number;
-}
+/**
+ * What fired, and what it is measured against. The two types answer different
+ * questions, so they carry different evidence: a nuke points at the peak it
+ * fell from (and when), a buy-opp at the watch baseline (which has no reading
+ * of its own — it is the number the watch was taken at).
+ */
+export type AlertCandidate =
+  | {
+      type: 'nuke';
+      /** How far current sits below the peak, 0-100. */
+      dropPct: number;
+      peakMcapUsd: number;
+      peakAtMs: number;
+    }
+  | {
+      type: 'buy_opp';
+      /** How far current sits below the watch baseline, 0-100. */
+      dropPct: number;
+      mcapAtWatch: number;
+    };
 
 export interface EvaluateAlertsInput {
   nowMs: number;
   currentMcapUsd: number | null;
   recentSnapshots: AlertSnapshot[];
   settings: AlertSettings;
+  /**
+   * Market cap when the watch was activated (watches.mcap_at_watch). Null =
+   * we never measured one, and buy-opp stays silent rather than guessing a
+   * baseline out of the series.
+   */
+  mcapAtWatch?: number | null;
+  /** watches.buy_opp_armed as it stands now. */
+  buyOppArmed: boolean;
+}
+
+/** What the pass should do, and what it should remember afterwards. */
+export interface AlertVerdict {
+  candidates: AlertCandidate[];
+  /**
+   * The armed state to persist. Unchanged whenever the rule could not judge
+   * the coin at all (bad reading, no baseline): an unjudged pass must not
+   * spend the group's one message for this fall.
+   */
+  buyOppArmed: boolean;
 }
 
 interface Peak {
@@ -56,9 +97,8 @@ function usable(snapshot: AlertSnapshot): boolean {
 /**
  * Highest mcap at or after `sinceMs`, plus how many readings back it.
  *
- * Ties keep the LATEST occurrence: a coin that sat at its high for an hour
- * started declining when it last left that high, and the buy-opp rule dates the
- * decline from exactly this timestamp.
+ * Ties keep the LATEST occurrence: the nuke message dates the drop from when
+ * the coin last left its window high.
  */
 function peakSince(snapshots: AlertSnapshot[], sinceMs: number): Peak | null {
   let mcapUsd = -Infinity;
@@ -75,35 +115,34 @@ function peakSince(snapshots: AlertSnapshot[], sinceMs: number): Peak | null {
   return count === 0 ? null : { mcapUsd, atMs, count };
 }
 
-/** Drop from `peak` down to `current`, as a 0-100 percentage. */
-function dropPct(currentMcapUsd: number, peakMcapUsd: number): number {
-  return (1 - currentMcapUsd / peakMcapUsd) * 100;
+/** Drop from `from` down to `current`, as a 0-100 percentage. */
+function dropPct(currentMcapUsd: number, fromMcapUsd: number): number {
+  return (1 - currentMcapUsd / fromMcapUsd) * 100;
 }
 
-function breaches(currentMcapUsd: number, peakMcapUsd: number, thresholdPct: number): boolean {
-  return currentMcapUsd <= peakMcapUsd * (1 - thresholdPct / 100);
+function breaches(currentMcapUsd: number, fromMcapUsd: number, thresholdPct: number): boolean {
+  return currentMcapUsd <= fromMcapUsd * (1 - thresholdPct / 100);
 }
 
 /**
- * Alerts this coin qualifies for right now, given the group's settings.
+ * Alerts this coin qualifies for right now, plus the armed state to remember.
  *
- * Insufficient data never fires: no current mcap, fewer than three readings in
- * the nuke window, or nothing at all in the peak window each mean "we cannot
- * tell", not "no alert-worthy move happened".
+ * Insufficient data never fires and never moves the state: no current mcap, no
+ * watch baseline, or fewer than three readings in the nuke window each mean
+ * "we cannot tell", not "no alert-worthy move happened".
  *
  * A crash in progress is NOT a buy signal, so the nuke condition suppresses
  * buy-opp — and it suppresses on the price condition alone, even when thin data
- * blocks the nuke alert itself. Both types together would mean a coin that
- * nuked in the last 15 minutes off a peak that is hours old; the guard is what
- * makes at most one of them true.
+ * blocks the nuke alert itself. The watch stays ARMED through that suppression,
+ * so the fall still gets its one message once the crash stops being one.
  */
-export function evaluateAlerts(input: EvaluateAlertsInput): AlertCandidate[] {
-  const { nowMs, currentMcapUsd, settings } = input;
-  const out: AlertCandidate[] = [];
+export function evaluateAlerts(input: EvaluateAlertsInput): AlertVerdict {
+  const { nowMs, currentMcapUsd, settings, buyOppArmed } = input;
+  const candidates: AlertCandidate[] = [];
   // A zero/negative "market cap" is a bad reading, not a total collapse — death
   // detection owns the collapse case and has real evidence (liquidity) for it.
   if (currentMcapUsd === null || !Number.isFinite(currentMcapUsd) || currentMcapUsd <= 0) {
-    return out;
+    return { candidates, buyOppArmed };
   }
   const snapshots = input.recentSnapshots.filter(usable);
 
@@ -111,7 +150,7 @@ export function evaluateAlerts(input: EvaluateAlertsInput): AlertCandidate[] {
   const nuking =
     nukePeak !== null && breaches(currentMcapUsd, nukePeak.mcapUsd, settings.nukeDropPct);
   if (nukePeak !== null && nuking && nukePeak.count >= MIN_NUKE_SNAPSHOTS) {
-    out.push({
+    candidates.push({
       type: 'nuke',
       dropPct: dropPct(currentMcapUsd, nukePeak.mcapUsd),
       peakMcapUsd: nukePeak.mcapUsd,
@@ -119,21 +158,24 @@ export function evaluateAlerts(input: EvaluateAlertsInput): AlertCandidate[] {
     });
   }
 
-  if (!nuking) {
-    const buyPeak = peakSince(snapshots, nowMs - settings.buyPeakWindowHours * HOUR_MS);
-    const oldEnough =
-      buyPeak !== null && nowMs - buyPeak.atMs >= settings.buyMinDeclineHours * HOUR_MS;
-    if (buyPeak !== null && oldEnough && breaches(currentMcapUsd, buyPeak.mcapUsd, settings.buyRetracePct)) {
-      out.push({
-        type: 'buy_opp',
-        dropPct: dropPct(currentMcapUsd, buyPeak.mcapUsd),
-        peakMcapUsd: buyPeak.mcapUsd,
-        peakAtMs: buyPeak.atMs,
-      });
-    }
+  // Round 19: the baseline is the mcap the watch was taken at, and the message
+  // is worth exactly one per fall below the line — hence the armed flag rather
+  // than a state test that would repeat every cooldown for as long as the coin
+  // stayed down.
+  const baseline = input.mcapAtWatch;
+  if (typeof baseline !== 'number' || !Number.isFinite(baseline) || baseline <= 0) {
+    return { candidates, buyOppArmed };
   }
-
-  return out;
+  const line = baseline * (1 - settings.buyRetracePct / 100);
+  if (currentMcapUsd > line) return { candidates, buyOppArmed: true };
+  if (!buyOppArmed) return { candidates, buyOppArmed: false };
+  if (nuking) return { candidates, buyOppArmed: true };
+  candidates.push({
+    type: 'buy_opp',
+    dropPct: dropPct(currentMcapUsd, baseline),
+    mcapAtWatch: baseline,
+  });
+  return { candidates, buyOppArmed: false };
 }
 
 /**
@@ -156,6 +198,9 @@ export function underCooldown(
  * read (a hand-edited or legacy settings blob must never disable alerting or
  * make it fire on every tick).
  */
+// buyPeakWindowHours / buyMinDeclineHours are RETIRED from the rule (round 19)
+// and kept only so stored group settings and old `/overseer set buyopp <pct>
+// <hours>` invocations still merge and clamp instead of failing.
 export const ALERT_LIMITS: Record<keyof AlertSettings, { min: number; max: number }> = {
   nukeDropPct: { min: 5, max: 95 },
   nukeWindowMin: { min: 5, max: 60 },
@@ -254,36 +299,34 @@ export interface AlertMessageArgs {
   /** Symbol when known, otherwise a shortened address. */
   label: string;
   dropPct: number;
-  peakMcapUsd: number;
+  /** What the drop is measured from: the window peak, or the watch baseline. */
+  fromMcapUsd: number;
   currentMcapUsd: number;
-  peakAtMs: number;
+  /** Nuke only: when that peak was set, for the "in 14m" clause. */
+  peakAtMs?: number;
   nowMs: number;
-  /** Nuke only: omitted or null prints no LP segment. */
+  /** Omitted or null prints no LP segment. */
   liquidityUsd?: number | null;
-  /** Buy-opp: the lookback the peak was found in ("from 24h high"). */
-  peakWindowHours?: number;
 }
 
 /**
  * The exact text posted into the group. Plain text with ONE leading emoji: no
  * markdown, so a symbol containing `*` or `_` can never break the send.
+ *
+ * Numbers only, never advice (the neutral-framing law): a buy-opp message says
+ * where the coin was when the group started watching and where it is now, and
+ * leaves the reading to the reader.
  */
 export function alertMessage(type: AlertType, args: AlertMessageArgs): string {
   const pct = Math.round(Math.abs(args.dropPct));
-  const elapsed = fmtElapsed(args.nowMs - args.peakAtMs);
+  const lp =
+    typeof args.liquidityUsd === 'number' && Number.isFinite(args.liquidityUsd)
+      ? ` · LP ${fmtUsd(args.liquidityUsd)}`
+      : '';
+  const move = `${fmtUsd(args.fromMcapUsd)} → ${fmtUsd(args.currentMcapUsd)}`;
   if (type === 'nuke') {
-    const lp =
-      typeof args.liquidityUsd === 'number' && Number.isFinite(args.liquidityUsd)
-        ? ` · LP ${fmtUsd(args.liquidityUsd)}`
-        : '';
-    return (
-      `🚨 NUKE: ${args.label} -${pct}% in ${elapsed} · ` +
-      `${fmtUsd(args.peakMcapUsd)} → ${fmtUsd(args.currentMcapUsd)}${lp}`
-    );
+    const elapsed = fmtElapsed(args.nowMs - (args.peakAtMs ?? args.nowMs));
+    return `🚨 NUKE: ${args.label} -${pct}% in ${elapsed} · ${move}${lp}`;
   }
-  const window = Math.round(args.peakWindowHours ?? ALERT_DEFAULTS.buyPeakWindowHours);
-  return (
-    `🟢 BUY OPP: ${args.label} -${pct}% from ${window}h high ${fmtUsd(args.peakMcapUsd)} ` +
-    `(peaked ${elapsed} ago) · now ${fmtUsd(args.currentMcapUsd)}`
-  );
+  return `🟢 BUY OPP: ${args.label} -${pct}% since watched (${move})${lp}`;
 }

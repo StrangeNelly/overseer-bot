@@ -153,11 +153,18 @@ export const ALERT_DEFAULTS = {
   /** Fired when the drop over nukeWindowMin exceeds this. */
   nukeDropPct: 40,
   nukeWindowMin: 15,
-  /** Fired when the retrace from the peak exceeds this. */
+  /**
+   * Round 19: fired when the market cap crosses this far BELOW the mcap the
+   * coin had when the watch was set (watches.mcap_at_watch) — not below a peak.
+   */
   buyRetracePct: 30,
-  /** The peak is searched within this lookback. */
+  /**
+   * RETIRED by round 19 (the buy-opp rule ignores both). Kept as keys so stored
+   * group settings and old `/overseer set buyopp <pct> <hours>` invocations
+   * still merge and clamp instead of failing; remove them only with a migration
+   * that rewrites groups.settings.alerts.
+   */
   buyPeakWindowHours: 24,
-  /** The peak must be at least this old: a slow bleed, not a nuke. */
   buyMinDeclineHours: 1,
   /** Per (token, type). */
   cooldownMin: 60,

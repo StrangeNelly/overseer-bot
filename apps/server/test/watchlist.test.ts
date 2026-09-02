@@ -7,6 +7,7 @@ import { SQL as SQLClass } from 'drizzle-orm/sql/sql';
 import {
   calls as callsTable,
   groupMembers,
+  groups,
   mentions,
   sleeperEntries,
   sleeperSeen,
@@ -15,6 +16,7 @@ import {
   type Db,
 } from '@groupie/db';
 import {
+  ALERT_DEFAULTS,
   ROBINHOOD_CHAIN_ID,
   WATCH_CAP_PER_MEMBER,
   tradingLinks,
@@ -23,11 +25,12 @@ import {
   type SleepersResponse,
 } from '@groupie/shared';
 import { createBoardRoutes, parseAddress } from '../src/api/board.js';
-import { handleWatch } from '../src/bot/bot.js';
+import { alertsSummary, handleSet, handleWatch } from '../src/bot/bot.js';
 import { createSleeperRoutes } from '../src/api/sleepers.js';
 import type { ApiEnv, GroupRow } from '../src/api/membership.js';
 import { subscribe, type GroupieEvent } from '../src/events.js';
 import { activeWatchCount, addWatch, removeWatch } from '../src/watchlist.js';
+import { backfillBaselines } from '../src/poller/alerts.js';
 
 /**
  * The watch button and `/overseer watch` share one implementation
@@ -136,6 +139,7 @@ function makeDb(script: Script = {}): { db: Db; calls: DbCall[] } {
     if (table === callsTable) return 'calls';
     if (table === mentions) return 'mentions';
     if (table === groupMembers) return 'groupMembers';
+    if (table === groups) return 'groups';
     if (table === sleeperEntries) return 'sleeperEntries';
     if (table === sleeperSeen) return 'sleeperSeen';
     return 'unknown';
@@ -165,10 +169,31 @@ const find = (calls: DbCall[], key: string) => calls.filter((c) => c.key === key
 /** count(*) comes back from postgres-js as a string — script it as one. */
 const count = (n: number): unknown[][] => [[{ n: String(n) }]];
 
-/** The existence probe answers first, the cap count second. */
-function watchScript(options: { existing?: { active: boolean }; held: number }): Script {
+/**
+ * The existence probe answers first, the cap count second; `select:tokens` is
+ * addWatch's own read of the cached market state (the round-19 baseline, which
+ * is only stamped when that cache is contemporaneous). `existing` may carry the
+ * row's stored baseline, which an ACTIVE row keeps.
+ */
+function watchScript(options: {
+  existing?: { active: boolean; mcapAtWatch?: number | null };
+  held: number;
+  mcapUsd?: number | null;
+  phase?: string;
+  lastSnapshotAt?: Date | string | null;
+}): Script {
   return {
     'select:watches': [options.existing ? [options.existing] : [], [{ n: String(options.held) }]],
+    'select:tokens': [
+      [
+        {
+          mcapUsd: options.mcapUsd ?? null,
+          phase: options.phase ?? 'graduated',
+          lastSnapshotAt:
+            options.lastSnapshotAt === undefined ? new Date() : options.lastSnapshotAt,
+        },
+      ],
+    ],
     'insert:watches': [[]],
   };
 }
@@ -222,11 +247,12 @@ describe('addWatch — the per-member cap', () => {
   it('adds the third watch', async () => {
     const { db, calls } = makeDb(watchScript({ held: 2 }));
     const outcome = await addWatch(db, GROUP_ID, TOKEN_ID, USER_ID);
-    expect(outcome).toEqual({ ok: true, alreadyActive: false });
+    expect(outcome).toEqual({ ok: true, alreadyActive: false, mcapAtWatch: null });
     expect(find(calls, 'insert:watches')[0]?.values).toEqual({
       groupId: GROUP_ID,
       tokenId: TOKEN_ID,
       addedBy: USER_ID,
+      mcapAtWatch: null,
     });
   });
 
@@ -261,11 +287,16 @@ describe('addWatch — the per-member cap', () => {
     // It consumes no slot: round 4's conflict clause leaves credit and clock
     // alone, so refusing here would lie about the state of the board.
     const { db, calls } = makeDb(
-      watchScript({ existing: { active: true }, held: WATCH_CAP_PER_MEMBER }),
+      watchScript({
+        existing: { active: true, mcapAtWatch: 120_000 },
+        held: WATCH_CAP_PER_MEMBER,
+      }),
     );
     expect(await addWatch(db, GROUP_ID, TOKEN_ID, USER_ID)).toEqual({
       ok: true,
       alreadyActive: true,
+      // The ORIGINAL baseline: nothing about an active watch moves.
+      mcapAtWatch: 120_000,
     });
     expect(find(calls, 'insert:watches')).toHaveLength(0);
     // The existence probe answered; the cap was never asked.
@@ -306,15 +337,27 @@ describe('addWatch — the per-member cap', () => {
 });
 
 describe('addWatch — row semantics kept from round 4', () => {
-  it('the conflict clause keeps the original credit and clock when active', async () => {
+  it('the conflict clause keeps the original credit, clock and baseline when active', async () => {
     const { db, calls } = makeDb(watchScript({ held: 0 }));
     await addWatch(db, GROUP_ID, TOKEN_ID, USER_ID);
     const set = find(calls, 'insert:watches')[0]?.conflict?.set ?? {};
-    expect(Object.keys(set).sort()).toEqual(['active', 'addedAt', 'addedBy']);
+    expect(Object.keys(set).sort()).toEqual([
+      'active',
+      'addedAt',
+      'addedBy',
+      'buyOppArmed',
+      'mcapAtWatch',
+    ]);
     expect(set.active).toBe(true);
     // SET expressions see the OLD row: only a stopped watch takes new credit.
     expect(renderSql(set.addedBy)).toContain('case when');
     expect(renderSql(set.addedAt)).toContain('case when');
+    // Round 19: the baseline moves with them, and only with them.
+    expect(renderSql(set.mcapAtWatch)).toContain('case when');
+    expect(renderSql(set.mcapAtWatch)).toContain('double precision');
+    // ...and so does the armed flag: a re-taken slot starts able to fire.
+    expect(renderSql(set.buyOppArmed)).toContain('case when');
+    expect(renderSql(set.buyOppArmed)).toContain('else true end');
   });
 
   it('publishes watch_changed for a real add, scoped to the group', async () => {
@@ -335,6 +378,221 @@ describe('addWatch — row semantics kept from round 4', () => {
     const { db } = makeDb(watchScript({ held: WATCH_CAP_PER_MEMBER }));
     const { events } = await capture(() => addWatch(db, GROUP_ID, TOKEN_ID, USER_ID));
     expect(events).toEqual([]);
+  });
+});
+
+/**
+ * The BUY OPP baseline (docs/decisions.md round 19). A watch is stamped with
+ * the coin's cached market cap the moment it is ACTIVATED, and the alert
+ * measures its drawdown from that number — never from a peak.
+ */
+describe('addWatch — the round-19 baseline', () => {
+  it('stamps the token s cached mcap on a fresh watch', async () => {
+    const { db, calls } = makeDb(watchScript({ held: 0, mcapUsd: 120_000 }));
+    const outcome = await addWatch(db, GROUP_ID, TOKEN_ID, USER_ID);
+    expect(outcome).toEqual({ ok: true, alreadyActive: false, mcapAtWatch: 120_000 });
+    expect(find(calls, 'insert:watches')[0]?.values).toMatchObject({ mcapAtWatch: 120_000 });
+  });
+
+  it('reads the token s phase and as-of marker alongside it', async () => {
+    // The cache is only the member's entry point when it is a reading from just
+    // now: a dead coin's cache is frozen, and a quiet coin's is up to an hour
+    // old (POLL_TIERS.idleSeconds), so neither may be stamped as a baseline.
+    const { db } = makeDb(
+      watchScript({
+        held: 0,
+        mcapUsd: 6_000,
+        phase: 'dead',
+        lastSnapshotAt: new Date(),
+      }),
+    );
+    expect(await addWatch(db, GROUP_ID, TOKEN_ID, USER_ID)).toMatchObject({ mcapAtWatch: null });
+  });
+
+  it('refuses a stale cache — the number the member never saw', async () => {
+    // 2 x POLL_TIERS.freshSeconds is the whole allowance; five minutes is an
+    // active-tier coin, and the immediate poll lands a real reading in seconds.
+    const { db, calls } = makeDb(
+      watchScript({
+        held: 0,
+        mcapUsd: 120_000,
+        lastSnapshotAt: new Date(Date.now() - 5 * 60_000),
+      }),
+    );
+    expect(await addWatch(db, GROUP_ID, TOKEN_ID, USER_ID)).toMatchObject({ mcapAtWatch: null });
+    expect(find(calls, 'insert:watches')[0]?.values).toMatchObject({ mcapAtWatch: null });
+  });
+
+  it('accepts a cache inside the allowance, as a Date or as a driver string', async () => {
+    const at = new Date(Date.now() - 60_000);
+    for (const lastSnapshotAt of [at, at.toISOString()]) {
+      const { db } = makeDb(watchScript({ held: 0, mcapUsd: 120_000, lastSnapshotAt }));
+      expect(await addWatch(db, GROUP_ID, TOKEN_ID, USER_ID)).toMatchObject({
+        mcapAtWatch: 120_000,
+      });
+    }
+  });
+
+  it('refuses a cache with no as-of marker at all', async () => {
+    for (const lastSnapshotAt of [null, 'not-a-date']) {
+      const { db } = makeDb(watchScript({ held: 0, mcapUsd: 120_000, lastSnapshotAt }));
+      expect(await addWatch(db, GROUP_ID, TOKEN_ID, USER_ID)).toMatchObject({ mcapAtWatch: null });
+    }
+  });
+
+  it('reads that mcap inside the transaction, for THIS token', async () => {
+    const { db, calls } = makeDb(watchScript({ held: 0, mcapUsd: 120_000 }));
+    await addWatch(db, GROUP_ID, TOKEN_ID, USER_ID);
+    const read = find(calls, 'select:tokens')[0];
+    expect(whereParams(read)).toEqual([TOKEN_ID]);
+    // ...under the same advisory lock as the cap check, before the insert.
+    expect(calls.map((c) => c.key)).toEqual([
+      'execute',
+      'select:watches',
+      'select:watches',
+      'select:tokens',
+      'insert:watches',
+    ]);
+  });
+
+  it('stamps null for a coin nobody has priced yet — the pass backfills it', async () => {
+    const { db, calls } = makeDb(watchScript({ held: 0, mcapUsd: null }));
+    expect(await addWatch(db, GROUP_ID, TOKEN_ID, USER_ID)).toMatchObject({ mcapAtWatch: null });
+    expect(find(calls, 'insert:watches')[0]?.values).toMatchObject({ mcapAtWatch: null });
+  });
+
+  it('treats a zero or junk market cap as unknown, never as a baseline', async () => {
+    // A $0 baseline would make every later reading an infinite drawdown.
+    for (const mcapUsd of [0, -1, Number.NaN]) {
+      const { db } = makeDb(watchScript({ held: 0, mcapUsd }));
+      expect(await addWatch(db, GROUP_ID, TOKEN_ID, USER_ID)).toMatchObject({
+        mcapAtWatch: null,
+      });
+    }
+  });
+
+  it('re-stamps when a STOPPED watch is re-activated — new watch, new baseline', async () => {
+    const { db, calls } = makeDb(
+      watchScript({
+        existing: { active: false, mcapAtWatch: 500_000 },
+        held: 0,
+        mcapUsd: 80_000,
+      }),
+    );
+    expect(await addWatch(db, GROUP_ID, TOKEN_ID, USER_ID)).toMatchObject({
+      mcapAtWatch: 80_000,
+    });
+    // The conflict clause carries today's number for the else branch.
+    const set = find(calls, 'insert:watches')[0]?.conflict?.set ?? {};
+    expect(dialect.sqlToQuery(set.mcapAtWatch as SQL).params).toContain(80_000);
+  });
+
+  it('does NOT re-stamp a watch that is already active, and reads no token at all', async () => {
+    const { db, calls } = makeDb(
+      watchScript({ existing: { active: true, mcapAtWatch: 500_000 }, held: 0, mcapUsd: 80_000 }),
+    );
+    expect(await addWatch(db, GROUP_ID, TOKEN_ID, USER_ID)).toEqual({
+      ok: true,
+      alreadyActive: true,
+      mcapAtWatch: 500_000,
+    });
+    expect(find(calls, 'select:tokens')).toHaveLength(0);
+    expect(find(calls, 'insert:watches')).toHaveLength(0);
+  });
+
+  it('reports the baseline the DATABASE landed on, not the one it computed', async () => {
+    // Two members racing onto the same token: the loser's insert is a no-op and
+    // the winner's baseline is what the row holds, so that is what is reported.
+    const { db } = makeDb({
+      ...watchScript({ held: 0, mcapUsd: 80_000 }),
+      'insert:watches': [[{ mcapAtWatch: 500_000 }]],
+    });
+    expect(await addWatch(db, GROUP_ID, TOKEN_ID, USER_ID)).toMatchObject({
+      mcapAtWatch: 500_000,
+    });
+  });
+
+  it('reads a driver string baseline as a number', async () => {
+    const { db } = makeDb({
+      ...watchScript({ held: 0 }),
+      'select:tokens': [[{ mcapUsd: '120000', phase: 'graduated', lastSnapshotAt: new Date() }]],
+    });
+    expect(await addWatch(db, GROUP_ID, TOKEN_ID, USER_ID)).toMatchObject({
+      mcapAtWatch: 120_000,
+    });
+  });
+});
+
+/**
+ * A watch taken on a coin nobody had priced yet has no baseline, so the alert
+ * pass fills it from the first reading AFTER the watch (round 19) — the same
+ * honesty as mcap-at-call, and the closest measurement to the moment the member
+ * asked for the coin.
+ */
+describe('backfillBaselines', () => {
+  const statement = async (tokenIds: number[] = [TOKEN_ID]) => {
+    const { db, calls } = makeDb();
+    await backfillBaselines(db, tokenIds);
+    const execs = find(calls, 'execute');
+    expect(execs).toHaveLength(1);
+    return dialect.sqlToQuery(execs[0]?.where as SQL);
+  };
+
+  /**
+   * Round 19 review, the finding that killed every alert pass: Postgres hides
+   * the UPDATE target from subqueries in the FROM list, so an `update watches
+   * ... from lateral (... where snapshots.token_id = watches.token_id)` is a
+   * parse error — and the pass throws before judging any nuke either. The
+   * statement may only name `watches` from SET and WHERE.
+   */
+  it('never joins the target table into a FROM clause', async () => {
+    const { sql: text } = await statement();
+    expect(text).not.toContain('lateral');
+    expect(text.slice(text.indexOf('set '))).not.toContain(' from "watches"');
+    // The correlation lives in a scalar subquery, guarded by the same EXISTS so
+    // a watch with no reading yet is not "filled" with null.
+    expect(text).toContain('exists (');
+  });
+
+  it('never overwrites a baseline that is already stamped', async () => {
+    const { sql: text } = await statement();
+    expect(text).toContain('update "watches"');
+    expect(text).toContain('"watches"."mcap_at_watch" is null');
+  });
+
+  it('takes the FIRST reading at or after the watch was added', async () => {
+    const { sql: text } = await statement();
+    expect(text).toContain('"snapshots"."at" >= "watches"."added_at"');
+    expect(text).toContain('order by "snapshots"."at"');
+    expect(text).toContain('limit 1');
+    // A null or zero reading is not a market cap: it would poison the line.
+    expect(text).toContain('"snapshots"."mcap_usd" is not null');
+    expect(text).toContain('"snapshots"."mcap_usd" > 0');
+  });
+
+  it('touches only ACTIVE watches, and narrows to the tokens in play', async () => {
+    const { sql: text, params } = await statement([TOKEN_ID, 88]);
+    expect(text).toContain('"watches"."active"');
+    expect(params).toContain(TOKEN_ID);
+    expect(params).toContain(88);
+  });
+
+  it('hands back what it filled, so this pass can judge the watch it stamped', async () => {
+    const { sql: text } = await statement();
+    expect(text).toContain('returning');
+    expect(text).toContain('"watches"."mcap_at_watch"');
+  });
+
+  it('is one statement, not one per watch', async () => {
+    const { db, calls } = makeDb();
+    await backfillBaselines(db, [1, 2, 3, 4]);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('asks nothing when no watch needs a baseline', async () => {
+    const { db, calls } = makeDb();
+    expect(await backfillBaselines(db, [])).toEqual(new Map());
+    expect(calls).toHaveLength(0);
   });
 });
 
@@ -394,7 +652,14 @@ function testApp(db: Db): Hono<ApiEnv> {
   return app;
 }
 
-const KNOWN_TOKEN = [[{ id: TOKEN_ID, address: '0xabc', symbol: 'TKN' }]];
+/**
+ * findGroupToken's hit, then nothing: addWatch's own market read finds no row
+ * (so the baseline stays null) and pollTokenNow's read finds nothing to poll.
+ */
+const KNOWN_TOKEN = [[{ id: TOKEN_ID, address: '0xabc', symbol: 'TKN' }], []];
+
+/** Let the route's fire-and-forget immediate poll reach the database fake. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe('POST /api/g/:slug/tokens/:tokenId/watch', () => {
   it('204s and records the session member as the adder', async () => {
@@ -419,6 +684,26 @@ describe('POST /api/g/:slug/tokens/:tokenId/watch', () => {
       error: watchCapMessage(WATCH_CAP_PER_MEMBER),
       cap: WATCH_CAP_PER_MEMBER,
     });
+  });
+
+  /**
+   * Round 19 review: a card's coin can be minutes behind its poll tier, and the
+   * baseline is only stamped from a contemporaneous reading — so this route
+   * kicks the same immediate poll the address route and the bot do, and the
+   * backfill stamps the reading it lands.
+   */
+  it('kicks an immediate poll of the token it just watched', async () => {
+    const { db, calls } = makeDb({ ...watchScript({ held: 0 }), 'select:tokens': KNOWN_TOKEN });
+    const res = await testApp(db).request(`/api/g/${SLUG}/tokens/${TOKEN_ID}/watch`, {
+      method: 'POST',
+    });
+    expect(res.status).toBe(204);
+    await settle();
+    // the group-scoped lookup, addWatch's market read, then the poll's own.
+    const reads = find(calls, 'select:tokens');
+    expect(reads).toHaveLength(3);
+    expect(whereParams(reads[2])).toEqual([TOKEN_ID]);
+    expect(whereText(reads[2])).not.toContain('exists');
   });
 
   it('404s an unknown token without touching watches', async () => {
@@ -597,6 +882,7 @@ describe('POST /api/g/:slug/watch (by address)', () => {
       groupId: GROUP_ID,
       tokenId: TOKEN_ID,
       addedBy: USER_ID,
+      mcapAtWatch: null,
     });
   });
 
@@ -671,6 +957,7 @@ describe('POST /api/g/:slug/watch (by address)', () => {
       groupId: GROUP_ID,
       tokenId: TOKEN_ID,
       addedBy: USER_ID,
+      mcapAtWatch: null,
     });
   });
 
@@ -740,12 +1027,140 @@ describe('/overseer watch — the bot mirrors the cap rule', () => {
     expect(find(calls, 'insert:watches')).toHaveLength(0);
   });
 
+  /**
+   * Round 19: the confirmation names the baseline every later BUY OPP is
+   * measured against, so the member knows what the alert will compare to.
+   */
+  it('names the baseline it just stamped', async () => {
+    const { db } = makeDb({
+      // by-address lookup, addWatch's mcap read, then pollTokenNow finds nothing.
+      'select:tokens': [
+        [{ id: TOKEN_ID, symbol: 'TKN' }],
+        [{ mcapUsd: 120_000, phase: 'graduated', lastSnapshotAt: new Date() }],
+        [],
+      ],
+      // isWatched: no; pre-check count; addWatch's probe; its count; slots held.
+      'select:watches': [[], count(0)[0] ?? [], [], count(0)[0] ?? [], count(1)[0] ?? []],
+      'insert:watches': [[]],
+    });
+    const [reply] = await watch(db);
+    expect(reply).toContain('Watching TKN from $120K');
+    expect(reply).toContain('buy-opp ≥30% below the mcap at watch');
+    // The retired peak window must not be quoted at anyone any more.
+    expect(reply).not.toContain('24h');
+    expect(reply).not.toContain('retrace over');
+  });
+
+  it('omits the baseline clause when the coin has never been priced', async () => {
+    const { db } = makeDb({
+      'select:tokens': [
+        [{ id: TOKEN_ID, symbol: 'TKN' }],
+        [{ mcapUsd: null, phase: 'graduated', lastSnapshotAt: new Date() }],
+        [],
+      ],
+      'select:watches': [[], count(0)[0] ?? [], [], count(0)[0] ?? [], count(1)[0] ?? []],
+      'insert:watches': [[]],
+    });
+    const [reply] = await watch(db);
+    expect(reply).toContain('Watching TKN (1/3 of your slots)');
+    expect(reply).not.toContain('from $');
+  });
+
   it('asks for the usage line when the argument is not an address', async () => {
     const { db, calls } = makeDb();
     replies.length = 0;
     await handleWatch(db, ctx, GROUP, ['nope'], USER_ID);
     expect(replies[0]).toContain('Usage:');
     expect(calls).toHaveLength(0);
+  });
+});
+
+/**
+ * Round 19 retired the buy-opp peak window from the RULE, but the settings key
+ * survives so stored blobs and old `/overseer set buyopp <pct> <hours>` muscle
+ * memory still work. What must never happen is storing that trailing number as
+ * a knob: it would read like a live setting nothing consults.
+ */
+describe('/overseer set buyopp — the round-19 shape', () => {
+  const replies: string[] = [];
+  const ctx = { reply: async (text: string) => void replies.push(text) } as unknown as Context;
+
+  /** The `settings` patch the update carried, as the merged jsonb parameter. */
+  const patchOf = (call: DbCall | undefined): Record<string, unknown> => {
+    const value = call?.set?.settings;
+    if (!is(value, SQLClass)) return {};
+    const json = (dialect.sqlToQuery(value).params as unknown[]).find(
+      (p) => typeof p === 'string' && p.startsWith('{'),
+    ) as string | undefined;
+    return json ? (JSON.parse(json) as Record<string, unknown>) : {};
+  };
+
+  const set = async (db: Db, args: string[]) => {
+    replies.length = 0;
+    await handleSet(db, ctx, GROUP, args);
+    return replies;
+  };
+
+  it('persists the percentage, and nothing else', async () => {
+    const { db, calls } = makeDb({ 'update:groups': [[{ settings: {} }]] });
+    await set(db, ['buyopp', '35']);
+    expect(patchOf(find(calls, 'update:groups')[0])).toEqual({ buyRetracePct: 35 });
+  });
+
+  it('accepts the legacy <hours> argument and drops it on the floor', async () => {
+    const { db, calls } = makeDb({ 'update:groups': [[{ settings: {} }]] });
+    await set(db, ['buyopp', '35', '24']);
+    const patch = patchOf(find(calls, 'update:groups')[0]);
+    expect(patch).toEqual({ buyRetracePct: 35 });
+    expect(patch).not.toHaveProperty('buyPeakWindowHours');
+    expect(patch).not.toHaveProperty('buyMinDeclineHours');
+  });
+
+  it('clamps a percentage out of range instead of storing it', async () => {
+    const { db, calls } = makeDb({ 'update:groups': [[{ settings: {} }]] });
+    await set(db, ['buyopp', '999']);
+    expect(patchOf(find(calls, 'update:groups')[0])).toEqual({ buyRetracePct: 95 });
+  });
+
+  it('answers with the usage line and writes nothing without a percentage', async () => {
+    for (const args of [['buyopp'], ['buyopp', 'lots'], ['nonsense', '35']]) {
+      const { db, calls } = makeDb();
+      const [reply] = await set(db, args);
+      expect(reply).toContain('Usage:');
+      expect(reply).toContain('/overseer set buyopp <pct 5-95>');
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  it('still takes both arguments for nuke', async () => {
+    const { db, calls } = makeDb({ 'update:groups': [[{ settings: {} }]] });
+    await set(db, ['nuke', '50', '20']);
+    expect(patchOf(find(calls, 'update:groups')[0])).toEqual({
+      nukeDropPct: 50,
+      nukeWindowMin: 20,
+    });
+  });
+
+  it('replies with the summary the group now lives under', async () => {
+    const { db } = makeDb({ 'update:groups': [[{ settings: { alerts: { buyRetracePct: 35 } } }]] });
+    const [reply] = await set(db, ['buyopp', '35']);
+    expect(reply).toContain('buy-opp ≥35% below the mcap at watch');
+  });
+});
+
+describe('/overseer alerts — the summary text', () => {
+  it('names the watch baseline and never a peak window', () => {
+    const summary = alertsSummary(ALERT_DEFAULTS);
+    expect(summary).toContain('below the mcap at watch');
+    for (const retired of ['h high', '24h', 'retrace from', 'maxHours']) {
+      expect(summary).not.toContain(retired);
+    }
+  });
+
+  it('offers buyopp with one argument, and nuke with two', () => {
+    const summary = alertsSummary(ALERT_DEFAULTS);
+    expect(summary).toContain('/overseer set buyopp <pct>');
+    expect(summary).toContain('/overseer set nuke <pct> <minutes>');
   });
 });
 
@@ -865,6 +1280,7 @@ function watchRow(over: Record<string, unknown> = {}): Record<string, unknown> {
     token: tokenRow({ id: 88 }),
     addedBy: USER_ID,
     addedAt: AT,
+    mcapAtWatch: null,
     callId: null,
     callStatus: null,
     ...over,
@@ -963,6 +1379,20 @@ describe('BoardResponse.watchlist', () => {
     const entry = (await board(db)).watchlist[0];
     expect(entry?.rugHiddenAt).toBe(hiddenAt.toISOString());
     expect(entry?.callStatus).toBe('died');
+  });
+
+  /**
+   * Round 19: the ON WATCH row shows the drawdown the BUY OPP alert measures,
+   * so it needs the same baseline the alert uses — the mcap at the watch.
+   */
+  it('serves mcapAtWatch, the baseline the alert measures from', async () => {
+    const { db } = makeDb(boardScript({ watchlist: [watchRow({ mcapAtWatch: 120_000 })] }));
+    expect((await board(db)).watchlist[0]?.mcapAtWatch).toBe(120_000);
+  });
+
+  it('serves null while the baseline is unmeasured — never a guess', async () => {
+    const { db } = makeDb(boardScript({ watchlist: [watchRow()] }));
+    expect((await board(db)).watchlist[0]?.mcapAtWatch).toBeNull();
   });
 
   it('leaves callStatus null when the coin has no call at all', async () => {

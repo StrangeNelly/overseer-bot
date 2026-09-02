@@ -172,12 +172,17 @@ function parseWholeNumber(raw: string | undefined): number | null {
   return Number.isFinite(value) ? Math.round(value) : null;
 }
 
-function alertsSummary(s: AlertSettings): string {
+/**
+ * Round 19: buy-opp is measured from the mcap the coin had when the watch was
+ * set, so the summary no longer mentions a peak window — that knob is retired
+ * from the rule (the settings key survives only for stored blobs).
+ */
+export function alertsSummary(s: AlertSettings): string {
   return (
     `Alerts: nuke >${s.nukeDropPct}% in ${s.nukeWindowMin}m · ` +
-    `buy-opp ≥${s.buyRetracePct}% retrace from a ${s.buyPeakWindowHours}h high ` +
-    `at least ${s.buyMinDeclineHours}h old · cooldown ${s.cooldownMin}m per coin. ` +
-    `Tune: /overseer set nuke <pct> <minutes> · /overseer set buyopp <pct> <maxHours>`
+    `buy-opp ≥${s.buyRetracePct}% below the mcap at watch · ` +
+    `cooldown ${s.cooldownMin}m per coin. ` +
+    `Tune: /overseer set nuke <pct> <minutes> · /overseer set buyopp <pct>`
   );
 }
 
@@ -240,10 +245,15 @@ export async function handleWatch(
 
   const s = alertSettingsOf(group.settings);
   const held = await activeWatchCount(db, group.id, userId);
+  // The baseline names itself in the confirmation when we have one (round 19):
+  // it is the number every later BUY OPP is measured against. Silent when the
+  // coin has never been priced — the alert pass stamps it at the first reading.
+  const from = outcome.mcapAtWatch === null ? '' : ` from ${fmtUsd(outcome.mcapAtWatch)}`;
   await ctx.reply(
-    `Watching ${tokenLabel(token.symbol, address)} (${held}/${WATCH_CAP_PER_MEMBER} of your slots) — ` +
+    `Watching ${tokenLabel(token.symbol, address)}${from} ` +
+      `(${held}/${WATCH_CAP_PER_MEMBER} of your slots) — ` +
       `nuke >${s.nukeDropPct}%/${s.nukeWindowMin}m, ` +
-      `buy-opp ≥${s.buyRetracePct}% retrace over ${s.buyMinDeclineHours}-${s.buyPeakWindowHours}h. ` +
+      `buy-opp ≥${s.buyRetracePct}% below the mcap at watch. ` +
       `/overseer alerts to tune.`,
   );
 
@@ -320,9 +330,15 @@ async function handleWatchlist(
 }
 
 const SET_USAGE =
-  'Usage: /overseer set nuke <pct 5-95> <minutes 5-60> · /overseer set buyopp <pct 5-95> <maxHours 1-48>';
+  'Usage: /overseer set nuke <pct 5-95> <minutes 5-60> · /overseer set buyopp <pct 5-95>';
 
-async function handleSet(db: Db, ctx: Context, group: GroupRow, args: string[]): Promise<void> {
+/** Exported for tests: what a `set` writes is what the group lives with. */
+export async function handleSet(
+  db: Db,
+  ctx: Context,
+  group: GroupRow,
+  args: string[],
+): Promise<void> {
   const what = args[0]?.toLowerCase();
   const pct = parseWholeNumber(args[1]);
   const span = parseWholeNumber(args[2]);
@@ -332,11 +348,12 @@ async function handleSet(db: Db, ctx: Context, group: GroupRow, args: string[]):
       nukeDropPct: clampAlertSetting('nukeDropPct', pct),
       nukeWindowMin: clampAlertSetting('nukeWindowMin', span),
     };
-  } else if (what === 'buyopp' && pct !== null && span !== null) {
-    patch = {
-      buyRetracePct: clampAlertSetting('buyRetracePct', pct),
-      buyPeakWindowHours: clampAlertSetting('buyPeakWindowHours', span),
-    };
+  } else if (what === 'buyopp' && pct !== null) {
+    // Round 19: buy-opp takes only a percentage now. A trailing number is the
+    // old `<maxHours>` argument — accepted so muscle memory and pinned help
+    // still work, and dropped on the floor rather than stored as a knob that
+    // no longer does anything.
+    patch = { buyRetracePct: clampAlertSetting('buyRetracePct', pct) };
   } else {
     await ctx.reply(SET_USAGE);
     return;

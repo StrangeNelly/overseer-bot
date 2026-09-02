@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, isNotNull, lt, max, ne, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, isNull, max, ne, sql } from 'drizzle-orm';
 import { alerts, groups, snapshots, tokens, watches, type Db } from '@groupie/db';
 import type { AlertSettings, AlertType } from '@groupie/shared';
 import { publish } from '../events.js';
@@ -21,17 +21,9 @@ import {
  */
 
 const MINUTE_MS = 60_000;
-const HOUR_MS = 3_600_000;
-
-/**
- * Older-than-the-nuke-window snapshots are collapsed to 5-minute bucket MAXIMA
- * (see loadSeries). Only the buy-opp peak reads that region, and a max-per-
- * bucket preserves the true peak exactly while cutting ~1,900 rows/token/24h
- * down to ~290 — the pass runs every 15s.
- */
-const PEAK_BUCKET_SECONDS = sql.raw('300');
 
 interface WatchRow {
+  watchId: number;
   groupId: number;
   groupSettings: unknown;
   tokenId: number;
@@ -39,6 +31,10 @@ interface WatchRow {
   address: string;
   mcapUsd: number | null;
   liquidityUsd: number | null;
+  /** watches.mcap_at_watch — the buy-opp baseline, null until measured. */
+  mcapAtWatch: number | null;
+  /** watches.buy_opp_armed — whether this fall may still fire (round 19). */
+  buyOppArmed: boolean;
 }
 
 // db.execute bypasses Drizzle's column decoders, so postgres-js hands these
@@ -49,9 +45,21 @@ type SeriesRow = {
   mcap_usd: number | string | null;
 } & Record<string, unknown>;
 
+type BaselineRow = {
+  group_id: number | string;
+  token_id: number | string;
+  mcap_at_watch: number | string | null;
+} & Record<string, unknown>;
+
+/** A watch, identified the way the alert pass carries it: group AND token. */
+function baselineKey(groupId: number, tokenId: number): string {
+  return `${groupId}:${tokenId}`;
+}
+
 async function loadWatches(db: Db, tokenIds?: number[]): Promise<WatchRow[]> {
   return db
     .select({
+      watchId: watches.id,
       groupId: watches.groupId,
       groupSettings: groups.settings,
       tokenId: tokens.id,
@@ -59,6 +67,8 @@ async function loadWatches(db: Db, tokenIds?: number[]): Promise<WatchRow[]> {
       address: tokens.address,
       mcapUsd: tokens.mcapUsd,
       liquidityUsd: tokens.liquidityUsd,
+      mcapAtWatch: watches.mcapAtWatch,
+      buyOppArmed: watches.buyOppArmed,
     })
     .from(watches)
     .innerJoin(tokens, eq(tokens.id, watches.tokenId))
@@ -76,54 +86,32 @@ async function loadWatches(db: Db, tokenIds?: number[]): Promise<WatchRow[]> {
 }
 
 /**
- * One query for every watched token: RAW snapshots inside the widest nuke
- * window (speed matters, so the nuke rule never sees averaged data) plus
- * bucket-peak rows back to the widest buy-opp lookback.
+ * One query for every watched token: the RAW snapshots inside the series window
+ * (speed matters, so the nuke rule never sees averaged data). Round 19 left the
+ * nuke rule as the only reader — buy-opp is judged against the watch baseline
+ * and its armed flag, not against the series — so the window is exactly the
+ * widest nuke window in play.
  */
 async function loadSeries(
   db: Db,
   tokenIds: number[],
-  rawSinceMs: number,
-  peakSinceMs: number,
+  sinceMs: number,
 ): Promise<Map<number, AlertSnapshot[]>> {
   const byToken = new Map<number, AlertSnapshot[]>();
   if (tokenIds.length === 0) return byToken;
 
-  const recentWhere = and(
+  const where = and(
     inArray(snapshots.tokenId, tokenIds),
-    gte(snapshots.at, new Date(rawSinceMs)),
-    isNotNull(snapshots.mcapUsd),
-  );
-  const olderWhere = and(
-    inArray(snapshots.tokenId, tokenIds),
-    gte(snapshots.at, new Date(peakSinceMs)),
-    lt(snapshots.at, new Date(rawSinceMs)),
+    gte(snapshots.at, new Date(sinceMs)),
     isNotNull(snapshots.mcapUsd),
   );
 
   const rows = await db.execute<SeriesRow>(sql`
-    with recent as (
-      select ${snapshots.tokenId} as token_id,
-             ${snapshots.at} as at,
-             ${snapshots.mcapUsd} as mcap_usd
-      from ${snapshots}
-      where ${recentWhere}
-    ),
-    older as (
-      select distinct on (token_id, bucket) token_id, at, mcap_usd
-      from (
-        select ${snapshots.tokenId} as token_id,
-               ${snapshots.at} as at,
-               ${snapshots.mcapUsd} as mcap_usd,
-               floor(extract(epoch from ${snapshots.at}) / ${PEAK_BUCKET_SECONDS})::bigint as bucket
-        from ${snapshots}
-        where ${olderWhere}
-      ) s
-      order by token_id, bucket, mcap_usd desc
-    )
-    select token_id, at, mcap_usd from recent
-    union all
-    select token_id, at, mcap_usd from older
+    select ${snapshots.tokenId} as token_id,
+           ${snapshots.at} as at,
+           ${snapshots.mcapUsd} as mcap_usd
+    from ${snapshots}
+    where ${where}
     order by token_id, at
   `);
 
@@ -138,6 +126,62 @@ async function loadSeries(
     byToken.set(tokenId, list);
   }
   return byToken;
+}
+
+/**
+ * Fill in the buy-opp baseline for watches that were taken before we had a
+ * market cap for the coin (round 19): the mcap of the FIRST snapshot at or
+ * after the watch was activated — the same honesty as mcap-at-call, and the
+ * closest measurement to the moment the member asked for the coin.
+ *
+ * ONE statement, and idempotent by construction: `mcap_at_watch is null` means
+ * a stamped baseline is never rewritten, so a watch keeps the number it was
+ * taken at however often this runs. A watch with no reading yet simply matches
+ * no row and stays null until the poller writes one.
+ *
+ * Returns what it filled, keyed `group:token`, so this pass can judge the watch
+ * it just stamped instead of waiting for the next one.
+ *
+ * Exported for tests: the guarantees are in the statement it builds.
+ */
+export async function backfillBaselines(db: Db, tokenIds: number[]): Promise<Map<string, number>> {
+  const filled = new Map<string, number>();
+  if (tokenIds.length === 0) return filled;
+  const scope = and(
+    eq(watches.active, true),
+    isNull(watches.mcapAtWatch),
+    inArray(watches.tokenId, tokenIds),
+  );
+  // A correlated scalar subquery, NOT a FROM/LATERAL join: Postgres hides the
+  // UPDATE target from subqueries in the FROM list, so `watches` may only be
+  // named from SET and WHERE. The EXISTS repeats it because a scalar subquery
+  // that finds nothing yields NULL, which would "fill" the baseline with null
+  // and return a row saying so.
+  const firstReading = sql`(
+      select ${snapshots.mcapUsd}
+      from ${snapshots}
+      where ${snapshots.tokenId} = ${watches.tokenId}
+        and ${snapshots.at} >= ${watches.addedAt}
+        and ${snapshots.mcapUsd} is not null
+        and ${snapshots.mcapUsd} > 0
+      order by ${snapshots.at}
+      limit 1
+    )`;
+  const rows = await db.execute<BaselineRow>(sql`
+    update ${watches}
+    set mcap_at_watch = ${firstReading}
+    where ${scope}
+      and exists ${firstReading}
+    returning ${watches.groupId} as group_id,
+              ${watches.tokenId} as token_id,
+              ${watches.mcapAtWatch} as mcap_at_watch
+  `);
+  for (const row of rows) {
+    const mcapUsd = Number(row.mcap_at_watch);
+    const key = baselineKey(Number(row.group_id), Number(row.token_id));
+    if (Number.isFinite(mcapUsd) && mcapUsd > 0) filled.set(key, mcapUsd);
+  }
+  return filled;
 }
 
 function cooldownKey(groupId: number, tokenId: number, type: AlertType): string {
@@ -217,12 +261,44 @@ async function insertAlert(db: Db, row: AlertInsert, nowMs: number): Promise<boo
 }
 
 /**
+ * Persist the buy-opp armed flags this pass changed: one statement per value,
+ * for every watch that moved to it. The WHERE guard makes each write a no-op
+ * when the row is already there, so two overlapping passes reaching the same
+ * verdict cost one update between them; the per-(group, token, type) cooldown
+ * stays the backstop for anything the flags cannot serialize.
+ */
+async function persistArmed(db: Db, transitions: Map<boolean, number[]>): Promise<void> {
+  for (const [armed, watchIds] of transitions) {
+    if (watchIds.length === 0) continue;
+    await db
+      .update(watches)
+      .set({ buyOppArmed: armed })
+      .where(and(inArray(watches.id, watchIds), ne(watches.buyOppArmed, armed)));
+  }
+}
+
+/**
  * Evaluate every active watch (optionally narrowed to `tokenIds`) and fire the
  * alerts that clear their cooldown. Returns how many fired.
  */
 export async function runAlertPass(db: Db, tokenIds?: number[]): Promise<number> {
   const watchRows = await loadWatches(db, tokenIds);
   if (watchRows.length === 0) return 0;
+
+  // A watch taken on a coin we had no price for yet gets its baseline from the
+  // first reading after it (round 19). Only asked when something actually needs
+  // one, and the filled values come back with the write so this pass can judge
+  // the watch it just stamped.
+  const unbaselined = [
+    ...new Set(watchRows.filter((r) => r.mcapAtWatch === null).map((r) => r.tokenId)),
+  ];
+  if (unbaselined.length > 0) {
+    const filled = await backfillBaselines(db, unbaselined);
+    for (const row of watchRows) {
+      if (row.mcapAtWatch !== null) continue;
+      row.mcapAtWatch = filled.get(baselineKey(row.groupId, row.tokenId)) ?? null;
+    }
+  }
 
   const nowMs = Date.now();
   const settingsByGroup = new Map<number, AlertSettings>();
@@ -234,37 +310,63 @@ export async function runAlertPass(db: Db, tokenIds?: number[]): Promise<number>
   const inPlay = [...settingsByGroup.values()];
   // One series load covers every group's window, so it must span the widest of
   // each: a stricter group simply ignores the extra history.
-  const rawSinceMs = nowMs - Math.max(...inPlay.map((s) => s.nukeWindowMin)) * MINUTE_MS;
-  const peakSinceMs = nowMs - Math.max(...inPlay.map((s) => s.buyPeakWindowHours)) * HOUR_MS;
+  const windowMinutes = Math.max(...inPlay.map((s) => s.nukeWindowMin));
+  const sinceMs = nowMs - windowMinutes * MINUTE_MS;
 
   const watchedTokenIds = [...new Set(watchRows.map((r) => r.tokenId))];
-  const series = await loadSeries(db, watchedTokenIds, rawSinceMs, peakSinceMs);
+  const series = await loadSeries(db, watchedTokenIds, sinceMs);
 
   interface Pending extends AlertInsert {
     message: string;
   }
   const pending: Pending[] = [];
+  // Watch ids whose armed flag this pass changed, by the value it changed to.
+  const armedTransitions = new Map<boolean, number[]>();
   for (const row of watchRows) {
     const settings = settingsByGroup.get(row.groupId);
     if (!settings) continue;
-    const candidates = evaluateAlerts({
+    const verdict = evaluateAlerts({
       nowMs,
       currentMcapUsd: row.mcapUsd,
       recentSnapshots: series.get(row.tokenId) ?? [],
       settings,
+      mcapAtWatch: row.mcapAtWatch,
+      buyOppArmed: row.buyOppArmed,
     });
-    for (const candidate of candidates) {
+    if (verdict.buyOppArmed !== row.buyOppArmed) {
+      const ids = armedTransitions.get(verdict.buyOppArmed) ?? [];
+      ids.push(row.watchId);
+      armedTransitions.set(verdict.buyOppArmed, ids);
+    }
+    for (const candidate of verdict.candidates) {
       // evaluateAlerts only returns candidates with a usable current mcap.
       const currentMcapUsd = row.mcapUsd ?? 0;
+      // What the drop is measured from, and the evidence stored with it: a nuke
+      // points at the window peak it fell from, a buy-opp at the watch baseline
+      // (round 19 — the peak fields are gone from buy_opp rows entirely).
+      const evidence =
+        candidate.type === 'nuke'
+          ? {
+              fromMcapUsd: candidate.peakMcapUsd,
+              peakAtMs: candidate.peakAtMs,
+              details: {
+                peakMcapUsd: candidate.peakMcapUsd,
+                peakAt: new Date(candidate.peakAtMs).toISOString(),
+              },
+            }
+          : {
+              fromMcapUsd: candidate.mcapAtWatch,
+              peakAtMs: undefined,
+              details: { mcapAtWatch: candidate.mcapAtWatch },
+            };
       const message = alertMessage(candidate.type, {
         label: tokenLabel(row.symbol, row.address),
         dropPct: candidate.dropPct,
-        peakMcapUsd: candidate.peakMcapUsd,
+        fromMcapUsd: evidence.fromMcapUsd,
         currentMcapUsd,
-        peakAtMs: candidate.peakAtMs,
+        peakAtMs: evidence.peakAtMs,
         nowMs,
         liquidityUsd: row.liquidityUsd,
-        peakWindowHours: settings.buyPeakWindowHours,
       });
       pending.push({
         groupId: row.groupId,
@@ -275,14 +377,14 @@ export async function runAlertPass(db: Db, tokenIds?: number[]): Promise<number>
         message,
         details: {
           dropPct: candidate.dropPct,
-          peakMcapUsd: candidate.peakMcapUsd,
-          peakAt: new Date(candidate.peakAtMs).toISOString(),
+          ...evidence.details,
           liquidityUsd: row.liquidityUsd,
           message,
         },
       });
     }
   }
+  await persistArmed(db, armedTransitions);
   if (pending.length === 0) return 0;
 
   const widestCooldownMin = Math.max(...inPlay.map((s) => s.cooldownMin));

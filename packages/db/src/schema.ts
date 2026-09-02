@@ -198,6 +198,23 @@ export const watches = pgTable(
     addedBy: bigint('added_by', { mode: 'number' }).notNull(),
     addedAt: timestamp('added_at', { withTimezone: true }).notNull().defaultNow(),
     active: boolean('active').notNull().default(true),
+    /**
+     * Market cap when this watch was ACTIVATED (docs/decisions.md round 19) —
+     * the BUY OPP baseline. Null while unknown: the token's cached mcap at the
+     * moment of the watch, else the first snapshot at/after added_at (the alert
+     * pass backfills it), else nothing was ever measured and buy-opp stays off.
+     * Re-activating a stopped watch re-stamps it with credit and clock.
+     */
+    mcapAtWatch: doublePrecision('mcap_at_watch'),
+    /**
+     * Whether a BUY OPP may still fire for the CURRENT fall below the line
+     * (docs/decisions.md round 19). True while the coin is above the line (or
+     * has never crossed it), false from the moment one fires until the coin
+     * recovers above the line. Explicit state, not inferred from the last two
+     * readings: a polling gap or a nuke-suppressed pass must not consume the
+     * crossing, and a stalled series must not re-fire it.
+     */
+    buyOppArmed: boolean('buy_opp_armed').notNull().default(true),
   },
   (t) => [
     uniqueIndex('watches_group_token_uq').on(t.groupId, t.tokenId),

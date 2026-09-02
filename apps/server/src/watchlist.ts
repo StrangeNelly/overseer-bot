@@ -1,6 +1,6 @@
 import { and, eq, sql } from 'drizzle-orm';
 import { calls, tokens, watches, type Db, type DbLike } from '@groupie/db';
-import { ROBINHOOD_CHAIN_ID, WATCH_CAP_PER_MEMBER } from '@groupie/shared';
+import { POLL_TIERS, ROBINHOOD_CHAIN_ID, WATCH_CAP_PER_MEMBER } from '@groupie/shared';
 import { publish } from './events.js';
 
 /**
@@ -18,10 +18,47 @@ import { publish } from './events.js';
  */
 
 export type WatchOutcome =
-  /** Now watched. `alreadyActive` = the group was already watching it. */
-  | { ok: true; alreadyActive: boolean }
+  /**
+   * Now watched. `alreadyActive` = the group was already watching it, in which
+   * case `mcapAtWatch` is the ORIGINAL baseline (nothing moved). Null means we
+   * have no market cap we can honestly call the watch's own — none at all, or
+   * only a stale one; the alert pass backfills it from the first reading after
+   * the watch (docs/decisions.md round 19).
+   */
+  | { ok: true; alreadyActive: boolean; mcapAtWatch: number | null }
   /** Refused: this member already holds `cap` active watches in this group. */
   | { ok: false; reason: 'cap'; cap: number };
+
+/** A market cap we would stamp as a baseline, or null when it is not one. */
+function usableMcap(value: unknown): number | null {
+  const n = typeof value === 'string' ? Number(value) : value;
+  return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * How old the cached market state may be and still count as "what the member
+ * was looking at": two polls of the fastest tier. A watched token is promoted
+ * to that tier only AFTER the watch exists, so a coin sitting on the active,
+ * idle or probation tier can be minutes to an hour behind.
+ */
+const CACHE_FRESH_MS = 2 * POLL_TIERS.freshSeconds * 1000;
+
+/**
+ * Whether the token's cached mcap is a reading from just now. A dead coin's
+ * cache is never one: pollDead does not write market fields, so the number is
+ * whatever the coin printed on its way down, however long ago that was.
+ */
+function contemporaneous(phase: unknown, lastSnapshotAt: unknown): boolean {
+  if (phase === 'dead') return false;
+  const at =
+    lastSnapshotAt instanceof Date
+      ? lastSnapshotAt.getTime()
+      : typeof lastSnapshotAt === 'string'
+        ? new Date(lastSnapshotAt).getTime()
+        : Number.NaN;
+  if (!Number.isFinite(at)) return false;
+  return Math.abs(Date.now() - at) <= CACHE_FRESH_MS;
+}
 
 /**
  * How many active watches this member is holding in this group. Exported for
@@ -77,33 +114,73 @@ export async function addWatch(
 
     const existing = (
       await tx
-        .select({ active: watches.active })
+        .select({ active: watches.active, mcapAtWatch: watches.mcapAtWatch })
         .from(watches)
         .where(and(eq(watches.groupId, groupId), eq(watches.tokenId, tokenId)))
     )[0];
-    if (existing?.active === true) return { ok: true, alreadyActive: true } as const;
+    if (existing?.active === true) {
+      return {
+        ok: true,
+        alreadyActive: true,
+        mcapAtWatch: usableMcap(existing.mcapAtWatch),
+      } as const;
+    }
 
     const held = await activeWatchCount(tx, groupId, userId);
     if (held >= cap) return { ok: false, reason: 'cap', cap } as const;
 
-    await tx
+    // The baseline the BUY OPP drawdown is measured from (round 19), read in
+    // this transaction so it is the mcap the board was showing when the member
+    // pressed watch — but only when that cache is CONTEMPORANEOUS. A corpse's
+    // last reading, or an idle coin's hour-old one, is a number the member
+    // never saw; stamping it would measure the drawdown from fiction. Unknown
+    // stays null and the alert pass fills it from the first reading after this
+    // moment (every watch path kicks an immediate poll, so that is seconds).
+    const cached = (
+      await tx
+        .select({
+          mcapUsd: tokens.mcapUsd,
+          lastSnapshotAt: tokens.lastSnapshotAt,
+          phase: tokens.phase,
+        })
+        .from(tokens)
+        .where(eq(tokens.id, tokenId))
+    )[0];
+    const mcapAtWatch = contemporaneous(cached?.phase, cached?.lastSnapshotAt)
+      ? usableMcap(cached?.mcapUsd)
+      : null;
+
+    const written = await tx
       .insert(watches)
-      .values({ groupId, tokenId, addedBy: userId })
+      .values({ groupId, tokenId, addedBy: userId, mcapAtWatch })
       .onConflictDoUpdate({
         target: [watches.groupId, watches.tokenId],
-        // SET expressions see the OLD row: credit and clock only move when the
-        // watch was off, so re-watching an active coin changes nothing. The
-        // lock is per MEMBER, so two different members can still race onto the
-        // same token — this clause is what makes the loser's insert a no-op
-        // that leaves the winner's credit and clock alone, rather than a
-        // silent takeover.
+        // SET expressions see the OLD row: credit, clock and BASELINE only move
+        // when the watch was off, so re-watching an active coin changes
+        // nothing. The lock is per MEMBER, so two different members can still
+        // race onto the same token — this clause is what makes the loser's
+        // insert a no-op that leaves the winner's credit, clock and baseline
+        // alone, rather than a silent takeover.
         set: {
           active: true,
           addedBy: sql`case when ${watches.active} then ${watches.addedBy} else ${userId} end`,
           addedAt: sql`case when ${watches.active} then ${watches.addedAt} else now() end`,
+          mcapAtWatch: sql`case when ${watches.active} then ${watches.mcapAtWatch} else ${mcapAtWatch}::double precision end`,
+          // A re-activated watch is a NEW watch: new baseline, and armed again,
+          // or a slot re-taken after a fall would never fire until the coin
+          // climbed back over a line it is already under.
+          buyOppArmed: sql`case when ${watches.active} then ${watches.buyOppArmed} else true end`,
         },
-      });
-    return { ok: true, alreadyActive: false } as const;
+      })
+      .returning({ mcapAtWatch: watches.mcapAtWatch });
+    // The row that actually landed: on a lost race that is the winner's
+    // baseline (possibly null), not the one computed above.
+    const landed = written[0];
+    return {
+      ok: true,
+      alreadyActive: false,
+      mcapAtWatch: landed ? usableMcap(landed.mcapAtWatch) : mcapAtWatch,
+    } as const;
   });
 
   // Group-wide state, exactly like a bin: every other open board should show
