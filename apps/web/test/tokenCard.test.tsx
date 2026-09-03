@@ -5,7 +5,7 @@ import { TokenCard } from '../src/components/TokenCard';
 import type { SectionKey } from '../src/components/SectionTabs';
 import { deadForCard } from '../src/dead';
 import type { DeadProps } from '../src/dead';
-import { peakNote } from '../src/derive';
+import { peakNote, peakNoteParts } from '../src/derive';
 
 /**
  * A dead card never renders as "unresolved" (docs/decisions.md round 17b
@@ -169,11 +169,80 @@ describe('peakNote', () => {
   });
 });
 
+/**
+ * The same gating, taken apart: the row prints the head on its own line and
+ * lets a container query drop the tail where the identity column is 112px wide.
+ * `peakNote` composes these two, so the pair can never disagree — which is the
+ * whole reason the split lives in derive and not in the component.
+ */
+describe('peakNoteParts', () => {
+  it('is null in exactly the cases the sentence is', () => {
+    expect(peakNoteParts({ ...roundTripped, peakMultiple: 1.1, peakMcapSinceCall: 14.3e6 })).toBeNull();
+    expect(peakNoteParts({ ...roundTripped, retraceFromPeakPct: 4 })).toBeNull();
+    expect(peakNoteParts({ ...roundTripped, peakMcapSinceCall: null })).toBeNull();
+    expect(peakNoteParts({ ...roundTripped, peakMultiple: null })).toBeNull();
+  });
+
+  it('carries the peak in the head, with no round trip while the coin is above its call', () => {
+    expect(peakNoteParts({ ...roundTripped, mcapUsd: 14.3e6, multiple: 1.1 })).toEqual({
+      head: 'peak $30M · 2.3x',
+      tail: null,
+    });
+  });
+
+  it('returns the round trip as its own clause once the coin is back under the call', () => {
+    expect(peakNoteParts(roundTripped)).toEqual({
+      head: 'peak $30M · 2.3x',
+      tail: ' · back under call',
+    });
+  });
+
+  it('...and on a dead call too — the 2.3x it offered first happened', () => {
+    expect(
+      peakNoteParts({
+        ...roundTripped,
+        phase: 'dead',
+        callStatus: 'died',
+        multiple: 0.02,
+        diedAt: new Date(NOW - 3 * HOUR).toISOString(),
+      }),
+    ).toEqual({ head: 'peak $30M · 2.3x', tail: ' · back under call' });
+  });
+
+  it('composes back into exactly what peakNote says — the wording lives once', () => {
+    for (const subject of [roundTripped, { ...roundTripped, mcapUsd: 14.3e6, multiple: 1.1 }]) {
+      const parts = peakNoteParts(subject);
+      expect(parts).not.toBeNull();
+      expect(`${parts!.head}${parts!.tail ?? ''}`).toBe(peakNote(subject));
+    }
+  });
+});
+
 describe('TokenCard — the peak on every call surface', () => {
-  it('prints the peak note on a fresh card', () => {
+  it('prints the peak on its own line, out of the subline the ellipsis was eating', () => {
     const html = render(roundTripped, 'fresh');
-    expect(html).toContain('sub-peak');
-    expect(html).toContain('peak $30M · 2.3x · back under call');
+    expect(html).toContain('row-peak');
+    expect(html).toContain('peak $30M · 2.3x');
+    // The one fact the line exists for must not be back inside the subline: on
+    // the 112px desktop rail the caller's handle wins that fight every time.
+    const sub = html.slice(html.indexOf('row-sub'), html.indexOf('row-peak'));
+    expect(sub).not.toContain('peak $');
+    expect(html).not.toContain('sub-peak');
+  });
+
+  it('keeps the round trip in its own span, so a narrow column can drop it', () => {
+    const html = render(roundTripped, 'fresh');
+    expect(html).toContain('<span class="row-peak-tail"> · back under call</span>');
+    // The whole sentence survives on the element for anything that reads it.
+    expect(html).toContain('title="peak $30M · 2.3x · back under call"');
+  });
+
+  it('...and emits no tail at all while the coin is still above its call', () => {
+    const html = render({ ...roundTripped, mcapUsd: 14.3e6, multiple: 1.1 }, 'fresh');
+    expect(html).toContain('row-peak');
+    expect(html).toContain('peak $30M · 2.3x');
+    expect(html).not.toContain('row-peak-tail');
+    expect(html).not.toContain('back under call');
   });
 
   it('...and on a died row, under the death line', () => {
@@ -182,6 +251,7 @@ describe('TokenCard — the peak on every call surface', () => {
       'died',
     );
     expect(html).toContain('died 3h ago');
+    expect(html).toContain('row-peak');
     expect(html).toContain('peak $30M · 2.3x');
   });
 
@@ -190,14 +260,14 @@ describe('TokenCard — the peak on every call surface', () => {
       { ...roundTripped, peakMcapSinceCall: null, peakMultiple: null, retraceFromPeakPct: null },
       'fresh',
     );
-    expect(html).not.toContain('sub-peak');
+    expect(html).not.toContain('row-peak');
     expect(html).not.toContain('peak $');
   });
 
   it('and never twice on a Retraced row, which already says it', () => {
     const html = render(roundTripped, 'retraced');
     expect(html).toContain('-63% from peak $30M');
-    expect(html).not.toContain('sub-peak');
+    expect(html).not.toContain('row-peak');
   });
 });
 

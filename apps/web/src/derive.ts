@@ -285,6 +285,22 @@ const PEAK_NOTE_MIN_MULTIPLE = 1.2;
 /** At or under this drawdown the coin is still AT its peak — nothing to add. */
 const PEAK_NOTE_MIN_RETRACE_PCT = 10;
 
+/** The peak note taken apart, so a narrow column can print less of it. */
+export interface PeakNoteParts {
+  /** "peak $30M · 2.3x" — the fact itself, never abbreviated. */
+  head: string;
+  /**
+   * " · back under call" when the coin has since fallen under where it was
+   * called, else null. The clause itself and not a flag, so the wording exists
+   * once in the app: a row that renders the tail separately and a tooltip that
+   * renders the whole sentence cannot end up phrasing it differently.
+   */
+  tail: string | null;
+}
+
+/** The round trip, as the row and `peakNote` both print it. */
+const PEAK_NOTE_TAIL = ' · back under call';
+
 /**
  * "peak $30M · 2.3x" — the fact every mark-to-market number leaves out.
  *
@@ -298,10 +314,16 @@ const PEAK_NOTE_MIN_RETRACE_PCT = 10;
  * the call behind (< 1.2x), or it is sitting at/near that peak right now
  * (< 10% off), where the live multiple IS the peak multiple.
  *
- * `· back under call` is appended when the coin has since fallen below where it
- * was called: the round trip, stated as a position rather than a judgement.
+ * `· back under call` is the round trip, stated as a position rather than a
+ * judgement. It comes back as its own clause because it is the one part a
+ * cramped row can afford to drop: the multiple printed two columns over already
+ * says the coin is under 1x, so a reader loses a phrasing, not a fact. The head
+ * never is — nothing else on the row carries the peak. Returning the clause
+ * itself rather than a boolean keeps the wording in one place, and `peakNote`
+ * is nothing but the concatenation, so the full sentence and the split one
+ * cannot drift apart in gating OR in words.
  */
-export function peakNote(card: BoardCard): string | null {
+export function peakNoteParts(card: BoardCard): PeakNoteParts | null {
   const { peakMcapSinceCall, peakMultiple, retraceFromPeakPct, multiple } = card;
   if (peakMcapSinceCall === null || !Number.isFinite(peakMcapSinceCall)) return null;
   if (peakMultiple === null || !Number.isFinite(peakMultiple)) return null;
@@ -313,9 +335,18 @@ export function peakNote(card: BoardCard): string | null {
   ) {
     return null;
   }
-  const note = `peak ${fmtUsd(peakMcapSinceCall)} · ${fmtMultiple(peakMultiple)}`;
   const roundTripped = multiple !== null && Number.isFinite(multiple) && multiple < 1;
-  return roundTripped ? `${note} · back under call` : note;
+  return {
+    head: `peak ${fmtUsd(peakMcapSinceCall)} · ${fmtMultiple(peakMultiple)}`,
+    tail: roundTripped ? PEAK_NOTE_TAIL : null,
+  };
+}
+
+/** The whole sentence — the tooltip, and every surface with room for it. */
+export function peakNote(card: BoardCard): string | null {
+  const parts = peakNoteParts(card);
+  if (parts === null) return null;
+  return `${parts.head}${parts.tail ?? ''}`;
 }
 
 /** Position inside a band as 0..1 — the Sleepers/Ranging tick. */

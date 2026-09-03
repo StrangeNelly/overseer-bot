@@ -10,6 +10,7 @@ import {
   isUnresolved,
   moveOneHour,
   peakNote,
+  peakNoteParts,
   revivalDelta,
   statusEdge,
 } from '../derive';
@@ -344,18 +345,18 @@ export function TokenCard({
     );
   }
 
-  // 2. Where it has BEEN — the fact the mark-to-market numbers leave out. It
-  // sits ahead of LP so the sub's ellipsis takes liquidity before it takes the
-  // peak, and it is said on every surface: a dead call that offered 2.3x first
-  // and a dead call that never moved are not the same event.
-  const peakLine = unresolved || retraceLine ? null : peakNote(card);
-  if (peakLine) {
-    sub.push(
-      <span key="peak" className="sub-peak">
-        {peakLine}
-      </span>,
-    );
-  }
+  // 2. Where it has BEEN — the fact the mark-to-market numbers leave out. It is
+  // said on every surface: a dead call that offered 2.3x first and a dead call
+  // that never moved are not the same event.
+  //
+  // It gets its OWN line under the subline rather than riding it. Measured on
+  // the live board, the identity column is 112px wide on the desktop FRESH rail
+  // and 126px on mobile, against a caller-plus-peak subline of 196-261px — so
+  // the row-sub ellipsis was eating the peak, the one fact this board exists to
+  // keep, to make room for a handle. No shrink order fixes that; only a second
+  // line does. (Retraced still prints its own peak-and-drawdown line and is
+  // excluded above, so nothing says it twice.)
+  const peak = unresolved || retraceLine ? null : peakNoteParts(card);
 
   // 3. Surface detail — unchanged, and still only where no state line ran.
   // RUNNERS stays excluded because its old line WAS the runners-only
@@ -440,6 +441,22 @@ export function TokenCard({
               </span>
             ))}
           </div>
+          {/* The tail is DROPPED, not deferred, where a container query decides
+              the column cannot hold it (styles.css): the sub-1x multiple two
+              columns over already says the coin is back under its call, so a
+              reader there loses a phrasing and not a fact. The title carries
+              the whole sentence for anything that reads the element, but it is
+              not a recovery route for a human — the row head turns pointer
+              events off for its children (same as `.row-age`'s title), and the
+              surfaces that lose the tail are the desktop FRESH rail, which answers
+              hover with the links strip instead, and mobile and the Telegram
+              half-sheet, which have no hover at all. */}
+          {peak ? (
+            <div className="row-peak" title={peakNote(card) ?? undefined}>
+              {peak.head}
+              {peak.tail === null ? null : <span className="row-peak-tail">{peak.tail}</span>}
+            </div>
+          ) : null}
         </div>
 
         {/* The 1h-move chip rides IN PLAY rows only — a Fresh row keeps the

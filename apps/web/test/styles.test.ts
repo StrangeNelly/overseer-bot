@@ -86,3 +86,48 @@ describe('row-head stacking', () => {
     expect(declarationsFor('.row-hoverlinks')).toContain('z-index: 2');
   });
 });
+
+/**
+ * The peak line's own row (the owner's "the peak marketcap is not visible, cut
+ * off").
+ *
+ * The peak used to ride the subline, where the ellipsis ate it: the identity
+ * column is 112px on the desktop FRESH rail and 126px on mobile against a
+ * caller-plus-peak string of 196-261px. It has its own line now, and the round
+ * trip — the one clause the row's live multiple already implies — is dropped by
+ * a container query where that line cannot hold it. None of that is visible to
+ * a render test: the markup is identical at every width.
+ */
+describe('the peak line', () => {
+  it('finds the blocks it is asserting about', () => {
+    for (const selector of ['.row-peak', '.row-peak-tail', '.row-id']) {
+      expect(declarationsFor(selector), selector).not.toBe('');
+    }
+  });
+
+  it('ellipses rather than wraps — the head must never take a second line', () => {
+    const peak = declarationsFor('.row-peak');
+    expect(peak).toContain('white-space: nowrap');
+    expect(peak).toContain('overflow: hidden');
+    expect(peak).toContain('text-overflow: ellipsis');
+  });
+
+  it('queries its own width, so one rule serves a 112px rail and a 345px zone', () => {
+    expect(declarationsFor('.row-peak')).toContain('container-type: inline-size');
+  });
+
+  it('...and does NOT put that container on .row-id, which would restack it', () => {
+    // container-type implies layout containment, i.e. a stacking context. Four
+    // other components share `.row-id`, and `.pill-x` inside it escapes the
+    // row-wide `.row-hit` overlay with z-index — an escape a new stacking
+    // context on the column would swallow. `.row-peak` is the same width and
+    // holds nothing positioned, so it carries the container instead.
+    expect(declarationsFor('.row-id')).not.toContain('container-type');
+    expect(declarationsFor('.pill-x')).toContain('z-index: 1');
+  });
+
+  it('hides the round trip inside a container query, not a media query', () => {
+    expect(CSS).toContain('@container');
+    expect(declarationsFor('.row-peak-tail')).toContain('display: none');
+  });
+});

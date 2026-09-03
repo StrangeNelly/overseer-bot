@@ -541,8 +541,21 @@ a {
   padding-right: 14px;
 }
 
+/* The desktop feed row is also the 346px-wide FRESH rail, where the fixed
+   columns (avatar 20, spark 44, numbers 96, age 22, padding 8+12) plus four 8px
+   gaps left the identity column just 112px. Tightening the gap 8 -> 6 and the
+   right padding 12 -> 10 hands it 10px back there (122px), 12px on the IN PLAY
+   rows where the move chip adds a fifth gap — the cheapest pixels on the row,
+   and the ones a long handle plus "LP $37K" needs. Height stays 48px: the row
+   rhythm is the one thing the design pass fixed by number.
+   Blast radius: `.row-desk` is not the call feed's alone — Sleepers, Discovery,
+   Upcoming and the callless ON WATCH row wear it too, so they tighten by the
+   same 2px per gap and lose the same 2px of right padding. Their columns are
+   wider to begin with, so the trim only ever hands them width. */
 .row-desk .row-head {
   height: 48px;
+  gap: 6px;
+  padding-right: 10px;
 }
 
 /* Top runner: taller row, and the only glow on the board that breathes. */
@@ -663,6 +676,80 @@ a {
   font-size: 9px;
 }
 
+/* Where the call has BEEN, on its own line under the subline (see TokenCard for
+   why it stopped riding the subline). Cyan because it is analysis, not P&L: the
+   peak is a fact about the past, never a verdict on the position.
+
+   No line-height override anywhere in this stack, because none is needed. Both
+   `.sym` and these two lines set their font with the `font` shorthand, which
+   resets line-height to `normal` — the body's 1.4 never reached them. At the
+   loaded webfaces' own `normal` (JetBrains Mono 1.32, IBM Plex Sans 1.30) the
+   three-line column measures 15.84 name + 1 + 11.7 sub + 1 + 11.7 peak =
+   41.24px in the tightest head, the 44px mini row (48 desk is the same stack;
+   52 row and 56 hero run 44.5 at their bigger fonts). Tightening to 1.2 was
+   tried and reverted: it is BELOW the face's normal 1.30, so the half-leading
+   goes negative and the descender of the "p" in "peak" ends up within a
+   fraction of a pixel of this rule's own `overflow: hidden` clip. */
+.row-peak {
+  font: 400 10px var(--font-sans);
+  color: var(--cyan);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* The query container for the tail rule below.
+     It sits on THIS line and not on `.row-id`, which is the obvious home and
+     resolves to exactly the same width (`.row-id` has no padding and this is a
+     stretched item in its column flex), because `container-type` also applies
+     LAYOUT containment — which makes the element a stacking context. `.row-id`
+     is shared with the Sleepers, Discovery, Upcoming and ON WATCH rows, and
+     `.pill-x` inside it escapes the row-wide `.row-hit` overlay with
+     `position: relative; z-index: 1`; re-homing that escape inside a new
+     stacking context is not a trade worth making for a text-overflow fix.
+     Nothing is positioned inside `.row-peak`, so the containment costs nothing
+     here. It costs no layout either: this line never sized itself from its own
+     content — it is stretched to the column's width — and `.row-id` keeps the
+     width it always had (`flex: 1 1 auto` on the head's only flexible item, so
+     it takes all the free space whatever its base size resolves to). */
+  container-type: inline-size;
+}
+
+.row-mini .row-peak,
+.row-desk .row-peak {
+  font-size: 9px;
+}
+
+/* The round trip is the clause to drop when the column is narrow: the live
+   multiple two columns over already says the coin is under 1x, so the reader
+   loses a phrasing and not a fact — while the head (peak $ and peak multiple)
+   exists nowhere else on the row and must never be cut.
+   200px is the cut because the whole line wants ~150px at 9px and ~175px at
+   10px. The columns it lands on, measured, are not just the three with a
+   sparkline:
+     - desktop FRESH rail 112px (122 after the gap trim above) — hidden;
+     - mobile call row 126px — hidden;
+     - desktop IN PLAY 345px (357 after the trim) — shown;
+     - every row that prints a peak but draws NO spark, where the spark's 44px
+       plus a gap come back to this column. `showSpark` drops the spark on died
+       rows and on the whole Telegram half-sheet, so: mobile died 126 + 52 =
+       178px (218px on a 430px phone) — shown; the desk died row is an ON WATCH
+       row for a dead coin, which sits in the wide zone at ~407px — shown; and
+       the half-sheet, which is viewport - 184px (2 border + 8/14 padding + 18
+       avatar + 96 numbers + 22 age + three 8px gaps): 176px at 360, 191 at 375,
+       206 at 390, 246 at 430.
+   So the half-sheet straddles the cut — the tail shows on a 390px phone and not
+   on a 375px one, where it would in fact have fitted. That is acceptable, not a
+   margin: the tail is the droppable clause by design and the head fits in every
+   column above. Do not read 200px as clearance; it is a rough line through a
+   spread, and moving it re-sorts the half-sheet and the narrow died rows,
+   nothing else.
+   A browser without container queries keeps the tail and lets the ellipsis take
+   it — exactly the behaviour this replaces. */
+@container (max-width: 200px) {
+  .row-peak-tail {
+    display: none;
+  }
+}
+
 .sub-sep {
   margin: 0 4px;
   color: var(--faint);
@@ -670,12 +757,6 @@ a {
 
 .sub-retrace {
   color: var(--down);
-}
-
-/* Where the call has BEEN. Cyan because it is analysis, not P&L: the peak is a
-   fact about the past, never a verdict on the position. */
-.sub-peak {
-  color: var(--cyan);
 }
 
 .sub-stale {
@@ -937,8 +1018,16 @@ a {
 .row-hoverlinks {
   display: none;
   position: absolute;
-  /* Starts past the identity column so the symbol and caller stay readable:
-     the strip takes the spark and the numbers, never the coin (3A). */
+  /* Starts past the coin so the symbol and caller stay readable: the strip
+     takes the spark and the numbers, never the identity (3A). Measured from the
+     head's padding box, so the desk gap trim (8 -> 6) only moved the identity
+     column's LEFT edge 2px left underneath it — the offset still lands past the
+     symbol on every row width, and the strip's own 22px padding-left, over the
+     18px gradient fade below, absorbs the rest.
+     The column's right edge moved the other way, 148 -> 156, so the 10px the
+     trim hands the identity column is worth its full 10px with the strip shut
+     and about 2px with it open (readable width 136 - 34 = 102px, the gradient
+     being opaque from x=136). That is the strip doing its job, not a loss. */
   left: 118px;
   right: 0;
   top: 0;

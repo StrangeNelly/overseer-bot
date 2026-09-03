@@ -86,10 +86,10 @@ export function WatchRows({
           alertedAddress !== undefined &&
           alertedAddress.toLowerCase() === row.entry.address.toLowerCase();
         if (row.card) {
-          // The peak note ("peak $30M · 2.3x") rides the card's own subline, so
-          // it is NOT joined into slotNote here: TokenCard prints it once, in
-          // cyan, ahead of LP — appending it to the baseline string as well
-          // would say the same thing twice on one row.
+          // The peak note ("peak $30M · 2.3x") gets its own cyan line under the
+          // card's subline inside TokenCard, so it is NOT joined into slotNote
+          // here: TokenCard prints it once, and appending it to the baseline
+          // string as well would say the same thing twice on one row.
           return (
             <TokenCard
               key={`c${row.entry.tokenId}`}
