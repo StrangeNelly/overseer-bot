@@ -357,6 +357,11 @@ async function fillCallBaselines(
   snap: MarketSnapshot,
   opts: PollOpts,
 ): Promise<void> {
+  // A curve-phase read reports bonding-curve collateral as "mcap" (~$46K) and
+  // $0 liquidity. That is NOT the traded price the caller sees — the DEX mcap
+  // after graduation is typically 10-15x higher. Defer until the first
+  // post-graduation snapshot with real liquidity arrives.
+  if (snap.liquidityUsd === 0) return;
   const unfilled = await db
     .select({ id: calls.id, calledAt: calls.calledAt })
     .from(calls)

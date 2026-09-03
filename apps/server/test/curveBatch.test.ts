@@ -335,6 +335,43 @@ describe('pollCurveBatch (round 16b)', () => {
   });
 });
 
+/* ------------------------------------ curve-read $0 liq → no mcap_at_call */
+
+describe('fillCallBaselines skips curve reads', () => {
+  it('does NOT stamp mcap_at_call when snapshot liquidity is $0', async () => {
+    const token = tokenRow();
+    vi.mocked(gt.getPool).mockResolvedValue(poolInfo({ reserveUsd: 0 }));
+    const { db, calls } = makeDb({
+      // The second select:calls is applyCallRevivals (runs for all tokens).
+      // fillCallBaselines should NOT query because of the $0-liq guard.
+      'select:calls': [[], []],
+    });
+    await pollCurve(db, token, { budgeted: false });
+
+    expect(find(calls, 'insert:snapshots')).toHaveLength(1);
+    // No mcap_at_call was stamped (no update:calls with that field).
+    const baselineWrites = find(calls, 'update:calls').filter(
+      (c) => 'mcapAtCall' in (c.set ?? {}),
+    );
+    expect(baselineWrites).toHaveLength(0);
+  });
+
+  it('DOES stamp when the same token later polls with real liquidity', async () => {
+    const token = tokenRow({ phase: 'curve', liquidityUsd: 25_000 });
+    vi.mocked(gt.getPool).mockResolvedValue(poolInfo({ reserveUsd: 30_000 }));
+    const { db, calls } = makeDb({
+      'select:calls': [[{ id: 99, calledAt: new Date(NOW - 30_000) }]],
+    });
+    await pollCurve(db, token, { budgeted: false });
+
+    // The baseline was stamped (mcapAtCall present in a calls UPDATE).
+    const baselineWrites = find(calls, 'update:calls').filter(
+      (c) => 'mcapAtCall' in (c.set ?? {}),
+    );
+    expect(baselineWrites).toHaveLength(1);
+  });
+});
+
 /* --------------------------------------------- the dead tier's shared call */
 
 /** A corpse that is re-read off GeckoTerminal rather than DexScreener. */
