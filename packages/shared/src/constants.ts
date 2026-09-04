@@ -617,9 +617,10 @@ export const XWATCH = {
    */
   ruleValueMaxChars: 255,
   /**
-   * ...and what the SEARCH path actually shards to: the query also carries a
-   * ` since_time:<10 digits>` suffix, so the handle terms get 480 of the
-   * documented 512 characters — one query for about 25 handles.
+   * ...and what the SEARCH path actually shards to: the adapter wraps the shard
+   * in brackets and appends ` since_time:<10 digits>` (24 characters in all), so
+   * the handle terms get 480 of the documented 512 characters — one query for
+   * about 25 handles.
    */
   searchQueryMaxChars: 480,
   /**
@@ -643,9 +644,16 @@ export const XWATCH = {
   /** Candidates served per monitor, newest first — a popular handle attracts impostors. */
   candidatesPerMonitor: 10,
   /**
-   * How far back a poll looks when it has no cursor, and the floor under every
-   * post the detector will consider. A restart — or a freshly tracked handle —
-   * must never replay yesterday's contract address into the chat.
+   * How far back the FROM: poll looks when it has no cursor, and the ceiling on
+   * that poll's window floor (an older cursor puts the floor earlier — round 23
+   * amendment (o) — so an outage's backlog is caught up rather than clipped).
+   *
+   * NOT the floor under every post the detector considers: since round 25 the
+   * two recovery reads judge what they find against `parentLookbackMinutes` (60)
+   * instead, because a post reached through its replies or through the Top sweep
+   * is reached late by design. The other half of the floor — never before the
+   * monitor's own added_at — applies to all three roads, and is what stops a
+   * freshly tracked handle replaying yesterday's contract address into the chat.
    */
   lookbackMinutes: 10,
   /** Handles one group may track, and how many of those one member may hold. */
@@ -666,6 +674,38 @@ export const XWATCH = {
    * the account any more, and a ping is a claim.
    */
   hijackHoldMinutes: 10,
+  /**
+   * REPLY RECOVERY (round 25). X hides some accounts from "Latest" search
+   * entirely — @legsdotfun's launch post (2026-09-03 21:05Z, 288 replies) never
+   * appeared under `from:legsdotfun` while `to:legsdotfun` returned every reply
+   * within seconds (first reply +130s on that post, +24s on the next). So each
+   * poll also searches replies TO the tracked accounts and fetches the unseen
+   * PARENT posts by id, which then go through the same detector as a directly
+   * observed post. A recovered parent is judged against its own floor: never
+   * before the monitor was added, never older than this many minutes.
+   */
+  parentLookbackMinutes: 60,
+  /** Parent posts fetched by id per poll (one batched `tweets` call). */
+  parentsPerPoll: 20,
+  /**
+   * The Top sweep, the belt to reply recovery's braces: every this many polls
+   * the `from:` shard is also asked with queryType=Top over the last
+   * `topLookbackMinutes`, because Top DID carry the hidden account's launch post
+   * (engagement-ranked, so a post nobody replied to but somebody liked is
+   * still found). Never moves the cursor.
+   */
+  topSweepEveryPolls: 5,
+  /**
+   * The sweep's window, NEVER NARROWER THAN `parentLookbackMinutes` — which is
+   * the floor its own results are judged against (runner.ts sweepTop). At 15 a
+   * hidden account's launch post whose first like or reply landed 20 minutes in
+   * was offered to Top three times, judged fresh every time, and then out of
+   * the window forever: unreachable by all three reads, because from: returns
+   * nothing at all for that account class and reply recovery needs a reply.
+   * Widening costs ZERO extra provider calls (pollTop is one unpaged request
+   * per shard per sweep) and the extra posts are de-duped by `seenPosts`.
+   */
+  topLookbackMinutes: 60,
   /** No successful poll for this long and the board says the watcher is stalled. */
   stallMinutes: 10,
   /** How often a tracked account's profile (followers, name, bio) is re-read. */
@@ -689,6 +729,15 @@ export const XWATCH = {
    * socials()", which is most of the chain and costs three calls, once.
    */
   tierBNullReadsToRetire: 3,
+  /**
+   * Tier B's own clock (round 25). It used to ride the 30-minute profile pass,
+   * which is how a graduation claiming a tracked handle could sit unseen for
+   * half an hour; two of its three passes are now free SELECTs and the chain
+   * pass is bounded per pass, so five minutes costs at most 20 eth_calls per
+   * pass — nothing on PAYG — and puts a claim on the board while the launch is
+   * still news.
+   */
+  tierBMinutes: 5,
 } as const;
 
 /** groups.settings.xwatch defaults. Round 23 ships with the launch ping ON. */

@@ -92,6 +92,7 @@ export function toProjectEntry(
     followersAtAdd: row.followersAtAdd,
     accountCreatedAt: row.accountCreatedAt?.toISOString() ?? null,
     lastPostAt: row.lastPostAt?.toISOString() ?? null,
+    lastPostVia: row.lastPostVia ?? null,
     lastCheckedAt: row.lastCheckedAt?.toISOString() ?? null,
     note: row.note,
     addedBy,

@@ -125,6 +125,10 @@ function project(over: Partial<ProjectEntry> = {}): ProjectEntry {
     followersAtAdd: 1_892,
     accountCreatedAt: new Date(NOW - 730 * DAY).toISOString(),
     lastPostAt: new Date(NOW - 14 * HOUR).toISOString(),
+    // The ordinary channel (round 25). The recovery channels get their own file,
+    // `upcomingVia.test.tsx`, because they are what the row must SAY something
+    // about — this fixture is the account X's Latest index is not hiding.
+    lastPostVia: 'search',
     lastCheckedAt: new Date(NOW - MINUTE).toISOString(),
     note: 'from the pinned thread',
     addedBy: 55,

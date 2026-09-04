@@ -13,7 +13,7 @@ import {
 import { KNOWN_CONTRACTS, confirmAddress } from '../src/xwatch/confirm.js';
 import { detectTierA, isAuthoredBy, type TrackedAccount } from '../src/xwatch/detect.js';
 import { launchPingMessage } from '../src/xwatch/message.js';
-import { ruleIdByHandle, shardHandles } from '../src/xwatch/rules.js';
+import { ruleIdByHandle, shardHandles, toTerm } from '../src/xwatch/rules.js';
 import { mergeXWatchSettings, xwatchSettingsOf } from '../src/xwatch/settings.js';
 import { decodeSocials, handleFromSocialUrl } from '../src/xwatch/tierB.js';
 import {
@@ -57,6 +57,8 @@ function post(overrides: Partial<XPost> = {}): XPost {
     createdAt: new Date(NOW),
     isRetweet: false,
     isQuote: false,
+    inReplyToId: null,
+    inReplyToHandle: null,
     permalink: `https://x.com/${HANDLE}/status/1900000000000000001`,
     ...overrides,
   };
@@ -108,8 +110,9 @@ describe('shardHandles — the provider 255-character rule value', () => {
     const handles = Array.from({ length: 25 }, (_, i) => `hndl${String(i).padStart(6, '0')}`);
     const rules = shardHandles(handles, XWATCH.searchQueryMaxChars);
     expect(rules).toHaveLength(1);
-    // The suffix the adapter appends: ' since_time:' plus ten digits.
-    expect((rules[0]?.value.length ?? 0) + ' since_time:1788000000'.length).toBeLessThanOrEqual(512);
+    // What the adapter actually sends: the shard in brackets, then
+    // ' since_time:' plus ten digits.
+    expect(`(${rules[0]?.value ?? ''}) since_time:1788000000`.length).toBeLessThanOrEqual(512);
     for (const rule of shardHandles(
       Array.from({ length: 60 }, (_, i) => `h${String(i).padStart(14, '0')}`),
       XWATCH.searchQueryMaxChars,
@@ -751,5 +754,238 @@ describe('tier B — the verified socials() layout', () => {
     expect(handleFromSocialUrl('https://x.com/i/status/19')).toBeNull();
     expect(handleFromSocialUrl('@LegsDotFun')).toBe(HANDLE);
     expect(handleFromSocialUrl('https://legs.fun')).toBeNull();
+  });
+});
+
+/* ------------------------------------------ round 25: the recovery reads */
+
+/**
+ * The real shapes, copied from the production provider on 2026-09-04.
+ *
+ * The launch post is @legsdotfun's own (2026-09-03 21:05:19Z) as GET
+ * /twitter/tweets answers for it: a NON-reply carries EMPTY STRINGS in all
+ * three inReplyTo fields rather than omitting them, which is the one detail the
+ * parser has to get right — an "" read as a parent id would put an unfetchable
+ * id on the recovery queue every single poll.
+ */
+const LEGS_LAUNCH_RAW = {
+  id: '2095619171002593725',
+  createdAt: 'Thu Sep 03 21:05:19 +0000 2026',
+  author: { id: '2094468493223620608', userName: 'legsdotfun' },
+  isReply: false,
+  inReplyToId: '',
+  inReplyToUserId: '',
+  inReplyToUsername: '',
+  entities: { hashtags: [], symbols: [{ indices: [0, 5], text: 'LEGS' }], urls: [] },
+  text: `$LEGS is now live on Robinhood Chain.\n\nCA:   ${CA}\n\nBuild short-term parlays.`,
+};
+
+/** ...and one of the 288 replies to it, as advanced_search answers. */
+const LEGS_REPLY_RAW = {
+  id: '2095981212414144517',
+  text: '@legsdotfun 500M runner, yessir',
+  createdAt: 'Fri Sep 04 21:03:57 +0000 2026',
+  author: { id: '1234', userName: 'rndrflame' },
+  isReply: true,
+  inReplyToId: '2095619171002593725',
+  inReplyToUsername: 'LegsDotFun',
+  inReplyToUserId: '2094468493223620608',
+  entities: { urls: [] },
+};
+
+describe('the parent pointer a reply carries', () => {
+  it('reads the parent id and handle off a reply', () => {
+    const parsed = toPost(LEGS_REPLY_RAW);
+    expect(parsed?.inReplyToId).toBe('2095619171002593725');
+    // Stored the way every handle is stored: lowercase, no @.
+    expect(parsed?.inReplyToHandle).toBe(HANDLE);
+    expect(parsed?.inReplyToUserId).toBe('2094468493223620608');
+    expect(parsed?.isReply).toBe(true);
+  });
+
+  it('reads the provider EMPTY STRINGS as no parent at all', () => {
+    const parsed = toPost(LEGS_LAUNCH_RAW);
+    expect(parsed?.id).toBe('2095619171002593725');
+    expect(parsed?.authorHandle).toBe(HANDLE);
+    expect(parsed?.inReplyToId).toBeNull();
+    expect(parsed?.inReplyToHandle).toBeNull();
+    expect(parsed?.inReplyToUserId).toBeNull();
+    // ...which is also what keeps a top-level post from being read as a reply.
+    expect(parsed?.isReply).toBe(false);
+    expect(parsed?.text).toContain(CA);
+  });
+});
+
+describe('shardHandles — the to: grammar', () => {
+  it('shards the same handles the other way round, under the same cap', () => {
+    const from = shardHandles([HANDLE, 'gaiadotfinance'], XWATCH.searchQueryMaxChars);
+    const to = shardHandles([HANDLE, 'gaiadotfinance'], XWATCH.searchQueryMaxChars, toTerm);
+    expect(to[0]?.value).toBe('to:gaiadotfinance OR to:legsdotfun');
+    expect(to[0]?.handles).toEqual(['gaiadotfinance', HANDLE]);
+    // DIFFERENT ids for the same handles: a monitor's recorded shard is the
+    // from: one, and the reply shard must never be mistaken for it.
+    expect(to[0]?.id).not.toBe(from[0]?.id);
+  });
+
+  it('fits a whole group watchlist in one query, either way round', () => {
+    const handles = Array.from({ length: XWATCH.capPerGroup }, (_, i) => `hndl${String(i).padStart(9, '0')}`);
+    for (const shards of [
+      shardHandles(handles, XWATCH.searchQueryMaxChars),
+      shardHandles(handles, XWATCH.searchQueryMaxChars, toTerm),
+    ]) {
+      expect(shards).toHaveLength(1);
+      expect(shards[0]?.value.length).toBeLessThanOrEqual(XWATCH.searchQueryMaxChars);
+    }
+    // ...and a set too big for one query still splits, on both grammars.
+    const many = Array.from({ length: 60 }, (_, i) => `h${String(i).padStart(14, '0')}`);
+    for (const rule of shardHandles(many, XWATCH.searchQueryMaxChars, toTerm)) {
+      expect(rule.value.length).toBeLessThanOrEqual(XWATCH.searchQueryMaxChars);
+    }
+  });
+});
+
+describe('the twitterapi adapter — the three recovery reads', () => {
+  const KEY = 'not-a-real-key-0001';
+  const requests: string[] = [];
+  const sentHeaders: string[] = [];
+  const serve = (body: unknown): void => {
+    vi.stubGlobal('fetch', async (url: unknown, init?: { headers?: Record<string, string> }) => {
+      requests.push(String(url));
+      sentHeaders.push(JSON.stringify(init?.headers ?? {}));
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+  };
+  afterEach(() => {
+    requests.length = 0;
+    sentHeaders.length = 0;
+    vi.unstubAllGlobals();
+  });
+
+  it('asks the to: shard for replies, from the cursor instant', async () => {
+    serve({ tweets: [LEGS_REPLY_RAW], has_next_page: false, next_cursor: '' });
+    const watcher = createTwitterApiWatcher(KEY);
+    // Nothing is asked before the handles are known — an empty shard set is not
+    // a query with no terms in it.
+    expect(await watcher.pollReplies?.(null)).toEqual({ posts: [], truncated: false });
+    expect(requests).toHaveLength(0);
+
+    await watcher.syncRules([HANDLE]);
+    const result = await watcher.pollReplies?.('1788000000');
+    expect(requests).toHaveLength(1);
+    const url = new URL(requests[0] ?? '');
+    expect(url.pathname).toBe('/twitter/tweet/advanced_search');
+    expect(url.searchParams.get('query')).toBe(`(to:${HANDLE}) since_time:1788000000`);
+    expect(url.searchParams.get('queryType')).toBe('Latest');
+    expect(result?.posts[0]?.inReplyToId).toBe('2095619171002593725');
+  });
+
+  it('asks the from: shard with queryType=Top, one page and no cursor', async () => {
+    // The provider says there is another page: Top is ranked rather than
+    // chronological, so a second page reaches further DOWN, not further back.
+    serve({ tweets: [LEGS_LAUNCH_RAW], has_next_page: true, next_cursor: 'more' });
+    const watcher = createTwitterApiWatcher(KEY);
+    await watcher.syncRules([HANDLE]);
+    const posts = await watcher.pollTop?.(1_788_000_000);
+    expect(requests).toHaveLength(1);
+    const url = new URL(requests[0] ?? '');
+    expect(url.searchParams.get('query')).toBe(`(from:${HANDLE}) since_time:1788000000`);
+    expect(url.searchParams.get('queryType')).toBe('Top');
+    expect(url.searchParams.has('cursor')).toBe(false);
+    expect(posts?.[0]?.id).toBe('2095619171002593725');
+  });
+
+  it('reads parents by id in one call, and asks nothing for an empty list', async () => {
+    serve({ tweets: [LEGS_LAUNCH_RAW], status: 'success', msg: 'success' });
+    const watcher = createTwitterApiWatcher(KEY);
+    expect(await watcher.fetchPosts?.([])).toEqual([]);
+    expect(await watcher.fetchPosts?.(['  '])).toEqual([]);
+    // twitterapi.io bills a minimum per CALL, so a poll with no parent to
+    // recover must cost nothing at all.
+    expect(requests).toHaveLength(0);
+
+    const posts = await watcher.fetchPosts?.(['2095619171002593725', '2095619171002593725', '77']);
+    expect(requests).toHaveLength(1);
+    const url = new URL(requests[0] ?? '');
+    expect(url.pathname).toBe('/twitter/tweets');
+    // De-duplicated, comma-joined, one request.
+    expect(url.searchParams.get('tweet_ids')).toBe('2095619171002593725,77');
+    expect(posts?.[0]?.authorHandle).toBe(HANDLE);
+    expect(posts?.[0]?.text).toContain(CA);
+  });
+
+  it('tells "those ids are gone" from "the provider failed"', async () => {
+    // The vendor answers its OWN failures with the success envelope minus the
+    // payload — the shape resolveHandle has read since round 23. Reading that as
+    // "no posts" would let the runner mark the ids seen and drop them forever,
+    // while the reply cursor has already advanced past the replies that named
+    // them: one garbled 200 in a launch minute loses the post this path exists
+    // to recover. A THROW is requeued.
+    serve({ status: 'error', msg: 'rate limit' });
+    const watcher = createTwitterApiWatcher(KEY);
+    await expect(watcher.fetchPosts?.(['77'])).rejects.toThrow(XApiError);
+    await watcher.syncRules([HANDLE]);
+    await expect(watcher.pollTop?.(1_788_000_000)).rejects.toThrow(XApiError);
+    // Status 0: not a refusal, so this requeues and logs rather than backing the
+    // whole watcher off (client.ts pauses on 401/403/429 only).
+    await watcher.fetchPosts?.(['77']).catch((err: unknown) => {
+      expect(shouldPauseXPolling(err)).toBe(false);
+    });
+  });
+
+  it('brackets a MULTI-HANDLE shard so since_time binds to the whole OR list', async () => {
+    // X binds AND tighter than OR, so `to:a OR to:b since_time:N` time-bounds
+    // `to:b` ONLY and pulls @a's entire reply history, newest first, every
+    // poll. The parenthesised form is also the only one measured against the
+    // provider (docs/research-x-monitor.md).
+    serve({ tweets: [], has_next_page: false, next_cursor: '' });
+    const watcher = createTwitterApiWatcher(KEY);
+    await watcher.syncRules([HANDLE, 'gaiadotfinance']);
+    await watcher.pollResults('1788000000');
+    await watcher.pollReplies?.('1788000000');
+    await watcher.pollTop?.(1_788_000_000);
+    expect(requests.map((raw) => new URL(raw).searchParams.get('query'))).toEqual([
+      `(from:gaiadotfinance OR from:${HANDLE}) since_time:1788000000`,
+      `(to:gaiadotfinance OR to:${HANDLE}) since_time:1788000000`,
+      `(from:gaiadotfinance OR from:${HANDLE}) since_time:1788000000`,
+    ]);
+  });
+
+  it('reads an error envelope on the LATEST searches as a failure, not as silence', async () => {
+    // The from: read is the one whose CURSOR MOVES: an empty answer takes
+    // runner.ts's "nothing came back" branch and jumps the cursor forward to
+    // the lookback floor, stepping over exactly the backlog a catch-up poll
+    // after a back-off exists to re-read. A throw leaves it where it was.
+    serve({ status: 'error', msg: 'rate limit' });
+    const watcher = createTwitterApiWatcher(KEY);
+    await watcher.syncRules([HANDLE]);
+    await expect(watcher.pollResults('1788000000')).rejects.toThrow(XApiError);
+    await expect(watcher.pollReplies?.('1788000000')).rejects.toThrow(XApiError);
+  });
+
+  it('keeps an EMPTY array as a real answer — a deleted post is gone, not unread', async () => {
+    serve({ tweets: [], status: 'success', msg: 'success' });
+    const watcher = createTwitterApiWatcher(KEY);
+    expect(await watcher.fetchPosts?.(['77'])).toEqual([]);
+  });
+
+  it('never puts the key in a URL — it travels in the header', async () => {
+    serve({ tweets: [], has_next_page: false });
+    const logged = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const watcher = createTwitterApiWatcher(KEY);
+    await watcher.syncRules([HANDLE]);
+    await watcher.pollReplies?.(null);
+    await watcher.pollTop?.(1_788_000_000);
+    await watcher.fetchPosts?.(['77']);
+    expect(requests).toHaveLength(3);
+    expect(requests.some((url) => url.includes(KEY))).toBe(false);
+    expect(sentHeaders.every((headers) => headers.includes(KEY))).toBe(true);
+    const printed = [...logged.mock.calls, ...warned.mock.calls].flat().join(' ');
+    expect(printed).not.toContain(KEY);
+    logged.mockRestore();
+    warned.mockRestore();
   });
 });

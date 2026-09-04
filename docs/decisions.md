@@ -214,3 +214,118 @@ Running record of decisions made with the owner. Newest at the bottom.
 - **Owner actions:** twitterapi.io account + `X_API_KEY` on Railway; optional $1 pilot on one chatty handle to confirm reply delivery. Build proceeds against mocks and stays dormant until the key exists.
 - **Amendments (build review, 2026-09-03).** (a) **A failed confirmation is a QUEUE, never silence.** A Tier-A post whose address does not confirm (unresolved, unreadable, a thrown read) becomes a `launch_candidates` row of kind `posted`, re-confirmed on the round-17b ladder (45s/15m -> 5min/6h -> hourly) until it confirms and takes the normal fire path, or until the post passes `launchMaxPoolAgeHours` ('aged_out'). Only TWO rejections skip the queue: a known quote/router/factory/burn address and evidence older than 24h. The board shows a pending row with the post, its time and the last reason. (b) **The cursor is the runner's.** A page is processed OLDEST-first, each post in its own try/catch; the cursor moves past a post only once it was processed, a throw stops the page (the rest is re-read next poll), a TRUNCATED page (`maxPagesPerPoll` 10) does not move the cursor at all — the adapter serves newest-first, so the unread stretch is the older one and the whole window is re-read next poll (the seen set absorbs the duplicates) — and an empty poll never rewinds. (c) **Cadence** is `XWATCH.pollSeconds` alone (60s, about $5.20/mo — one `advanced_search` shard of ~25 handles per poll, sized by `searchQueryMaxChars` 480; `ruleValueMaxChars` 255 is kept for a future webhook/rule adapter). (d) **Status honesty:** a handle that stops resolving is 'renamed' (the @ no longer answers for the account you added), never 'suspended' — that word needs the provider to say it, asked of the stored `x_user_id`; the two 404s say different sentences. (e) **Launch clock = earliest evidence** (our discovery row, else the PONS launch block, else the pool), persisted as `launched_token_created_at`; the hijack hold, the 24h ceiling and "launched Nm ago" all read it, and `launched_hold_reason` records why a launch stayed board-only. (f) The auto-watch belongs to the PING: a held or muted launch takes no slot. (g) The alert row is written FIRST and `launch_pinged` is set from whether it was actually inserted. (h) `expires_at` is the single expiry source, pushed forward by every post, and the sweep also collects 'renamed'/'suspended' so a broken monitor frees its slot. (i) A post older than max(added_at, now - `lookbackMinutes`) is ignored: a newly tracked handle can never replay yesterday. (j) `RT @x:` text is a retweet whatever the provider flags, and a reply with no parent id is `reply_unattributable` (silence). (k) Tier B is ON: `socials()` returns five ABI strings, index 0 is the X URL, and a revert means "not a PONS v2 token" (verified on chain, docs/research-x-monitor.md section 2). (l) Slots are counted on the occupying statuses everywhere (route, bot header, caps), and an expired monitor can be untracked.
 - **Amendments (final review, 2026-09-03).** (m) **No launch post is silenced by a transient failure.** Every pending row's whole body (monitor read, group read, confirm, fire, delete) is isolated: a throw anywhere settles that row onto the next ladder rung as `error:<name>` and the pass carries on with the next row. `no_code` is no longer a definitive rejection — a launch announced before its deploy lands, and a node one block behind, read identically — so only the 24h age-out and the two definitive rejections in (a) end a queued address. (n) **The housekeeping tick does not honour the X back-off.** `pausedUntilMs` is a back-off against the PROVIDER: the pending queue, the expiry sweep and the Tier-B scan read our own tables and the chain and run regardless; only the profile rotation (the one provider caller in that loop) skips a paused pass. (o) **The window floor follows the cursor.** A poll's floor is max(added_at, min(previous cursor, now - `lookbackMinutes`)), so an outage's backlog is processed instead of being clipped to the last ten minutes, and discarded posts are logged once per poll with a count. (p) **A contradiction is not evidence:** when the handle lookup says "gone" and the stored id answers under THAT SAME handle, nothing is written and the next rotation asks again; 'renamed' needs the id under a different handle (or no id opinion at all), and a 200 body carrying `status: 'error'` is only not_found when its message says the user is missing. (q) Bounds: `maxAddressesPerPost` 3 queued per post, `candidatesPerMonitor` 10 served per monitor (a correlated count, so one hunted handle cannot crowd the board), and Tier B retires an address only after `tierBNullReadsToRetire` 3 null `socials()` answers — a null is a revert OR a failed read. (r) `profile_refreshed_at` is stamped at TRACK time (the resolve that added the handle was a refresh), so a fresh handle does not jump the oldest-first rotation.
+
+## Round 25 — X monitor visibility: the search index is not the account (2026-09-04)
+
+- **Measured, with the production provider key.** The group tracked `@legsdotfun` (monitor added
+  2026-09-02 23:21Z). On 2026-09-03 21:05:19Z the account posted, as a TOP-LEVEL post,
+  "$LEGS is now live on Robinhood Chain. CA: 0x8fcf98e1348d3ddee46cdd15a5c7d9a8d423077d …"
+  (post 2095619171002593725, author id 2094468493223620608), and posted the CA three more times
+  after that. The watcher was healthy and polling every 60 s throughout. It never saw a single one:
+  `launch_monitors.last_post_at` stayed null for two days.
+- **Root cause 1 — X hides some accounts from the Latest index.** `GET /twitter/tweet/advanced_search`
+  with `queryType=Latest` returns ZERO posts for `from:legsdotfun` — for every window we asked, and
+  for all time. `queryType=Top` returns the same account's posts, launch post included.
+  `GET /twitter/user/last_tweets` returns an empty list for it. Other accounts
+  (`gaiadotfinance`, `RobinhoodCrypto`) answer normally in Latest, so this is per-account, not an
+  outage and not our query. Round 23 polled Latest and only Latest, so a hidden account is a monitor
+  that can never fire — the exact failure the feature exists to prevent.
+- **Decision — recover the posts from the replies, and sweep Top.** `to:<handle>` in Latest returns
+  every reply to the account within seconds (measured: first reply +130 s on the launch post, +24 s
+  on the next), and a reply carries `inReplyToId` (the parent post) and `inReplyToUserId` (the parent
+  author). So each poll also searches replies TO the tracked accounts, collects the unseen parent
+  ids whose author is the tracked account, and fetches them with
+  `GET /twitter/tweets?tweet_ids=a,b,c` — which returns the parent posts with `author.id`, `text`,
+  `createdAt` and `entities.urls`. Recovered parents go through the SAME detector as a directly
+  observed post, and are judged against their own floor (never before the monitor was added, never
+  older than `XWATCH.parentLookbackMinutes` = 60). The account's OWN posts on that page are
+  judged where they are found rather than thrown away as pointers: a `to:` shard returns the
+  tracked account's self-replies too, and a CA dropped under the announcement is the pattern the
+  detector was written for — it is already in hand, so it costs no call. The reply cursor,
+  unlike round 23(b)'s from: cursor, ALWAYS ADVANCES: a truncated page does not hold it and a
+  failed parent fetch does not either, because a stranger's reply is a redundant pointer (every
+  reply to a post names the same parent) and holding the window would let one viral thread pin it
+  open and be re-read every poll. The outstanding work is carried by the pending parent-id queue,
+  not by the window; what is accepted in exchange is that a truncated reply window's older
+  replies are not re-read, with the continuing stream of new replies and the Top sweep as the
+  backstops — and, unlike the from: poll, a truncated reply page is currently silent. A combined
+  `(from:a OR to:a OR from:b OR to:b) since_time:N` query is accepted by the provider and is the
+  obvious way to halve this later; what SHIPPED is a second, independent `to:` shard set with its
+  own search per poll (see Cost). Belt to those braces: every
+  `XWATCH.topSweepEveryPolls` (5) polls the `from:` shard is also asked with `queryType=Top` over
+  the last `XWATCH.topLookbackMinutes` (15) — Top is engagement-ranked and DID carry the hidden
+  account's launch post, so a post nobody replied to but somebody liked is still found. The Top
+  sweep never moves the cursor, and it is INDEPENDENT of reply recovery: its cadence is counted on
+  polls the `from:` read answered, and a pausing refusal from the reply read is held until the
+  sweep has run (then rethrown into the back-off). Otherwise the read most likely to draw a 429 —
+  the `to:` read pages hardest — would silently disable the only remaining road to a hidden
+  account nobody replies to.
+- **The source is recorded and the board says it.** `launch_monitors.last_post_via`
+  ('search' | 'replies' | 'top', migration 0016) records how the newest post we hold actually
+  reached us, and it is served on `ProjectEntry.lastPostVia`. A row whose value is not 'search'
+  prints a dim sub-text line — "newest post reached us through a reply, not through X search" (or
+  "through the Top sweep") — because a reader cannot otherwise tell a normally-indexed account
+  from one whose primary channel is blind. No colour of its own, no warning voice, nothing said
+  about the account. It reports the ROAD, not a verdict on X's index: the three reads use
+  different windows (10 / 60 / 15 minutes) over in-process state a restart empties, so a visible
+  account whose post falls in the gap can be recovered by a reply, and only the operator log makes
+  the stronger claim ("may be hiding this account"). It is past tense because only 'active'
+  monitors are polled and a recovered launch ends as 'launched' — "watching replies" would be a
+  claim about a stopped poller on the very row this path exists to produce. The stamp keeps the
+  road that got there FIRST: it moves only for a strictly newer post, or a different post id
+  inside the same second, so re-reading a recorded post by a slower road cannot restamp it; and a
+  re-track clears the column with the rest of the post history.
+- **Root cause 2 — Tier B was scanning the wrong rows, and had never written one.**
+  `xwatch/tierB.ts` scanned `discovery_events` rows with `kind='launch'` only, and those rows are
+  exclusively first Uniswap v2/v4 pools. A PONS token — the only kind whose `socials()` Tier B can
+  decode — never produces a 'launch' row; it appears as a 'graduation'. So in production Tier B had
+  never read a single PONS `socials()` and had never written a candidate. The LEGS graduation row
+  (id 1462, 2026-09-03 21:03:56Z) even carried `twitter_url = https://x.com/legsdotfun` from
+  enrichment by 21:06Z, unused.
+- **Decision — Tier B scans three sources, cheapest first, still board-only.** (1) ENRICHMENT: a
+  discovery row of EITHER kind whose stored `twitter_url` names a tracked handle claims with no
+  chain call at all; **no URL is not an answer** — enrichment lands minutes after the row (LEGS:
+  row 21:03:56Z, enriched 21:06:17Z), so an unenriched row falls through instead of being retired
+  — and **nor is a URL naming a stranger**: the two free passes are re-derived from bounded
+  SELECTs every scan, the tracked set changes between scans, and "I saw a coin claiming @foo, so I
+  tracked @foo" is the flow this tier serves, so only a URL that answered for a monitor on this
+  board retires the address. (2) CHAIN: `socials()` for what enrichment could not answer, still
+  bounded at 20 reads per pass with the three-null retirement rule, retiring on **its own key**
+  ("no socials() to read" is not "we know who this coin names", and a DexScreener URL landing
+  hours later is free to read). (3) CALLS: a token the group ITSELF called inside the window whose
+  `tokens.socials` name a handle that **same group** tracks, read with the shared
+  `twitterUrlFrom` (round 9's defensive reader — that jsonb is written verbatim from DexScreener's
+  own `type` strings, so `->>'twitter'` would miss an `x`-keyed row on the one pass that is the
+  whole of Tier B without a chain client). Group-scoped, because a call is a fact about one
+  group's chat. THE CANDIDATE POOL IS ONE QUERY PER KIND, each limited to the newest
+  `SCAN_CANDIDATES` (500) rows: the effective look-back is min(24h, that many rows per kind), and
+  a shared cap let a busy launch hour crowd every graduation out of the pool — the same pathology
+  `api/discovery.ts` already fixed in production, on the rows round 25 widened the scan to read.
+  Cadence is unchanged (the runner's 30-minute slow pass); a dedicated `tierBMinutes` knob is left
+  open.
+- **Cost — TWO terms, and the second one is now the driver.** twitterapi.io bills $0.00012 per
+  CALL *and* $0.00015 per POST RETURNED. Round 23 could ignore the second term because a `from:`
+  shard returns a handful of the account's own posts a day; a `to:` shard returns every reply to
+  those accounts, paged in full (`maxPagesPerPoll` 10, ~20 posts a page).
+  *Calls:* at one shard and `pollSeconds` 60 — from: 43.2K + to: 43.2K + up to 43.2K parent
+  fetches + 8.6K Top sweeps ≈ 95–138K calls/month = **$11–17**.
+  *Posts:* twelve pre-launch hype accounts at a few hundred replies a day each is 2.4–6K
+  replies/day = 72–180K posts/month = **$11–27**, and a sustained busy minute that saturates the
+  page bound is 200 posts a poll (~$0.03/poll). So the honest figure at the 12-handle cap is
+  **$20–45/month, not "well under $20"** — and it scales with how popular the tracked accounts
+  are rather than with our cadence: halving `pollSeconds` halves the calls and leaves the post term
+  almost unchanged, because each poll's window simply doubles.
+  *The levers that actually cap the post term:* `maxPagesPerPoll` (10) bounds the replies one poll
+  can pull per shard — a reply-specific, lower bound is the obvious next knob, since the reply
+  cursor always advances and unread replies are redundant pointers rather than lost posts — and
+  `last_post_via` now records which accounts the `from:` road is serving, so a future round can
+  skip the `to:` shard for handles whose posts arrive as 'search'. Secondary knobs: `pollSeconds`
+  (60), `parentLookbackMinutes` (60), `parentsPerPoll` (20), `topSweepEveryPolls` (5),
+  `topLookbackMinutes` (15). NOTE: `XRequestMeter` counts REQUESTS only, so the hourly meter line
+  cannot see the term that now dominates.
+- **Unchanged.** Tier A — the account's own post carrying an address that confirms on chain — is
+  still the ONLY thing that pings, and a recovered post is a Tier-A post like any other, judged by
+  the same detector, the same confirmation and the same one-message-per-monitor rule. The hijack
+  hold (`XWATCH.hijackHoldMinutes` = 10) still holds a ping board-only when the token predates the
+  post. Tier B is still board-only and can never produce a chat message, from any of its three
+  passes.

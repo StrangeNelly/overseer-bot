@@ -153,3 +153,67 @@ monitor flips to `launched` and leaves the rule on fire — one message per moni
 3. Confirm ping + auto-watch, no synthetic call.
 4. Caps: 12 handles per group, 3 per member, 60-day expiry.
 5. Run Tier A silent (board only) for a week before enabling the chat ping?
+
+## Appendix — Measured 2026-09-04: Latest search hides accounts (round 25)
+
+Everything below was measured against twitterapi.io with the production key, on the account the
+group actually tracks (`@legsdotfun`, monitor added 2026-09-02 23:21Z, author id
+2094468493223620608). Section 3's provider verdict stands; what changes is the assumption underneath
+it — that `from:<handle>` in the Latest index is a complete view of an account's posts. It is not.
+
+**The blind spot.**
+
+| Probe | Result |
+| --- | --- |
+| `advanced_search` `from:legsdotfun`, `queryType=Latest`, every window tried, and all time | **0 posts** |
+| `advanced_search` `from:legsdotfun`, `queryType=Top` | **15+ posts**, including the launch post |
+| `GET /twitter/user/last_tweets` for the same handle | **empty list** |
+| `advanced_search` `from:gaiadotfinance` / `from:RobinhoodCrypto`, `Latest` | normal results |
+| `advanced_search` `to:legsdotfun`, `Latest` | **every reply**, within seconds |
+
+So the hiding is per-account, not an outage, not rate limiting and not our query shape: the same
+call answers for other handles in the same second. The consequence for round 23 is total — the
+watcher polled Latest and only Latest, so `launch_monitors.last_post_at` stayed null for two days
+while the account posted its contract address four times. The launch post itself
+(2095619171002593725, 2026-09-03 21:05:19Z, 288 replies / 1,219 likes / 241,481 views) reads:
+"$LEGS is now live on Robinhood Chain.\n\nCA:   0x8fcf98e1348d3ddee46cdd15a5c7d9a8d423077d\n\nBuild
+short-term parlays across memecoins and tokenized stocks."
+
+**The recovery, and its latency.** A reply carries `inReplyToId`, `inReplyToUsername` and
+`inReplyToUserId`, so replies TO a tracked account name the parent post and its author. Measured lag
+from the parent post to the first reply that surfaced it: **+130 s** on the launch post, **+24 s** on
+the next. That is the floor on recovery latency for a hidden account. For a visible one the `from:`
+shard USUALLY answers first, but not always: the two roads use different windows (`lookbackMinutes`
+10 against `parentLookbackMinutes` 60) over in-process state a restart empties, so a post that lands
+in that gap is recovered by a reply on an account X indexes perfectly well. That is why the stored
+source is a record of the ROAD, not a verdict on X's index, and why the board says so in those
+words.
+
+**The parent fetch.** `GET /twitter/tweets?tweet_ids=a,b,c` -> `200 { "tweets": [...], "status":
+"success", "msg": "success" }`, and the returned parents carry `author.id`, `text`, `createdAt` and
+`entities.urls` — everything the detector needs. Two shape notes worth pinning, because they are
+what a naive `if (post.inReplyToId)` gets wrong:
+
+- a NON-reply from this endpoint carries **empty strings**, not nulls, in `inReplyToId`,
+  `inReplyToUserId` and `inReplyToUsername`;
+- `entities.symbols` carries the `$LEGS` cashtag while `entities.urls` is empty — the address is in
+  the text, which is where the round-23 detector already reads first.
+
+**Query shape.** A combined `(from:a OR to:a OR from:b OR to:b) since_time:<10 digits>` query is
+accepted — the measured option. Round 25 ships a SEPARATE `to:` shard set instead (one search per
+from: shard plus one per to: shard each poll), so the reply read cannot crowd the account's own
+posts out of a page. `queryType=Top` takes the same envelope as Latest
+(`{ tweets, has_next_page, next_cursor }`) and honours `since_time`/`until_time`.
+
+**Second measurement, same day: Tier B had never run.** `xwatch/tierB.ts` scanned `discovery_events`
+rows with `kind='launch'`, and those rows are only ever first Uniswap v2/v4 pools. A PONS token
+reaches a Uniswap pool by GRADUATING, so it appears exclusively as `kind='graduation'` — meaning the
+one launchpad whose `socials()` section 2 verified was the one source Tier B never asked. Zero
+`launch_candidates` rows of kind 'claims' existed in production. The LEGS graduation row (id 1462,
+2026-09-03 21:03:56Z) carried `twitter_url = https://x.com/legsdotfun` from DexScreener enrichment
+by 21:06Z and nothing read it. Round 25 scans both kinds, reads that stored URL before spending a
+chain call, and adds the group's own calls (read through the shared `twitterUrlFrom` socials reader) as a third, free source.
+
+**What did NOT go wrong.** The hijack hold was not involved: our own discovery row dated the token
+83 seconds before the post, well inside `XWATCH.hijackHoldMinutes`. The detector, the confirmation
+path and the ping rules were never reached, because no post ever arrived.

@@ -1,0 +1,1 @@
+ALTER TABLE "launch_monitors" ADD COLUMN "last_post_via" text;

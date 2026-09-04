@@ -183,6 +183,11 @@ export async function trackMonitor(
           lastCheckedAt: null,
           lastPostAt: null,
           lastTweetId: null,
+          // POST HISTORY, NOT PROFILE. `last_post_via` describes how the post
+          // this row holds reached us, and the three columns above just said it
+          // holds none — leaving a stale 'replies' would make a monitor that has
+          // seen nothing print a fact about X's index it has no evidence for.
+          lastPostVia: null,
           providerRuleId: null,
           launchedAddress: null,
           launchedTokenId: null,
@@ -410,22 +415,64 @@ export async function setRuleIds(db: Db, byMonitor: Map<number, string>): Promis
  * rule recomputed from two other columns wherever somebody needs it.
  *
  * `greatest` so an out-of-order page can never move either clock backwards.
+ *
+ * `via` is WHICH READ FOUND IT (round 25): the from: search, reply recovery, or
+ * the Top sweep. It is diagnosis, not decoration — an account whose posts only
+ * ever arrive via replies/top is an account X is hiding from the Latest index,
+ * which is the failure this round exists to survive and the one thing a stored
+ * column can tell an operator about it.
  */
 export async function recordPost(
   db: Db,
   monitorId: number,
-  post: { at: Date; id: string },
+  post: { at: Date; id: string; via: 'search' | 'replies' | 'top' },
 ): Promise<void> {
   // No bare Date inside a raw sql template (the driver does not encode it):
   // ISO string plus an explicit cast, the repo's rule everywhere.
   const at = post.at.toISOString();
   const expires = new Date(post.at.getTime() + XWATCH.expireDays * 86_400_000).toISOString();
+  // COMPARED AGAINST THE OLD ROW, in the same statement and for the same reason
+  // `greatest` guards the clocks below: reply recovery can hand us a post OLDER
+  // than the one already recorded (parents are fetched over a sixty-minute
+  // window, oldest-first, minutes after the from: poll saw a newer post), and
+  // letting that stamp 'replies' over the newer post's 'search' would report an
+  // account as hidden on the strength of a read that arrived late, not first.
+  //
+  // STRICTLY NEWER, or a DIFFERENT post in the same second. The equal case is
+  // the same post arriving twice by a slower road — the seen set is in-process
+  // only, so after a restart the from: read's ten-minute window no longer serves
+  // a post the sixty-minute recovery window still reaches, and X's createdAt is
+  // second-precision, so `at` is byte-identical on the second write.
+  // Re-recording it must keep the source that found it FIRST; the id clause is
+  // what still lets a genuinely second post inside that one second through.
+  //
+  // (In postgres every SET expression reads the PRE-UPDATE row, so all three
+  // column references below see the post this row held before this statement.)
+  const isNewerPost = sql`${launchMonitors.lastPostAt} is null
+      or ${launchMonitors.lastPostAt} < ${at}::timestamptz
+      or (${launchMonitors.lastPostAt} = ${at}::timestamptz
+          and coalesce(${launchMonitors.lastTweetId}, '') <> ${post.id})`;
   await db
     .update(launchMonitors)
     .set({
       lastPostAt: sql`greatest(coalesce(${launchMonitors.lastPostAt}, ${at}::timestamptz), ${at}::timestamptz)`,
       expiresAt: sql`greatest(coalesce(${launchMonitors.expiresAt}, ${expires}::timestamptz), ${expires}::timestamptz)`,
-      lastTweetId: post.id,
+      // THE SAME GUARD AS `last_post_via`, and it must be the same one: the id
+      // is what the tie-break above reads to tell a second post inside one
+      // second from the same post re-read. Written unconditionally, an older
+      // post recorded after a newer one (recovery's oldest-first pass) would
+      // leave the id pointing at the OLD post while `last_post_at` still held
+      // the newer one — and the next re-read of that newer post would then look
+      // like "same second, different id" and restamp the source anyway, which
+      // is the whole defect this guard exists to close. Guarded, the three
+      // columns always describe ONE post: its clock, its id, its road here.
+      // (The one deliberate exception is alerts.ts's launch flip, which stamps
+      // the LAUNCHING post's id on its own — that write is the launch record,
+      // not this post clock.)
+      lastTweetId: sql`case when ${isNewerPost} then ${post.id} else ${launchMonitors.lastTweetId} end`,
+      // WHICH READ FOUND IT — the from: search, reply recovery, or the Top
+      // sweep — and only ever for the newest post this row holds.
+      lastPostVia: sql`case when ${isNewerPost} then ${post.via} else ${launchMonitors.lastPostVia} end`,
     })
     .where(eq(launchMonitors.id, monitorId));
 }

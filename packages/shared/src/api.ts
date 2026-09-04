@@ -272,6 +272,14 @@ export interface ProjectEntry {
   accountCreatedAt: string | null;
   /** The account's most recent post we have seen, null before the first check. */
   lastPostAt: string | null;
+  /**
+   * How that post reached us (round 25): 'search' = the account's own `from:`
+   * Latest result; 'replies' = recovered as the parent of a reply to the
+   * account; 'top' = the Top sweep. X hides some accounts from Latest search
+   * (@legsdotfun, 2026-09-03), so anything but 'search' means this account's
+   * posts are being seen by recovery only — the board says so on the row.
+   */
+  lastPostVia: 'search' | 'replies' | 'top' | null;
   /** Our last successful check of this account, null before the first. */
   lastCheckedAt: string | null;
   /** Free text the adder attached (`/overseer track @handle <note>`). */

@@ -12,17 +12,30 @@ import type { XRule } from './client.js';
  * each fit, and the shard is the unit everything above counts in: cost steps
  * with the number of rules, and a monitor records which shard it is polled in.
  *
+ * TWO GRAMMARS since round 25. `from:` is the account's own posts, and the
+ * reason it is not the only one is measured: X hides some accounts from the
+ * Latest index (`from:legsdotfun` returned zero posts for every window and for
+ * all time on 2026-09-04, while the account was posting), and `to:` returned
+ * every reply to that same account within seconds. So the same handle set is
+ * sharded twice, with the same code and the same cap: once to ask what the
+ * accounts said, once to ask what was said TO them.
+ *
  * Pure and deterministic: the same handle set always produces the same shards,
  * in the same order, with the same ids — so a sync that changed nothing writes
- * nothing.
+ * nothing. The two grammars produce DIFFERENT ids for the same handles, which
+ * is what keeps a monitor's recorded shard the from: one.
  */
 
 const JOINER = ' OR ';
 
-/** `from:legsdotfun` — the whole grammar this build uses. */
-function term(handle: string): string {
-  return `from:${handle}`;
-}
+/** How one handle becomes one search term. */
+export type TermBuilder = (handle: string) => string;
+
+/** `from:legsdotfun` — the account's own posts, and what a monitor records. */
+export const fromTerm: TermBuilder = (handle) => `from:${handle}`;
+
+/** `to:legsdotfun` — replies TO the account, the recovery path's shard. */
+export const toTerm: TermBuilder = (handle) => `to:${handle}`;
 
 /**
  * A stable id for a shard's contents. Not the provider's rule id (poll mode
@@ -43,10 +56,15 @@ export function shardId(value: string): string {
  * the sharding is stable under insertion order; a handle longer than a whole
  * rule (impossible at X's 15-character limit, but not assumed) gets its own
  * shard rather than being dropped.
+ *
+ * `term` is the grammar (from: by default, to: for reply recovery) — the length
+ * arithmetic below reads it rather than assuming a prefix, so a shorter or
+ * longer term packs correctly against the same cap.
  */
 export function shardHandles(
   handles: readonly string[],
   maxChars: number = XWATCH.ruleValueMaxChars,
+  term: TermBuilder = fromTerm,
 ): XRule[] {
   const unique = [...new Set(handles.map((h) => h.trim().toLowerCase()).filter((h) => h !== ''))];
   unique.sort();

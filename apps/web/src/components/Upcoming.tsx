@@ -93,6 +93,46 @@ interface UpcomingProps {
 
 const NO_WATCHLIST: readonly WatchlistEntry[] = [];
 
+/**
+ * HOW WE ARE SEEING THIS ACCOUNT AT ALL (docs/decisions.md round 25).
+ *
+ * X hides some accounts from its "Latest" index entirely: @legsdotfun's launch
+ * post (2026-09-03 21:05Z, 288 replies) never appeared under `from:legsdotfun`
+ * in Latest — for any window, or for all time — while `to:legsdotfun` returned
+ * every reply to it within seconds. So the watcher recovers those posts from
+ * their replies, and sweeps Top every few polls, and `lastPostVia` records
+ * which of the three actually carried the newest post we have.
+ *
+ * The row says so, because the alternative is a reader trusting a monitor whose
+ * primary channel is blind. It is a fact about X's index, not a fault of ours
+ * and not a warning about the account — so it gets the same dim sub-text every
+ * other note on this row gets, and no colour of its own.
+ *
+ * IT SAYS WHAT WE KNOW, WHICH IS LESS THAN "X HIDES THIS ACCOUNT". The column
+ * records which read got there FIRST, and the three reads use different windows
+ * (from: 10 minutes, recovery 60, Top 15) over in-process state that a restart
+ * empties — so a perfectly indexed account whose post lands in the gap is
+ * recovered by a reply and stamped 'replies' with X's index working fine. The
+ * strong claim is left to the operator log, which says "may be hiding"; the row
+ * reports the road the post travelled and nothing more.
+ *
+ * IT IS ALSO PAST TENSE, on purpose. Only 'active' monitors are polled, and a
+ * recovered launch ends its life as 'launched' — so "watching replies" would be
+ * a claim about a poller that has stopped, on the very row this whole path
+ * exists to produce. The provenance of the newest post we hold is true for a
+ * finished row and a live one alike.
+ */
+export const UPCOMING_VIA_NOTES = {
+  replies: 'newest post reached us through a reply, not through X search',
+  top: 'newest post reached us through the Top sweep, not through X search',
+} as const;
+
+export function postViaNote(via: ProjectEntry['lastPostVia']): string | null {
+  // 'search' is the normal channel and null is "no post seen yet" — neither is
+  // news, and a note on every row would make the one that matters invisible.
+  return via === 'replies' || via === 'top' ? UPCOMING_VIA_NOTES[via] : null;
+}
+
 export function Upcoming({
   data,
   loading,
@@ -387,6 +427,7 @@ function ProjectRow({
   const launched = entry.launched;
   const held = launched ? pingBadge(launched) : null;
   const statusNote = statusNoteText(entry.status);
+  const viaNote = postViaNote(entry.lastPostVia);
   return (
     <div className="row row-upc row-desk">
       <div className="row-head">
@@ -433,6 +474,11 @@ function ProjectRow({
           still follows the account it was created from, and the @ they typed is
           now somebody else's. */}
       {statusNote ? <p className="upc-status-note">{statusNote}</p> : null}
+
+      {/* Same dim sub-text line, and deliberately the same class: on a phone
+          `.upc-status-note` is the one rule that re-indents these notes with the
+          rest of the row, and a second class would have to repeat it. */}
+      {viaNote ? <p className="upc-status-note">{viaNote}</p> : null}
 
       <div className="upc-foot">
         <span>{addedText(entry, now)}</span>

@@ -63,6 +63,16 @@ export interface XPost {
    */
   isReply?: boolean;
   inReplyToUserId?: string | null;
+  /**
+   * The PARENT post's id — what reply recovery is built on (round 25). X hides
+   * some accounts from the Latest index entirely (@legsdotfun's launch post,
+   * 2026-09-03 21:05Z, never appeared under `from:legsdotfun`), but the REPLIES
+   * to it did, and each reply names the post it answers. So a reply nobody
+   * tracks is still a pointer to a post we do.
+   */
+  inReplyToId: string | null;
+  /** The parent post's author handle: lowercase, no @, null when unstated. */
+  inReplyToHandle: string | null;
   permalink: string;
 }
 
@@ -118,6 +128,32 @@ export interface TweetWatcher {
   syncRules(handles: string[]): Promise<XRule[]>;
   /** New posts by the tracked accounts since `cursor` (unix seconds, or null). */
   pollResults(cursor: string | null): Promise<XPollResult>;
+  /**
+   * REPLIES TO the tracked accounts since `cursor` — the recovery path (round
+   * 25). Measured 2026-09-04 with the production key: `from:legsdotfun` in
+   * Latest returned ZERO posts for every window and for all time, while
+   * `to:legsdotfun` returned every reply to the account (first reply +130s
+   * after the launch post, +24s after the next one). The replies are not the
+   * signal; the parent ids they carry are.
+   *
+   * OPTIONAL, like every method below it: an adapter without these three is
+   * polled exactly as it was before this round, from: only.
+   */
+  pollReplies?(cursor: string | null): Promise<XPollResult>;
+  /**
+   * The from: shards asked with queryType=Top, one page each. Top is
+   * engagement-ranked rather than index-backed, and it DID carry the hidden
+   * account's launch post when Latest did not — so it is the belt to reply
+   * recovery's braces, for a post nobody replied to.
+   *
+   * `sinceSeconds` is the INSTANT to search from, in whole unix seconds — NOT a
+   * duration. The caller passes now minus XWATCH.topLookbackMinutes and the
+   * adapter substitutes it straight into `since_time:`; reading it as a window
+   * length would search from the epoch.
+   */
+  pollTop?(sinceSeconds: number): Promise<XPost[]>;
+  /** Posts by id — how a recovered parent is actually read. */
+  fetchPosts?(ids: string[]): Promise<XPost[]>;
   /** Requests spent, for the hourly meter line. */
   meter(): { total: number; windowCount: number };
 }
@@ -181,8 +217,11 @@ export function shouldPauseXPolling(err: unknown): boolean {
 
 /**
  * What this process has spent at the provider. Logged once an hour, in
- * requests: twitterapi.io bills a minimum per CALL (empty checks included), so
- * the request count IS the bill's shape.
+ * REQUESTS only: twitterapi.io bills a minimum per call (empty checks
+ * included) PLUS a per-post charge, and since round 25's `to:` reads return
+ * every reply to a tracked account, the posts-returned term is the larger half
+ * of the bill (docs/decisions.md round 25, Cost). This counter is the calls
+ * half; the posts half is not metered here.
  */
 export class XRequestMeter {
   private total = 0;

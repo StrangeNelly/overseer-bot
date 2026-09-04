@@ -205,6 +205,21 @@ const whereSql = (call: DbCall | undefined): string =>
 const whereParams = (call: DbCall | undefined): unknown[] =>
   call?.where ? (dialect.sqlToQuery(call.where).params as unknown[]) : [];
 
+/**
+ * The post id a statement recorded. recordPost writes `last_tweet_id` through
+ * the SAME CASE guard as `last_post_via` — written plainly, an older post
+ * recorded after a newer one would desync the two columns and let the next
+ * re-read of the newer post restamp its source — so the id arrives as the
+ * expression's last bound parameter (the ELSE branch is the column itself).
+ * The launch flip and a track's reset still write the column plainly.
+ */
+const tweetIdOf = (call: DbCall | undefined): unknown => {
+  const value = call?.set?.lastTweetId;
+  if (value === undefined || value === null || !is(value, SQLClass)) return value;
+  const params = dialect.sqlToQuery(value).params as unknown[];
+  return params[params.length - 1];
+};
+
 async function capture<T>(run: () => Promise<T>): Promise<{ result: T; events: GroupieEvent[] }> {
   const events: GroupieEvent[] = [];
   const off = subscribe((event) => events.push(event));
@@ -236,6 +251,7 @@ function monitorRow(over: Partial<MonitorRow> = {}): MonitorRow {
     addedMessageId: MESSAGE_ID,
     lastCheckedAt: new Date('2026-09-03T11:59:00.000Z'),
     lastPostAt: new Date('2026-09-03T11:50:00.000Z'),
+    lastPostVia: 'search',
     lastTweetId: '1899',
     providerRuleId: 'shard:abc',
     launchedAddress: null,
@@ -382,7 +398,11 @@ describe('trackMonitor', () => {
     const expiresAt = values.expiresAt as Date;
     const days = (expiresAt.getTime() - before) / 86_400_000;
     expect(days).toBeGreaterThan(XWATCH.expireDays - 1);
-    expect(days).toBeLessThanOrEqual(XWATCH.expireDays);
+    // `before` is read a tick before trackMonitor takes its own clock, so the
+    // expiry is sixty days plus however long that tick was: the bound has to
+    // carry a second of it, or the assertion fails on whichever run happens to
+    // straddle a millisecond.
+    expect(days).toBeLessThanOrEqual(XWATCH.expireDays + 1 / 86_400);
   });
 
   it('refuses a duplicate — and a launched monitor is a duplicate too', async () => {
@@ -445,6 +465,12 @@ describe('trackMonitor', () => {
     expect(set.launchedAddress).toBeNull();
     expect(set.launchPinged).toBe(false);
     expect(set.lastTweetId).toBeNull();
+    // POST HISTORY GOES WITH THE POST. A stale 'replies' on a row that now holds
+    // no post at all would print a fact about X's index this monitor has never
+    // had evidence for, and would silence the operator's one hidden-account
+    // warning for it.
+    expect(set.lastPostAt).toBeNull();
+    expect(set.lastPostVia).toBeNull();
     // ...but the profile clock is stamped by THIS track's resolve, not cleared.
     expect(set.profileRefreshedAt).toBe(set.addedAt);
     expect(set.profileRefreshedAt).toBeInstanceOf(Date);
@@ -486,7 +512,7 @@ describe('the monitor list clocks', () => {
   it('records a post and pushes the expiry sixty days past it', async () => {
     const { db, calls } = makeDb();
     const at = new Date('2026-09-03T12:00:00.000Z');
-    await recordPost(db, 11, { at, id: '1900' });
+    await recordPost(db, 11, { at, id: '1900', via: 'search' });
     const set = find(calls, 'update:launchMonitors')[0]?.set ?? {};
     const expires = dialect.sqlToQuery(set.expiresAt as SQL);
     // greatest(), so an out-of-order page can never pull either clock back.
@@ -494,6 +520,49 @@ describe('the monitor list clocks', () => {
     expect(expires.params).toContain(
       new Date(at.getTime() + XWATCH.expireDays * 86_400_000).toISOString(),
     );
+  });
+
+  it('stamps the SOURCE only for a strictly newer post, or a different one in the same second', async () => {
+    const { db, calls } = makeDb();
+    const at = new Date('2026-09-03T12:00:00.000Z');
+    await recordPost(db, 11, { at, id: '1900', via: 'replies' });
+    const via = dialect.sqlToQuery(
+      find(calls, 'update:launchMonitors')[0]?.set?.lastPostVia as SQL,
+    );
+    // Compared against the OLD row, in the same statement `greatest` guards the
+    // clocks in: reply recovery can hand us a post OLDER than the one already
+    // recorded, and stamping 'replies' over a newer post's 'search' would call
+    // an account hidden on the strength of a read that arrived late.
+    expect(via.sql).toContain('case');
+    expect(via.sql).toContain('is null');
+    // STRICT. The equal case is the SAME post arriving twice by a slower road —
+    // the seen set is in-process only, and X's createdAt is second-precision, so
+    // after a restart a recovered re-read carries a byte-identical `at`. Only
+    // the id clause lets a genuinely second post inside that second through.
+    expect(via.sql).not.toContain('<=');
+    expect(via.sql).toContain('coalesce');
+    expect(via.params).toEqual([at.toISOString(), at.toISOString(), '1900', 'replies']);
+  });
+
+  it('guards the tweet id with the SAME rule, so the two columns cannot disagree', async () => {
+    const { db, calls } = makeDb();
+    const at = new Date('2026-09-03T12:00:00.000Z');
+    await recordPost(db, 11, { at, id: '1900', via: 'replies' });
+    const set = find(calls, 'update:launchMonitors')[0]?.set ?? {};
+    const tweetId = dialect.sqlToQuery(set.lastTweetId as SQL);
+    // Written unconditionally, an OLDER post recorded after a newer one (reply
+    // recovery walks its sixty-minute window oldest-first) would leave the id
+    // pointing at the old post while last_post_at still held the newer one —
+    // and the next re-read of the newer post would read "same second, different
+    // id" off that desync and restamp the source, which is exactly the wrong
+    // "X search hides this account" claim the via guard exists to prevent.
+    expect(tweetId.sql).toContain('case');
+    expect(tweetId.sql).not.toContain('<=');
+    expect(tweetId.params).toEqual([at.toISOString(), at.toISOString(), '1900', '1900']);
+    // Byte-for-byte the same condition as the via guard, minus its two payloads.
+    const via = dialect.sqlToQuery(set.lastPostVia as SQL);
+    const condition = (text: string): string => text.slice(0, text.lastIndexOf('then'));
+    expect(condition(tweetId.sql)).toBe(condition(via.sql));
   });
 
   it('caps candidates PER MONITOR, so one hunted handle cannot crowd the board', async () => {
@@ -1708,6 +1777,8 @@ function xpost(over: Partial<XPost> = {}): XPost {
     createdAt: new Date(CLOCK.getTime() - 60_000),
     isRetweet: false,
     isQuote: false,
+    inReplyToId: null,
+    inReplyToHandle: null,
     permalink: `https://x.com/${HANDLE}/status/${POST_ID}`,
     ...over,
   };
@@ -1765,7 +1836,7 @@ describe('the poll cursor', () => {
     expect(cursors[1]).toBe(String(Math.floor(newer.createdAt.getTime() / 1000) - 1));
     // Both posts were recorded, oldest first.
     const recorded = find(calls, 'update:launchMonitors').filter((c) => c.set?.lastTweetId);
-    expect(recorded.map((c) => c.set?.lastTweetId)).toEqual(['1', '2']);
+    expect(recorded.map(tweetIdOf)).toEqual(['1', '2']);
   });
 
   it('stops the page on a throw and leaves the cursor at the last post it finished', async () => {
@@ -1783,7 +1854,7 @@ describe('the poll cursor', () => {
     expect(cursors[1]).toBe(String(Math.floor(first.createdAt.getTime() / 1000) - 1));
     // The third post was never touched: the page stopped at the failure.
     const recorded = find(calls, 'update:launchMonitors').filter((c) => c.set?.lastTweetId);
-    expect(recorded.map((c) => c.set?.lastTweetId)).toEqual(['1', '2']);
+    expect(recorded.map(tweetIdOf)).toEqual(['1', '2']);
   });
 
   it('HOLDS the cursor on a truncated page — the unread stretch is the older one', async () => {
@@ -1880,7 +1951,7 @@ describe('the poll cursor', () => {
       mode = 'backlog';
       await vi.advanceTimersByTimeAsync(20 * 60_000);
       const recorded = find(calls, 'update:launchMonitors').filter((c) => c.set?.lastTweetId);
-      expect(recorded.map((c) => c.set?.lastTweetId)).toEqual(['1', '2']);
+      expect(recorded.map(tweetIdOf)).toEqual(['1', '2']);
       handle.stop();
     } finally {
       vi.useRealTimers();
@@ -2036,7 +2107,11 @@ describe('scanLaunchCandidates', () => {
     // The third read answers, and the claim lands.
     expect(await scanLaunchCandidates(scanDb().db, nullThenClaim, Date.now(), seen, misses)).toBe(1);
     expect(reads).toBe(3);
-    expect(seen.has(CA.toLowerCase())).toBe(true);
+    // Retired on the CHAIN's own key: "this token has no socials() to read" is
+    // not "we know who this coin names", so a DexScreener twitter_url landing
+    // hours later is still free for the enrichment pass to answer with.
+    expect(seen.has(`chain:${CA.toLowerCase()}`)).toBe(true);
+    expect(seen.has(CA.toLowerCase())).toBe(false);
     expect(misses.size).toBe(0);
   });
 
@@ -2055,5 +2130,394 @@ describe('scanLaunchCandidates', () => {
     }
     expect(reads).toBe(XWATCH.tierBNullReadsToRetire);
     expect(misses.size).toBe(0);
+  });
+});
+
+/* --------------------------------------------- round 25: the recovery reads */
+
+/**
+ * The @legsdotfun case, measured 2026-09-04 with the production key: the
+ * account posted its launch (2026-09-03 21:05:19Z, 288 replies) and the from:
+ * poll never saw it — `from:legsdotfun` with queryType=Latest returned zero
+ * posts for every window and for all time, and last_tweets was empty too —
+ * while `to:legsdotfun` returned every reply to that post within seconds.
+ *
+ * So the runner reads the replies for their PARENT IDS, fetches those parents
+ * by id, and puts them through the very same detector. These tests are about
+ * that road, and about it never being allowed to damage the from: road.
+ */
+
+const LAUNCH_ID = '2095619171002593725';
+const REPLY_ID = '2095981212414144517';
+
+/** One poll cycle against a watcher the test built itself. */
+async function runPolls(script: Script, watcher: TweetWatcher, polls: number): Promise<DbCall[]> {
+  vi.useFakeTimers();
+  vi.setSystemTime(CLOCK);
+  try {
+    const { db, calls } = makeDb(script);
+    const handle = startXWatch(db, watcher, null);
+    for (let i = 0; i < polls; i++) {
+      await vi.advanceTimersByTimeAsync(XWATCH.pollSeconds * 1000 + 10);
+    }
+    handle.stop();
+    return calls;
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
+/** A reply BY somebody else TO the tracked account, naming the parent post. */
+function replyTo(parentId: string, over: Partial<XPost> = {}): XPost {
+  return xpost({
+    id: REPLY_ID,
+    authorUserId: '9999',
+    authorHandle: 'rndrflame',
+    text: '@legsdotfun 500M runner, yessir',
+    createdAt: new Date(CLOCK.getTime() - 30_000),
+    isReply: true,
+    inReplyToId: parentId,
+    inReplyToUserId: X_USER_ID,
+    inReplyToHandle: HANDLE,
+    ...over,
+  });
+}
+
+/** ...and the post it answers: the account's own, carrying the address. */
+const launchPost = (over: Partial<XPost> = {}): XPost =>
+  xpost({
+    id: LAUNCH_ID,
+    text: `$LEGS is now live on Robinhood Chain. CA: ${CA}`,
+    createdAt: new Date(CLOCK.getTime() - 130_000),
+    ...over,
+  });
+
+/** The via CASE's bound parameters, as the statement carries them. */
+const viaParams = (call: DbCall | undefined): unknown[] =>
+  call?.set?.lastPostVia
+    ? (dialect.sqlToQuery(call.set.lastPostVia as SQL).params as unknown[])
+    : [];
+
+/**
+ * The recordPost statements, and only those: the LAUNCH FLIP writes
+ * `lastTweetId` too (it is the post that launched), so the source column — which
+ * nothing but recordPost touches — is what tells the two apart.
+ */
+const recordedPosts = (calls: DbCall[]): DbCall[] =>
+  find(calls, 'update:launchMonitors').filter((c) => c.set?.lastPostVia !== undefined);
+
+describe('reply recovery — the hidden account', () => {
+  it('fetches the parent a reply names and fires the launch off it', async () => {
+    vi.mocked(confirmAddress).mockResolvedValueOnce({ ok: true, token: CONFIRMED });
+    const asked: string[][] = [];
+    const watcher = watcherStub({
+      syncRules: async (handles) => [{ id: 'shard:abc', value: 'from:legsdotfun', handles }],
+      // The from: search is BLIND to this account — the whole point.
+      pollResults: async () => ({ posts: [], truncated: false }),
+      pollReplies: async () => ({ posts: [replyTo(LAUNCH_ID)], truncated: false }),
+      fetchPosts: async (ids) => {
+        asked.push([...ids]);
+        return ids.includes(LAUNCH_ID) ? [launchPost()] : [];
+      },
+    });
+    const calls = await runPolls(
+      {
+        'select:launchMonitors': [[monitorRow({ lastPostVia: 'search' })]],
+        'select:groups': [[{ settings: {}, status: 'active' }]],
+        ...fireScript(),
+      },
+      watcher,
+      1,
+    );
+    expect(asked).toEqual([[LAUNCH_ID]]);
+    const recorded = recordedPosts(calls);
+    expect(recorded.map(tweetIdOf)).toEqual([LAUNCH_ID]);
+    // Recorded as what actually found it, so the board and the logs can say the
+    // account is only reachable this way.
+    expect(viaParams(recorded[0])).toContain('replies');
+    // ...and it is judged exactly like a directly observed post: confirmed, and
+    // announced.
+    expect(find(calls, 'insert:alerts')).toHaveLength(1);
+  });
+
+  it('never fetches a parent the from: poll already handled, and leaves it "search"', async () => {
+    const asked: string[][] = [];
+    const parent = launchPost({ text: 'soon' });
+    const watcher = watcherStub({
+      syncRules: async (handles) => [{ id: 'shard:abc', value: 'from:legsdotfun', handles }],
+      pollResults: async () => ({ posts: [parent], truncated: false }),
+      pollReplies: async () => ({ posts: [replyTo(LAUNCH_ID)], truncated: false }),
+      fetchPosts: async (ids) => {
+        asked.push([...ids]);
+        return [parent];
+      },
+    });
+    const calls = await runPolls(monitorPage(), watcher, 1);
+    // The id was in the seen set before recovery ran: no id to fetch, and
+    // twitterapi.io bills a minimum per call.
+    expect(asked).toEqual([]);
+    const recorded = recordedPosts(calls);
+    expect(recorded).toHaveLength(1);
+    expect(viaParams(recorded[0])).toContain('search');
+  });
+
+  it('ignores a reply pointing at somebody else post', async () => {
+    const asked: string[][] = [];
+    const watcher = watcherStub({
+      syncRules: async (handles) => [{ id: 'shard:abc', value: 'from:legsdotfun', handles }],
+      pollReplies: async () => ({
+        // A `to:` shard also matches a reply that merely MENTIONS the handle.
+        posts: [replyTo('7777', { inReplyToUserId: '4040', inReplyToHandle: 'someoneelse' })],
+        truncated: false,
+      }),
+      fetchPosts: async (ids) => {
+        asked.push([...ids]);
+        return [];
+      },
+    });
+    await runPolls(monitorPage(), watcher, 1);
+    expect(asked).toEqual([]);
+  });
+
+  it('discards a recovered parent older than the recovery window', async () => {
+    vi.mocked(confirmAddress).mockClear();
+    const watcher = watcherStub({
+      syncRules: async (handles) => [{ id: 'shard:abc', value: 'from:legsdotfun', handles }],
+      pollReplies: async () => ({ posts: [replyTo(LAUNCH_ID)], truncated: false }),
+      fetchPosts: async () => [
+        launchPost({
+          // A day-old post somebody is still replying to. The recovery floor is
+          // an hour: a parent this old is not the launch this poll is hunting.
+          createdAt: new Date(CLOCK.getTime() - (XWATCH.parentLookbackMinutes + 1) * 60_000),
+        }),
+      ],
+    });
+    const calls = await runPolls(monitorPage(), watcher, 1);
+    expect(recordedPosts(calls)).toHaveLength(0);
+    expect(vi.mocked(confirmAddress)).not.toHaveBeenCalled();
+  });
+
+  it('advances the reply cursor even on a truncated page, and holds the from: cursor', async () => {
+    const fromCursors: (string | null)[] = [];
+    const replyCursors: (string | null)[] = [];
+    const reply = replyTo(LAUNCH_ID);
+    const own = xpost({ id: '5', createdAt: new Date(CLOCK.getTime() - 90_000) });
+    const watcher = watcherStub({
+      syncRules: async (handles) => [{ id: 'shard:abc', value: 'from:legsdotfun', handles }],
+      pollResults: async (cursor) => {
+        fromCursors.push(cursor);
+        return { posts: fromCursors.length === 1 ? [own] : [], truncated: false };
+      },
+      pollReplies: async (cursor) => {
+        replyCursors.push(cursor);
+        // Truncated, and it does NOT hold this cursor: any one of a post's
+        // replies names the same parent, so re-reading the window buys nothing
+        // and holding it would pin one viral thread open forever.
+        return { posts: [reply], truncated: true };
+      },
+      fetchPosts: async () => [launchPost({ text: 'soon' })],
+    });
+    await runPolls(monitorPage(), watcher, 2);
+    expect(replyCursors[0]).toBeNull();
+    expect(replyCursors[1]).toBe(String(Math.floor(reply.createdAt.getTime() / 1000) - 1));
+    // The from: cursor is the from: poll's own business, untouched by any of it.
+    expect(fromCursors[1]).toBe(String(Math.floor(own.createdAt.getTime() / 1000) - 1));
+  });
+
+  it('keeps the ids when the fetch fails, and asks for them again next poll', async () => {
+    const asked: string[][] = [];
+    let attempts = 0;
+    let replyPolls = 0;
+    const watcher = watcherStub({
+      syncRules: async (handles) => [{ id: 'shard:abc', value: 'from:legsdotfun', handles }],
+      pollReplies: async () => {
+        replyPolls += 1;
+        // THE WINDOW REALLY MOVES ON. Re-serving the same reply on poll 2 would
+        // let the id be re-derived from scratch, and the test would pass with
+        // the pendingParents requeue deleted.
+        return { posts: replyPolls === 1 ? [replyTo(LAUNCH_ID)] : [], truncated: false };
+      },
+      fetchPosts: async (ids) => {
+        asked.push([...ids]);
+        attempts += 1;
+        if (attempts === 1) throw new Error('provider hiccup');
+        return [launchPost({ text: 'soon' })];
+      },
+    });
+    const calls = await runPolls(monitorPage(), watcher, 2);
+    // The reply window has moved on, so the IDS are the only record that the
+    // work is outstanding.
+    expect(asked).toEqual([[LAUNCH_ID], [LAUNCH_ID]]);
+    expect(recordedPosts(calls).map(tweetIdOf)).toEqual([LAUNCH_ID]);
+  });
+
+  it('judges the account own post on the reply page, instead of dropping it', async () => {
+    // A `to:` shard returns the tracked account's SELF-REPLIES too (a reply to
+    // its own post is a reply "to" the account), and the CA dropped under the
+    // announcement is the launch pattern. Reading it only as a pointer to its
+    // parent would need a stranger to reply to that exact post.
+    vi.mocked(confirmAddress).mockResolvedValueOnce({ ok: true, token: CONFIRMED });
+    const asked: string[][] = [];
+    const selfReply = xpost({
+      id: '2095619171002593999',
+      text: `CA: ${CA}`,
+      createdAt: new Date(CLOCK.getTime() - 60_000),
+      isReply: true,
+      inReplyToId: LAUNCH_ID,
+      inReplyToUserId: X_USER_ID,
+      inReplyToHandle: HANDLE,
+    });
+    const watcher = watcherStub({
+      syncRules: async (handles) => [{ id: 'shard:abc', value: 'from:legsdotfun', handles }],
+      // The from: road is blind to this account — the whole point of the round.
+      pollResults: async () => ({ posts: [], truncated: false }),
+      pollReplies: async () => ({ posts: [selfReply], truncated: false }),
+      fetchPosts: async (ids) => {
+        asked.push([...ids]);
+        // The announcement it answers carries no address at all.
+        return [launchPost({ text: 'something big tonight' })];
+      },
+    });
+    const calls = await runPolls(
+      {
+        'select:launchMonitors': [[monitorRow({ lastPostVia: 'search' })]],
+        'select:groups': [[{ settings: {}, status: 'active' }]],
+        ...fireScript(),
+      },
+      watcher,
+      1,
+    );
+    // The parent is still fetched (it is unseen), and the self-reply is what
+    // fired: the address was only ever in its text.
+    expect(asked).toEqual([[LAUNCH_ID]]);
+    expect(recordedPosts(calls).map(tweetIdOf)).toContain(selfReply.id);
+    expect(find(calls, 'insert:alerts')).toHaveLength(1);
+  });
+
+  it('still sweeps Top on the fifth poll while the reply read is being refused', async () => {
+    // The reply read pages hardest, so it is the likeliest to draw a 429 — and a
+    // sweep cadence counted behind it would never run once, taking the last road
+    // to a hidden account nobody replies to with it.
+    const tops: number[] = [];
+    const watcher = watcherStub({
+      syncRules: async (handles) => [{ id: 'shard:abc', value: 'from:legsdotfun', handles }],
+      pollResults: async () => ({ posts: [], truncated: false }),
+      pollReplies: async () => {
+        throw new XApiError(429, 'slow down');
+      },
+      fetchPosts: async () => [],
+      pollTop: async (since) => {
+        tops.push(since);
+        return [];
+      },
+    });
+    vi.useFakeTimers();
+    vi.setSystemTime(CLOCK);
+    try {
+      const { db } = makeDb(monitorPage());
+      const handle = startXWatch(db, watcher, null);
+      // Every poll draws the 429, so each one is followed by a back-off pause;
+      // five ANSWERED from: polls is what the sweep counts.
+      for (let i = 0; i < 40; i++) {
+        await vi.advanceTimersByTimeAsync(XWATCH.pollSeconds * 1000 + 10);
+      }
+      handle.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(tops.length).toBeGreaterThan(0);
+  });
+
+  it('backs the whole watcher off when the reply read is refused', async () => {
+    let polls = 0;
+    const watcher = watcherStub({
+      syncRules: async (handles) => [{ id: 'shard:abc', value: 'from:legsdotfun', handles }],
+      pollResults: async () => {
+        polls += 1;
+        return { posts: [], truncated: false };
+      },
+      pollReplies: async () => {
+        throw new XApiError(429, 'slow down');
+      },
+      fetchPosts: async () => [],
+    });
+    vi.useFakeTimers();
+    vi.setSystemTime(CLOCK);
+    try {
+      const { db } = makeDb(monitorPage());
+      const handle = startXWatch(db, watcher, null);
+      await vi.advanceTimersByTimeAsync(XWATCH.pollSeconds * 1000 + 10);
+      expect(polls).toBe(1);
+      // A 429 is a 429 whichever read drew it: the pause is two cadences.
+      await vi.advanceTimersByTimeAsync(XWATCH.pollSeconds * 1000);
+      expect(polls).toBe(1);
+      await vi.advanceTimersByTimeAsync(XWATCH.pollSeconds * 1000);
+      expect(polls).toBe(2);
+      handle.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('the Top sweep', () => {
+  it('runs on every fifth poll, records via top, and moves no cursor', async () => {
+    const tops: number[] = [];
+    const fromCursors: (string | null)[] = [];
+    const topPost = xpost({ id: '77', createdAt: new Date(CLOCK.getTime() + 4 * 60_000) });
+    const watcher = watcherStub({
+      syncRules: async (handles) => [{ id: 'shard:abc', value: 'from:legsdotfun', handles }],
+      pollResults: async (cursor) => {
+        fromCursors.push(cursor);
+        return { posts: [], truncated: false };
+      },
+      pollTop: async (since) => {
+        tops.push(since);
+        return [topPost];
+      },
+    });
+    const calls = await runPolls(monitorPage(), watcher, 6);
+    // Six polls, one sweep — the fifth.
+    expect(tops).toHaveLength(1);
+    expect(tops[0]).toBe(
+      Math.floor((CLOCK.getTime() + 5 * XWATCH.pollSeconds * 1000) / 1000) -
+        XWATCH.topLookbackMinutes * 60,
+    );
+    const recorded = recordedPosts(calls);
+    expect(recorded.map(tweetIdOf)).toEqual(['77']);
+    expect(viaParams(recorded[0])).toContain('top');
+    // Top is ENGAGEMENT-ranked, so the newest thing it returned says nothing
+    // about where the chronological read has got to: the cursor never sees it.
+    expect(fromCursors).not.toContain(String(Math.floor(topPost.createdAt.getTime() / 1000) - 1));
+  });
+});
+
+describe('an adapter with none of the recovery reads', () => {
+  it('polls exactly as it did before round 25', async () => {
+    const { cursors, calls } = await pollCycles(
+      monitorPage(),
+      [
+        { posts: [xpost()], truncated: false },
+        { posts: [], truncated: false },
+      ],
+      2,
+    );
+    // The from: road, unchanged: read the monitors, stamp the shard, record the
+    // post, stamp the check — and nothing else asked, because nothing else can
+    // be asked of an adapter that does not offer it.
+    expect(calls.map((c) => c.key)).toEqual([
+      // 45s: the housekeeping tick's confirmation queue (it reads our tables,
+      // never the provider). Then 60s: the poll.
+      'select:launchCandidates',
+      'select:launchMonitors',
+      'update:launchMonitors',
+      'update:launchMonitors',
+      'update:launchMonitors',
+      // ...and the second poll, which found nothing to record.
+      'select:launchCandidates',
+      'select:launchMonitors',
+      'update:launchMonitors',
+    ]);
+    expect(cursors[1]).toBe(String(Math.floor(xpost().createdAt.getTime() / 1000) - 1));
   });
 });

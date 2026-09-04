@@ -646,6 +646,15 @@ export const launchMonitors = pgTable(
     lastPostAt: timestamp('last_post_at', { withTimezone: true }),
     /** ...and its id, so provider redelivery of the same post is a no-op. */
     lastTweetId: text('last_tweet_id'),
+    /**
+     * HOW the last post reached us (round 25). 'search' = the account's own
+     * `from:` Latest search result; 'replies' = recovered by fetching the parent
+     * of a reply TO the account; 'top' = the engagement-ranked Top sweep. X
+     * hides some accounts from Latest search entirely (@legsdotfun, 2026-09-03),
+     * and a monitor whose posts only ever arrive by recovery is one the board
+     * must say is covered by replies alone.
+     */
+    lastPostVia: text('last_post_via', { enum: ['search', 'replies', 'top'] }),
     /** Which provider rule shard this handle is polled in (255-char shards). */
     providerRuleId: text('provider_rule_id'),
     /**
