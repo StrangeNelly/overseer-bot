@@ -47,7 +47,10 @@ export type GroupieEvent =
       type: 'alert_fired';
       groupId: number;
       tokenId: number | null;
-      alertType: 'nuke' | 'buy_opp' | 'launch' | 'graduation' | 'x_launch';
+      // ...and 'deployer_launch' in round 26: an address a member is watching
+      // put something on chain. Its token id is null on the 'create' road only
+      // (a raw deployment nothing has proved is a coin), set on the other three.
+      alertType: 'nuke' | 'buy_opp' | 'launch' | 'graduation' | 'x_launch' | 'deployer_launch';
       message: string;
       /**
        * Round 23: the message to REPLY to, when the alert has one of its own.

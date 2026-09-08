@@ -33,10 +33,25 @@ import {
   touchCursor,
   writeCursor,
 } from '../chain/cursor.js';
-import { dataWord, topicAddress, unitsToNumber, wordToBigInt } from '../chain/decode.js';
+import {
+  addressTopic,
+  dataWord,
+  topicAddress,
+  unitsToNumber,
+  wordToBigInt,
+} from '../chain/decode.js';
 import { sumV2MintQuote, v4DepositFromTx, v4NativeDeposit } from '../chain/reserve.js';
 import * as ds from '../market/dexscreener.js';
 import * as gt from '../market/geckoterminal.js';
+import { deliverDeployerHits } from './alerts.js';
+import {
+  catchUpPonsLaunches,
+  newDeployerTickBudget,
+  runDeployerWatchPass,
+  type DeployerHit,
+  type DeployerLaunchRow,
+  type DeployerTickBudget,
+} from './deployerWatch.js';
 import {
   decideLaunch,
   parseInitialize,
@@ -58,9 +73,13 @@ import {
  * range — the review found that coupling and it is the reason the two are split.
  *
  * Cost discipline, in the order the checks run: ONE log query per range for all
- * four event streams, then the free database questions (have we seen this pool /
+ * five event streams, then the free database questions (have we seen this pool /
  * this token), then the reads behind the deposit, and only for what clears the
  * board floor the two calls behind the bundle facts.
+ *
+ * The fifth stream is round 26's: PONS `TokenLaunched`, read by the deployer
+ * watch (deployerWatch.ts) and by nothing else here. It rides the same query,
+ * so watching an address for a PONS launch costs no request at all.
  */
 
 /** A block cannot be re-read for free, so its timestamp is cached per tick. */
@@ -76,11 +95,6 @@ class BlockClock {
     const seconds = this.cache.get(blockNumber) ?? null;
     return seconds === null ? new Date() : new Date(seconds * 1000);
   }
-}
-
-/** A 20-byte address as a 32-byte log topic. */
-export function addressTopic(address: string): string {
-  return `0x${'0'.repeat(24)}${address.toLowerCase().replace(/^0x/, '')}`;
 }
 
 /** The deposit that opened a pool, in quote base units — null when unmeasured. */
@@ -568,15 +582,24 @@ export const RANGE_ADDRESSES = [
   PONS_V2_FACTORY,
   PONS_GRADUATION_HOOK,
 ];
+/**
+ * The topic0s the sweep asks for. `tokenLaunched` was added by round 26 and
+ * COSTS NOTHING: the sweep is ONE `eth_getLogs` over an address list with a
+ * topic0 OR-list, so a fifth signature adds no request — only a slightly larger
+ * response (~22 PONS launches/min chain-wide, about 7 extra logs per 20-second
+ * tick). That free reading is the whole reason the deployer watch can detect a
+ * PONS launch by matching in memory instead of querying per watched address.
+ */
 export const RANGE_TOPIC0S = [
   TOPICS.pairCreated,
   TOPICS.initialize,
   TOPICS.poolGraduated,
   TOPICS.poolRegistered,
+  TOPICS.tokenLaunched,
 ];
 
 /**
- * Sort one range's logs back into the four streams, by the pair that identifies
+ * Sort one range's logs back into the five streams, by the pair that identifies
  * each one. The address matters as much as the topic: `Transfer` aside, an
  * event signature is not unique to a contract, and a hook that happened to emit
  * a same-signature event must not be read as the factory's.
@@ -586,12 +609,14 @@ export function routeRangeLogs(logs: readonly ChainLog[]): {
   initLogs: ChainLog[];
   gradLogs: ChainLog[];
   registerLogs: ChainLog[];
+  launchedLogs: ChainLog[];
 } {
   const out = {
     pairLogs: [] as ChainLog[],
     initLogs: [] as ChainLog[],
     gradLogs: [] as ChainLog[],
     registerLogs: [] as ChainLog[],
+    launchedLogs: [] as ChainLog[],
   };
   for (const log of logs) {
     const address = log.address.toLowerCase();
@@ -603,6 +628,11 @@ export function routeRangeLogs(logs: readonly ChainLog[]): {
       out.gradLogs.push(log);
     } else if (address === PONS_GRADUATION_HOOK && topic0 === TOPICS.poolRegistered) {
       out.registerLogs.push(log);
+    } else if (address === PONS_V2_FACTORY && topic0 === TOPICS.tokenLaunched) {
+      // Round 26 only. NOTHING in the launch or graduation paths reads this
+      // bucket: their behaviour is unchanged, and a PONS launch is still not a
+      // discovery row until it graduates.
+      out.launchedLogs.push(log);
     }
   }
   return out;
@@ -615,20 +645,43 @@ async function processRange(
   clock: BlockClock,
   headBlock: number,
   range: { fromBlock: number; toBlock: number },
-): Promise<number> {
-  // ONE query for all four streams. Four separate ones cost four times the CU
-  // for the same answer, and `eth_getLogs` is by far the dearest method here.
+  budget: DeployerTickBudget,
+): Promise<{ written: number; deployerHits: DeployerHit[] }> {
+  // ONE query for all five streams. Separate ones cost a multiple of the CU for
+  // the same answer, and `eth_getLogs` is by far the dearest method here.
   const logs = await chain.getLogs({
     address: RANGE_ADDRESSES,
     topics: [RANGE_TOPIC0S],
     ...range,
   });
-  const { pairLogs, initLogs, gradLogs, registerLogs } = routeRangeLogs(logs);
+  const { pairLogs, initLogs, gradLogs, registerLogs, launchedLogs } = routeRangeLogs(logs);
 
   const pending: PendingRow[] = [];
   pending.push(...(await collectGraduations(db, chain, clock, headBlock, gradLogs, registerLogs)));
-  pending.push(...(await collectLaunches(db, chain, clock, headBlock, [...pairLogs, ...initLogs])));
-  return persist(db, pending);
+  const launches = await collectLaunches(db, chain, clock, headBlock, [...pairLogs, ...initLogs]);
+  pending.push(...launches.rows);
+  const written = await persist(db, pending);
+  // AFTER the range's own events, and never able to disturb them: the pass is
+  // isolated end to end, returns [] when nothing is on watch, and does not
+  // throw. It reads the range's RAW pool candidates rather than the rows the
+  // board kept — the board's floors are about what deserves a card — and shares
+  // the tick's read budget with the other ranges.
+  const deployerHits = await runDeployerWatchPass(db, chain, {
+    launchedLogs,
+    launchRows: launches.candidates,
+    fromBlock: range.fromBlock,
+    toBlock: range.toBlock,
+    budget,
+  });
+  // TOLD WHERE IT WAS WON. The flip to 'fired' is committed inside the pass and
+  // cannot be re-won by a later tick, so carrying the hits up to the end of the
+  // tick meant a throw in the NEXT range — a 429, a failed cursor write — lost
+  // the one message this feature owes. Delivery isolates every hit itself, so a
+  // group we cannot post to cannot cost this range its cursor. (The remaining
+  // window, a crash between the flip and the send, is what the enrichment
+  // loop's recovery sweep is for.)
+  if (deployerHits.length > 0) await deliverDeployerHits(db, deployerHits);
+  return { written, deployerHits };
 }
 
 /**
@@ -722,14 +775,23 @@ async function collectGraduations(
   return out;
 }
 
-/** Launches: the round-18 decision table, with the RPC spend staged behind it. */
+/**
+ * Launches: the round-18 decision table, with the RPC spend staged behind it.
+ *
+ * Returns BOTH lists. `rows` is what the discovery board gets, after its floors;
+ * `candidates` is every new pool this range decoded, before any of them. Round
+ * 26's deployer road reads the second one: a launch that is too thin, too old,
+ * a second pool or a tokenized stock does not deserve a DISCOVERY card, and
+ * none of those is a reason to withhold "the wallet you asked about just
+ * opened a pool" from the member who asked.
+ */
 async function collectLaunches(
   db: Db,
   chain: ChainClient,
   clock: BlockClock,
   headBlock: number,
   logs: ChainLog[],
-): Promise<PendingRow[]> {
+): Promise<{ rows: PendingRow[]; candidates: DeployerLaunchRow[] }> {
   const candidates: LaunchCandidate[] = [];
   const byPool = new Set<string>();
   for (const log of logs) {
@@ -741,7 +803,14 @@ async function collectLaunches(
     byPool.add(candidate.poolAddress);
     candidates.push(candidate);
   }
-  if (candidates.length === 0) return [];
+  // Deduped by POOL only — the deployer road wants the pool that was opened,
+  // not the board's verdict on it — and by transaction inside the road itself.
+  const raw: DeployerLaunchRow[] = candidates.map((c) => ({
+    kind: 'launch',
+    tokenAddress: c.tokenAddress,
+    txHash: c.txHash,
+  }));
+  if (candidates.length === 0) return { rows: [], candidates: raw };
 
   const [pools, seenTokenSet, tracked] = await Promise.all([
     seenPools(db, [...byPool]),
@@ -842,7 +911,7 @@ async function collectLaunches(
       launchBlockWallets: bundle?.wallets ?? null,
     });
   }
-  return out;
+  return { rows: out, candidates: raw };
 }
 
 /**
@@ -1049,6 +1118,14 @@ export async function pruneDiscovery(db: Db): Promise<void> {
 
 export interface DiscoveryTickResult {
   detected: number;
+  /**
+   * Watched deployers that put something on chain in this tick (round 26).
+   * ALREADY DELIVERED — the chat is told inside the block range that won the
+   * hit, because the flip to 'fired' cannot be re-won and a throw later in the
+   * tick would otherwise lose the message. Reported here for the caller's log
+   * line and for tests; nothing downstream may send them a second time.
+   */
+  deployerHits: DeployerHit[];
 }
 
 /**
@@ -1065,6 +1142,7 @@ export async function runDiscoveryTick(db: Db, chain: ChainClient): Promise<Disc
   const head = await chain.getBlockNumber();
   const cursor = await readCursor(db);
   let detected = 0;
+  const deployerHits: DeployerHit[] = [];
 
   if (cursor === null) {
     // First tick ever: start at the last block a tick may READ, not at the head.
@@ -1075,7 +1153,7 @@ export async function runDiscoveryTick(db: Db, chain: ChainClient): Promise<Disc
     const start = Math.max(0, head - DISCOVERY.headLagBlocks);
     await writeCursor(db, start);
     console.log(`discovery: cursor initialised at block ${start}`);
-    return { detected };
+    return { detected, deployerHits };
   }
 
   const plan = planRange(cursor, head);
@@ -1083,14 +1161,37 @@ export async function runDiscoveryTick(db: Db, chain: ChainClient): Promise<Disc
     // Nothing to read (a quiet chain, or the head lag). Still a successful tick,
     // and the heartbeat has to say so or the board would call the feed stalled.
     await touchCursor(db);
-    return { detected };
+    return { detected, deployerHits };
   }
   if (plan.skippedBlocks > 0) {
     console.warn(
       `discovery: backfill bound skipped ${plan.skippedBlocks} block(s) after a long outage`,
     );
+    // Those blocks are gone for the FEED, which is the right bound for it — but
+    // three of the deployer watch's four roads are range-bound, so the gap is a
+    // silent hole in coverage a member is told is live. One watchlist-filtered
+    // query over the skipped blocks closes the cheap road, and says so when the
+    // gap is wider than it can afford. Isolated: a launch nobody could look for
+    // must not cost the tick that is catching up.
+    try {
+      const recovered = await catchUpPonsLaunches(
+        db,
+        chain,
+        plan.fromBlock - plan.skippedBlocks,
+        plan.fromBlock - 1,
+      );
+      if (recovered.length > 0) {
+        deployerHits.push(...recovered);
+        await deliverDeployerHits(db, recovered);
+      }
+    } catch (err) {
+      console.warn(`discovery: deployer outage catch-up failed: ${summarizeRpcError(err)}`);
+    }
   }
   const clock = new BlockClock(chain);
+  // ONE budget for the whole tick: the pass runs per range, and a catch-up tick
+  // of forty ranges must not spend forty times the pool road's ceiling.
+  const budget = newDeployerTickBudget();
   // Requests are sized to what the provider has been seen to accept: on a plan
   // that caps eth_getLogs at N blocks, one request spans at most N times the
   // chunk budget, so a catch-up can always be read — slowly, but never refused
@@ -1100,7 +1201,9 @@ export async function runDiscoveryTick(db: Db, chain: ChainClient): Promise<Disc
   for (let i = 0; i < ranges.length; i += 1) {
     const range = ranges[i]!;
     try {
-      detected += await processRange(db, chain, clock, head, range);
+      const processed = await processRange(db, chain, clock, head, range, budget);
+      detected += processed.written;
+      deployerHits.push(...processed.deployerHits);
     } catch (err) {
       // The FIRST wide request of a process is what teaches the client the
       // provider's ceiling, so this tick sized its ranges against a cap nobody
@@ -1128,5 +1231,5 @@ export async function runDiscoveryTick(db: Db, chain: ChainClient): Promise<Disc
     console.log(`discovery: catching up, cursor at ${plan.toBlock} of ${head}`);
   }
   if (detected > 0) console.log(`discovery: ${detected} new event(s)`);
-  return { detected };
+  return { detected, deployerHits };
 }

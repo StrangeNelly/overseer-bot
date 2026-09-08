@@ -20,6 +20,17 @@ export function dataWord(data: string | null | undefined, index: number): string
   return body.slice(start, start + 64).toLowerCase();
 }
 
+/**
+ * A 20-byte address as the 32-byte TOPIC word an indexed parameter is filtered
+ * on — the inverse of `wordToAddress`, and here beside it so the two padding
+ * rules cannot drift apart. Used by the discovery sweep's topic filters and by
+ * the deployer watch's outage catch-up (an array in a topic position is an OR
+ * filter: verified on this RPC 2026-09-08, it narrowed 49 launches to 3).
+ */
+export function addressTopic(address: string): string {
+  return `0x${'0'.repeat(24)}${address.toLowerCase().replace(/^0x/, '')}`;
+}
+
 /** A 32-byte word (or a topic) read as an address: the low 20 bytes, lowercase. */
 export function wordToAddress(word: string | null | undefined): string | null {
   if (typeof word !== 'string') return null;

@@ -56,7 +56,10 @@ const tweetWatcher = createTweetWatcher(config);
 const xwatchRunner = startXWatch(db, webOnly ? null : tweetWatcher, chain);
 const xwatch = { enabled: xwatchRunner.running, watcher: tweetWatcher };
 
-const bot = createBot(config, db, discovery.running, xwatch);
+// The same chain client the listener uses (round 26): `/overseer deployer`
+// reads code and a nonce before it will accept a watch, and a deployment
+// without a client refuses instead of storing an address nothing can fire on.
+const bot = createBot(config, db, discovery.running, xwatch, { chain });
 const api = createApi(db, bot.api, config, discovery, {
   running: xwatchRunner.running,
   watcher: tweetWatcher,

@@ -269,8 +269,12 @@ export const alerts = pgTable(
     // address that confirmed on chain. Like the discovery family it carries no
     // token cooldown — one message per monitor, ever — but unlike it there IS a
     // tokens row (the ping auto-watches the coin), so token_id is set.
+    // ...and 'deployer_launch' in round 26: a watched deployer put something on
+    // chain. Same shape as x_launch — one message per watch, no cooldown — and
+    // the token id is null on the 'create' road, where nothing has proved the
+    // address is a coin.
     type: text('type', {
-      enum: ['nuke', 'buy_opp', 'launch', 'graduation', 'x_launch'],
+      enum: ['nuke', 'buy_opp', 'launch', 'graduation', 'x_launch', 'deployer_launch'],
     }).notNull(),
     firedAt: timestamp('fired_at', { withTimezone: true }).notNull().defaultNow(),
     /** Market cap at fire time; details carries the peak/drop that triggered it. */
@@ -297,6 +301,35 @@ export const alerts = pgTable(
     uniqueIndex('alerts_x_launch_uq')
       .on(t.groupId, t.type, sql`(${t.details} ->> 'handle')`, sql`(${t.details} ->> 'address')`)
       .where(sql`${t.type} = 'x_launch'`),
+    // Round 26's dedupe, the same discipline again: the deployer watch says one
+    // thing per (group, watched address, contract, SIGNAL), and this is what
+    // makes a second send impossible whatever two delivery passes decide — the
+    // recovery sweep in discovery/alerts.ts re-attempts a hit whose message was
+    // lost, and it is only safe because this index turns the loser into
+    // "already told" (a re-delivery carries the same `via`, so it still
+    // conflicts).
+    //
+    // THE SIGNAL IS PART OF THE KEY, and it has to be: a 'create' hit's
+    // `details.address` is the PREDICTED CONTRACT, not null, so keying on
+    // (watched, address) alone made the wallet's own later launch of that same
+    // contract read as a duplicate — the announcement said "still watching this
+    // address for the launch itself" and then the launch was silently swallowed.
+    // The two roads are different news about one address and each gets its say.
+    //
+    // NULLS ARE DISTINCT in a unique index, so the ONE road with a null
+    // `details.address` is not bounded here: an undecodable registry event,
+    // bounded instead by the watch's one-shot status flip and by the recovery
+    // sweep's grace window (DEPLOYER_WATCH.recoveryGraceSeconds), which keeps it
+    // off rows that are still mid-delivery.
+    uniqueIndex('alerts_deployer_uq')
+      .on(
+        t.groupId,
+        t.type,
+        sql`(${t.details} ->> 'watched')`,
+        sql`(${t.details} ->> 'address')`,
+        sql`(${t.details} ->> 'via')`,
+      )
+      .where(sql`${t.type} = 'deployer_launch'`),
   ],
 );
 
@@ -752,5 +785,90 @@ export const launchCandidates = pgTable(
     uniqueIndex('launch_candidates_monitor_token_uq').on(t.monitorId, t.tokenAddress),
     // The retry queue's own read: due rows, oldest first.
     index('launch_candidates_next_attempt_idx').on(t.nextAttemptAt),
+  ],
+);
+
+/**
+ * The DEPLOYER WATCH (docs/decisions.md round 26): an address the group wants
+ * to be told about the moment it puts a coin on chain.
+ *
+ * Two KINDS, because a team publishes a launch in two different ways and only
+ * one of them is a wallet:
+ *
+ * - 'eoa' — a deploying wallet. Detected three ways: it appears as the
+ *   `deployer` topic of a PONS `TokenLaunched` (free — that log is already in
+ *   the discovery sweep), it is the SENDER of the transaction that opened a
+ *   non-PONS first pool, or it deploys a raw contract (predicted from its
+ *   nonce with CREATE and confirmed with `eth_getCode`).
+ * - 'contract' — a registry/factory the team deployed ahead of the launch (the
+ *   @clubytech case: registry 0xD0A3…37A, deployed 2026-09-05, `token()` still
+ *   empty). Detected by its own `TokenSet` log.
+ *
+ * `last_nonce` IS THE HIGH-WATER MARK, AND IT IS STAMPED AT ADD TIME. The
+ * CREATE scan only ever probes nonces ABOVE it: the motivating wallet was at
+ * nonce 163 when it was added, and scanning from zero would "find" 163
+ * historical contracts and fire on all of them. A null here means the mark has
+ * not been taken yet, and the first scan takes it without probing anything.
+ *
+ * There is deliberately NO per-watch block high-water mark. An earlier draft
+ * stamped one on every block range for every active watch and nothing ever read
+ * it back — a write per range per tick for a column no surface printed — so it
+ * was dropped. The coverage a member can actually see is the chain cursor's
+ * (`chain_cursor`, one row for the whole listener); if a per-watch line is ever
+ * wanted, add the column back WITH the reader that justifies it.
+ */
+export const deployerWatches = pgTable(
+  'deployer_watches',
+  {
+    id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
+    groupId: integer('group_id')
+      .notNull()
+      .references(() => groups.id),
+    address: text('address').notNull(), // stored lowercase
+    kind: text('kind', { enum: ['eoa', 'contract'] }).notNull(),
+    addedBy: bigint('added_by', { mode: 'number' }).notNull(),
+    addedAt: timestamp('added_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Free text the adder attached (`/overseer deployer 0x… <note>`). */
+    note: text('note'),
+    /**
+     * 'fired' is TERMINAL for the detection passes: a watch fires once, and the
+     * WHERE status='active' guard on the flip is what stops two ticks (or two
+     * roads to the same launch) from telling the chat twice.
+     *
+     * THE 'create' ROAD NEVER FLIPS IT. Bytecode at a predicted address is a
+     * contract, not a launch — the motivating wallet deployed its registry at
+     * nonce 163 and then launched later — so letting the weakest signal retire
+     * the watch would swallow the very PONS launch the feature exists to catch.
+     * A create is announced and the row keeps watching; it cannot repeat,
+     * because the CREATE scan's nonce mark only ever moves forward.
+     */
+    status: text('status', { enum: ['active', 'fired', 'removed'] })
+      .notNull()
+      .default('active'),
+    /** EOA only — the CREATE scan's high-water mark (see the note above). */
+    lastNonce: integer('last_nonce'),
+    nonceCheckedAt: timestamp('nonce_checked_at', { withTimezone: true }),
+    /** What it launched, how we know, and where it is written on chain. */
+    firedAddress: text('fired_address'),
+    firedTokenId: integer('fired_token_id').references(() => tokens.id),
+    firedAt: timestamp('fired_at', { withTimezone: true }),
+    firedVia: text('fired_via', { enum: ['pons', 'pool', 'create', 'registry'] }),
+    firedTxHash: text('fired_tx_hash'),
+    /**
+     * When the CHAT was actually dealt with for this fire — sent, muted, already
+     * told, or nowhere to post. NULL on a fired row means the row was claimed
+     * and the message never happened: the flip and the send are separate writes,
+     * and a throw, a 429 on a later block range or a redeploy in between used to
+     * lose the one message this feature owes. The recovery sweep reads exactly
+     * these rows and delivers them (discovery/alerts.ts).
+     */
+    notifiedAt: timestamp('notified_at', { withTimezone: true }),
+  },
+  (t) => [
+    // One watch per address per group, case-insensitively: the chain answers in
+    // lowercase and a member pastes a checksummed address.
+    uniqueIndex('deployer_watches_group_address_uq').on(t.groupId, sql`lower(${t.address})`),
+    // The tick's own read: every active watch, across all groups.
+    index('deployer_watches_status_idx').on(t.status),
   ],
 );

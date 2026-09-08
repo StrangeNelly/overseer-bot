@@ -120,6 +120,20 @@
       "when": 1788556908707,
       "tag": "0016_low_songbird",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1788849574810,
+      "tag": "0017_warm_black_panther",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1788851886455,
+      "tag": "0018_fat_karen_page",
+      "breakpoints": true
     }
   ]
 }

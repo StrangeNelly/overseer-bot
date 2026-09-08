@@ -13,6 +13,7 @@ import {
   type Db,
 } from '@groupie/db';
 import {
+  DEPLOYER_WATCH,
   extractEvmAddresses,
   ROBINHOOD_CHAIN_ID,
   WATCH_CAP_PER_MEMBER,
@@ -23,6 +24,16 @@ import {
   type XWatchSettings,
 } from '@groupie/shared';
 import { publish } from '../events.js';
+import type { ChainClient } from '../chain/client.js';
+import {
+  addDeployerWatch,
+  countDeployerSlots,
+  deployerPingOf,
+  listDeployerWatches,
+  removeDeployerWatch,
+} from '../discovery/alerts.js';
+import { deployerViaPhrase } from '../discovery/deployerMessage.js';
+import { hasCode } from '../discovery/deployerWatch.js';
 import { clampLaunchMinEth, discoverySettingsOf } from '../discovery/settings.js';
 import {
   activeWatchCount,
@@ -44,6 +55,7 @@ import { memberDisplayName, rememberMemberName } from '../api/membership.js';
 import { findGroupCall, markCallDead, restoreCall } from '../verdict.js';
 import type { Config } from '../config.js';
 import type { TweetWatcher } from '../xwatch/client.js';
+import { KNOWN_CONTRACTS } from '../xwatch/confirm.js';
 import { countSlots, listMonitors, trackMonitor, untrackMonitor } from '../xwatch/monitors.js';
 import { xwatchSettingsOf } from '../xwatch/settings.js';
 import { ingestMessage, upsertToken } from './ingest.js';
@@ -626,10 +638,273 @@ export async function handleTracking(
   await ctx.reply(`${header}\n${lines.join('\n')}`);
 }
 
+/* ------------------------------------------------ deployer watch (round 26) */
+
+/**
+ * What the deployer commands need: the chain client, in THIS process. The whole
+ * feature is chain reads — a code read to tell a wallet from a contract, a nonce
+ * to mark where its history ends, and four detection roads on the listener's own
+ * tick — so with no client there is nothing to accept a watch on, and the
+ * commands say so rather than storing an address nothing can ever fire on (the
+ * same honesty rule `/overseer track` follows when the X key is missing).
+ */
+export interface DeployerDeps {
+  chain: ChainClient | null;
+}
+
+const DEPLOYER_OFF: DeployerDeps = { chain: null };
+
+/** The burn/null address: watchable in form, meaningless in fact. */
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+const DEPLOYER_USAGE = 'Usage: /overseer deployer <contract or wallet address> [note]';
+
+/** The refusal that is about the DEPLOYMENT, not about what the member typed. */
+const DEPLOYER_NO_CHAIN =
+  'Deployer watch needs the chain listener, which is off on this deployment.';
+
+/**
+ * The deployer half of `/overseer alerts`. Its own line, like discovery's and
+ * the launch monitor's: a different family, with its own off switch — and the
+ * only one that is ON by default, which the line says out loud.
+ */
+export function deployerSummary(settings: unknown, enabled: boolean): string {
+  if (!enabled) return 'Deployer watch: off (needs the chain listener)';
+  return (
+    `Deployer watch: ping ${deployerPingOf(settings) ? 'on' : 'off (board only)'} · ` +
+    `${DEPLOYER_WATCH.capPerGroup} addresses per group, ${DEPLOYER_WATCH.capPerMember} per member. ` +
+    `Tune: /overseer set deployerping on|off`
+  );
+}
+
+/**
+ * WHAT THIS WATCH WILL ACTUALLY CATCH, per kind — said at add time, because a
+ * member who is told "watching" and nothing else has no way to know which of
+ * their launch scenarios is covered. It must promise only what the four roads
+ * can do; a sentence that over-reaches here reads as cover the group has not
+ * got.
+ *
+ * A wallet is watched three ways (a PONS launch names its deployer in a topic
+ * the sweep already reads, the sender of a first pool's transaction, and a raw
+ * CREATE predicted from its nonce). A contract gets NEITHER of the last two: a
+ * transaction's sender is an externally owned account by construction, so a
+ * contract can never be the `from` of the transaction that opened a pool, and
+ * nobody but the contract itself can be nonce-predicted into the future. What
+ * it gets instead is the road a registry actually uses — publishing its token
+ * (the @clubytech case) — and the PONS road, which names a deployer whether it
+ * is a wallet or a contract.
+ */
+function deployerCoverage(kind: 'eoa' | 'contract'): string {
+  return kind === 'eoa'
+    ? "I'll post here if it launches on PONS, opens a pool anywhere, or deploys a contract."
+    : "I'll post here if it launches on PONS or publishes its official token.";
+}
+
+/**
+ * `/overseer deployer <address> [note]` — the owner's ask, verbatim: "notify me
+ * in the telegram group as soon as its launched on pons or anywhere else".
+ *
+ * One line back, whatever happens, like every other subcommand. Exported for
+ * tests: what this reply PROMISES is the feature's contract with the group.
+ */
+export async function handleDeployer(
+  db: Db,
+  ctx: Context,
+  group: GroupRow,
+  args: string[],
+  userId: number,
+  deployer: DeployerDeps,
+): Promise<void> {
+  const address = commandAddress(args);
+  if (!address) {
+    await ctx.reply(DEPLOYER_USAGE);
+    return;
+  }
+  if (address === ZERO_ADDRESS) {
+    await ctx.reply('That is the zero address — nothing deploys from it.');
+    return;
+  }
+  // The quote tokens, the two Uniswap deployments, PONS's factory and hook, the
+  // burn address: every launch on this chain touches them, so a watch on one
+  // would fire on somebody else's coin within minutes. Same list round 23's
+  // confirmation refuses on, for the same reason.
+  if (KNOWN_CONTRACTS.has(address)) {
+    await ctx.reply(
+      `${shortAddress(address)} is shared infrastructure (a quote token, a factory, a hook) — ` +
+        'watching it would fire on everybody else\'s launch.',
+    );
+    return;
+  }
+  const chain = deployer.chain;
+  // A watch nothing can fire on is worse than a refusal: it looks like cover.
+  if (chain === null || typeof chain.getCode !== 'function') {
+    await ctx.reply(DEPLOYER_NO_CHAIN);
+    return;
+  }
+
+  // ONE code read decides the kind, and the kind decides which roads run. A
+  // failed read is UNKNOWN, never "it is a wallet" — guessing here would arm
+  // the CREATE scan against a contract and quietly watch nothing.
+  const code = await chain.getCode(address);
+  if (code === null) {
+    await ctx.reply('Could not reach the chain just now — try again in a minute.');
+    return;
+  }
+  // The SAME predicate the CREATE scan probes with: an empty string and '0x'
+  // are one answer, and the two sites must never disagree about what the node
+  // just said.
+  const kind: 'eoa' | 'contract' = hasCode(code) ? 'contract' : 'eoa';
+
+  // THE HIGH-WATER MARK IS TAKEN NOW, so history can never fire: the motivating
+  // wallet was 163 contracts deep when it was added, and a watch that scanned
+  // from zero would announce all 163 as launches.
+  let lastNonce: number | null = null;
+  if (kind === 'eoa' && typeof chain.getTransactionCount === 'function') {
+    lastNonce = await chain.getTransactionCount(address);
+  }
+
+  const at = args.findIndex((arg) => arg.toLowerCase().includes(address));
+  const note = (at < 0 ? args.slice(1) : args.slice(at + 1)).join(' ') || null;
+  const outcome = await addDeployerWatch(db, {
+    groupId: group.id,
+    userId,
+    address,
+    kind,
+    note,
+    lastNonce,
+    nonceCheckedAt: lastNonce === null ? null : new Date(),
+  });
+  if (!outcome.ok) {
+    switch (outcome.reason) {
+      case 'duplicate':
+        await ctx.reply(`Already watching ${shortAddress(address)}.`);
+        return;
+      case 'cap_group':
+        await ctx.reply(
+          `This group already watches ${outcome.cap} addresses — ` +
+            '/overseer undeployer <address> to free one.',
+        );
+        return;
+      case 'cap_member':
+        await ctx.reply(
+          `You already watch ${outcome.cap} addresses — /overseer undeployer <address> to free one.`,
+        );
+        return;
+    }
+  }
+
+  // The board names the adder; a command is the moment the chat hands us a name
+  // for a member who may never have posted a call.
+  await rememberMemberName(
+    db,
+    group.id,
+    userId,
+    ctx.from && !ctx.from.is_bot ? displayName(ctx.from) : null,
+  );
+
+  // WHERE ITS HISTORY ENDS, in the reply, because it is the one thing a member
+  // could otherwise get wrong about what they just asked for. An unread nonce
+  // says so instead of quoting a number we do not have.
+  const from =
+    kind === 'contract'
+      ? 'a contract'
+      : lastNonce === null
+        ? 'a wallet (nonce unread — the first check sets the mark, so only what it deploys after that can fire)'
+        : `a wallet, from nonce ${lastNonce} — earlier contracts are ignored`;
+  const muted = deployerPingOf(group.settings)
+    ? ''
+    : ' Deployer pings are off here, so this will show on the board only.';
+  await ctx.reply(
+    `Watching ${shortAddress(address)} — ${from}. ${deployerCoverage(kind)} ` +
+      `${outcome.heldByMember} of ${DEPLOYER_WATCH.capPerMember} of your slots.${muted}`,
+  );
+}
+
+/** Telegram caps a message at 4096 chars; the list is capped well under it. */
+const DEPLOYERS_MAX_LINES = 30;
+
+/** One line per watch: address · kind · who added it · age · what it did. */
+export async function handleDeployers(
+  db: Db,
+  ctx: Context,
+  group: GroupRow,
+  deployer: DeployerDeps,
+): Promise<void> {
+  const rows = await listDeployerWatches(db, group.id);
+  if (rows.length === 0) {
+    await ctx.reply(
+      'Watching no deployers yet. /overseer deployer <address> to follow one.',
+    );
+    return;
+  }
+  const nowMs = Date.now();
+  // Who ADDED it — asked once per distinct member, the way `tracking` does.
+  const adders = new Map<number, string | null>();
+  for (const row of rows.slice(0, DEPLOYERS_MAX_LINES)) {
+    const addedBy = Number(row.addedBy);
+    if (adders.has(addedBy)) continue;
+    adders.set(addedBy, await memberDisplayName(db, group.id, addedBy));
+  }
+  const lines = rows.slice(0, DEPLOYERS_MAX_LINES).map((row) => {
+    const adder = adders.get(Number(row.addedBy));
+    // A fired watch says what it did and what it did it to; a live one says it
+    // is still watching, which is the only status a reader needs. A fired row
+    // whose signal or address we could not read still says it FIRED — the one
+    // thing it must never print is "watching".
+    const what =
+      row.status === 'fired'
+        ? row.firedVia === null
+          ? 'fired'
+          : `${deployerViaPhrase(row.firedVia)}${row.firedAddress ? ` ${shortAddress(row.firedAddress)}` : ''}`
+        : 'watching';
+    return [
+      shortAddress(row.address),
+      row.kind === 'eoa' ? 'wallet' : 'contract',
+      adder ? `added by ${adder}` : null,
+      `${fmtElapsed(nowMs - row.addedAt.getTime())} ago`,
+      what,
+      row.note,
+    ]
+      .filter((part): part is string => typeof part === 'string' && part !== '')
+      .join(' · ');
+  });
+  if (rows.length > DEPLOYERS_MAX_LINES) {
+    lines.push(`+${rows.length - DEPLOYERS_MAX_LINES} more`);
+  }
+  // SLOTS, not rows: a fired watch is still listed and costs nobody a slot, so
+  // the count against the cap has to be the one the cap is enforced on.
+  const used = countDeployerSlots(rows).used;
+  const header =
+    deployer.chain === null
+      ? `Deployers ${used}/${DEPLOYER_WATCH.capPerGroup} (chain listener off — nothing is checking):`
+      : `Deployers ${used}/${DEPLOYER_WATCH.capPerGroup}:`;
+  await ctx.reply(`${header}\n${lines.join('\n')}`);
+}
+
+/** `/overseer undeployer <address>` — any member, the group's list. */
+export async function handleUndeployer(
+  db: Db,
+  ctx: Context,
+  group: GroupRow,
+  args: string[],
+): Promise<void> {
+  const address = commandAddress(args);
+  if (!address) {
+    await ctx.reply('Usage: /overseer undeployer <contract or wallet address>');
+    return;
+  }
+  const stopped = await removeDeployerWatch(db, group.id, address);
+  await ctx.reply(
+    stopped
+      ? `Stopped watching ${shortAddress(address)}.`
+      : `${shortAddress(address)} wasn't watched.`,
+  );
+}
+
 const SET_USAGE =
   'Usage: /overseer set nuke <pct 5-95> <minutes 5-60> · /overseer set buyopp <pct 5-95> · ' +
   '/overseer set launch <eth, 0 mutes> · /overseer set grads on|off · ' +
-  '/overseer set launchping on|off';
+  '/overseer set launchping on|off · /overseer set deployerping on|off';
 
 /** A decimal argument — ETH thresholds are not whole numbers. */
 function parseDecimal(raw: string | undefined): number | null {
@@ -655,12 +930,12 @@ function parseToggle(raw: string | undefined): boolean | null {
 async function mergeSettings(
   db: Db,
   groupId: number,
-  key: 'alerts' | 'discovery' | 'xwatch',
+  key: 'alerts' | 'discovery' | 'xwatch' | 'deployer',
   patch: Record<string, unknown>,
 ): Promise<unknown> {
   const current = sql`case when jsonb_typeof(${groups.settings}) = 'object' then ${groups.settings} else '{}'::jsonb end`;
   const branch = sql`case when jsonb_typeof(${groups.settings} -> ${key}) = 'object' then ${groups.settings} -> ${key} else '{}'::jsonb end`;
-  // The path is a LITERAL, not a parameter: `key` is a two-value union from
+  // The path is a LITERAL, not a parameter: `key` is a closed union from
   // this module, and keeping it inline leaves the statement's parameter list as
   // "the patch, and nothing else" — which is what makes a merge auditable.
   const path = sql.raw(`'{${key}}'`);
@@ -686,6 +961,7 @@ export async function handleSet(
   args: string[],
   discoveryEnabled: boolean,
   xwatch: XWatchDeps = XWATCH_OFF,
+  deployer: DeployerDeps = DEPLOYER_OFF,
 ): Promise<void> {
   const what = args[0]?.toLowerCase();
   const pct = parseWholeNumber(args[1]);
@@ -732,6 +1008,25 @@ export async function handleSet(
     );
     return;
   }
+  // Round 26. Same shape as the launch ping, including the write happening on a
+  // deployment that cannot run the detection: a group turning the message off
+  // before the listener exists is doing something reasonable, and the settings
+  // survive the day the key lands.
+  if (what === 'deployerping') {
+    const on = parseToggle(args[1]);
+    if (on === null) {
+      await ctx.reply(SET_USAGE);
+      return;
+    }
+    const settings = await mergeSettings(db, group.id, 'deployer', { ping: on });
+    const summary = deployerSummary(settings, true);
+    await ctx.reply(
+      deployer.chain === null
+        ? `${summary}\n(The chain listener is off on this deployment.)`
+        : summary,
+    );
+    return;
+  }
 
   let patch: Partial<AlertSettings>;
   if (what === 'nuke' && pct !== null && span !== null) {
@@ -772,6 +1067,7 @@ export async function handleGroupieCommand(
   userId: number,
   discoveryEnabled: boolean,
   xwatch: XWatchDeps = XWATCH_OFF,
+  deployer: DeployerDeps = DEPLOYER_OFF,
 ): Promise<boolean> {
   const args = rawArgs.trim().split(/\s+/).filter(Boolean);
   switch (args[0]?.toLowerCase()) {
@@ -804,15 +1100,30 @@ export async function handleGroupieCommand(
     case 'tracking':
       await handleTracking(db, ctx, group, xwatch);
       return false;
+    // Round 26. All three take an ADDRESS, and that address is a watch
+    // instruction rather than a call — a deploying wallet is not a coin, and
+    // letting it fall through would put it on the board as one. `true` keeps
+    // ingestion off it, exactly as watch/unwatch do.
+    case 'deployer':
+      await handleDeployer(db, ctx, group, args.slice(1), userId, deployer);
+      return true;
+    // ...the list carries no address of its own, so it consumes none.
+    case 'deployers':
+      await handleDeployers(db, ctx, group, deployer);
+      return false;
+    case 'undeployer':
+      await handleUndeployer(db, ctx, group, args.slice(1));
+      return true;
     case 'alerts':
       await ctx.reply(
         `${alertsSummary(alertSettingsOf(group.settings))}\n\n` +
           `${discoverySummary(discoverySettingsOf(group.settings), discoveryEnabled)}\n\n` +
-          xwatchSummary(xwatchSettingsOf(group.settings), xwatch.enabled),
+          `${xwatchSummary(xwatchSettingsOf(group.settings), xwatch.enabled)}\n\n` +
+          deployerSummary(group.settings, deployer.chain !== null),
       );
       return false;
     case 'set':
-      await handleSet(db, ctx, group, args.slice(1), discoveryEnabled, xwatch);
+      await handleSet(db, ctx, group, args.slice(1), discoveryEnabled, xwatch, deployer);
       return false;
     default: {
       // The t.me deep link opens the board inside Telegram; the plain URL is
@@ -831,13 +1142,17 @@ export async function handleGroupieCommand(
 /**
  * `discoveryEnabled` is whether THIS process runs the chain listener, so
  * `/overseer alerts` can say "off (not configured)" instead of quoting
- * thresholds nothing will ever act on (round 18/20 review).
+ * thresholds nothing will ever act on (round 18/20 review). `deployer.chain` is
+ * the same client, passed rather than re-derived: round 26's commands READ the
+ * chain (a code read, a nonce) before they will accept a watch, so a deployment
+ * without one has to refuse instead of storing an address nothing can fire on.
  */
 export function createBot(
   config: Config,
   db: Db,
   discoveryEnabled = false,
   xwatch: XWatchDeps = XWATCH_OFF,
+  deployer: DeployerDeps = DEPLOYER_OFF,
 ): Bot {
   const bot = new Bot(config.botToken);
 
@@ -880,6 +1195,7 @@ export function createBot(
         ctx.from.id,
         discoveryEnabled,
         xwatch,
+        deployer,
       );
     }
     if (!consumedAddress) await next();

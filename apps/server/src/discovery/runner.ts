@@ -6,7 +6,11 @@ import {
   summarizeRpcError,
   type ChainClient,
 } from '../chain/client.js';
-import { deliverDiscoveryAlerts, retireStaleDiscoveryAlerts } from './alerts.js';
+import {
+  deliverDiscoveryAlerts,
+  recoverDeployerHits,
+  retireStaleDiscoveryAlerts,
+} from './alerts.js';
 import {
   pruneDiscovery,
   runDiscoveryTick,
@@ -81,7 +85,16 @@ export function startDiscovery(db: Db, chain: ChainClient | null): DiscoveryHand
     if (Date.now() < pausedUntilMs) return;
     chainRunning = true;
     try {
-      await runDiscoveryTick(db, chain);
+      const tick = await runDiscoveryTick(db, chain);
+      // Round 26's hits are NOT sent from here. The flip to 'fired' is committed
+      // inside the block range that won it and cannot be re-won, so the telling
+      // happens in the same range — a throw between the two (a 429 on the next
+      // range, a failed cursor write) used to lose the one message this feature
+      // owes. What is left over — a crash between the flip and the send — is
+      // reconciled by the recovery sweep on the enrichment loop below.
+      if (tick.deployerHits.length > 0) {
+        console.log(`discovery: ${tick.deployerHits.length} deployer hit(s) this tick`);
+      }
       if (backoffMs > 0) {
         console.log('discovery: provider accepting reads again, chain ticks resumed');
         backoffMs = 0;
@@ -124,6 +137,16 @@ export function startDiscovery(db: Db, chain: ChainClient | null): DiscoveryHand
       const refreshed = await runReEnrichment(db);
       await runLockReads(db);
       await retireStaleDiscoveryAlerts(db);
+      // Round 26: fired watches whose message never went out. Here rather than
+      // on the chain loop because it is a reconciliation, not a detection — it
+      // must not add work to the tick that has to keep its 20-second cadence.
+      // Safe to re-run on two counts, and it needs both: the alerts row is the
+      // record of the telling and its partial unique index refuses a second one
+      // wherever there is a contract address to key on, and the sweep's grace
+      // window (DEPLOYER_WATCH.recoveryGraceSeconds) keeps it off rows that are
+      // still being delivered — which is the only way the one road with a NULL
+      // address (an undecodable registry event) could have been said twice.
+      await recoverDeployerHits(db);
       const alerted = await deliverDiscoveryAlerts(db);
       if (alerted > 0) {
         console.log(`discovery: ${enriched} enriched, ${refreshed} refreshed, ${alerted} alerted`);

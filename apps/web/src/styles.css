@@ -3642,6 +3642,37 @@ a {
   opacity: 0.85;
 }
 
+/* DEPLOYERS (docs/decisions.md round 26) — the addresses this group is watching
+   for a launch. A receipt, not a control surface: the chat command is the whole
+   interface, and this block exists so a member can see what is being watched and
+   what has already fired without asking the bot. Same dim voice as the Tier-B
+   candidate rows above, one indent out, because it hangs off the ZONE rather
+   than off any one account. */
+.upc-deps {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 8px 0 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--badge-border);
+}
+
+.upc-deps-head {
+  margin: 0 0 2px;
+  font: 500 9px var(--font-mono);
+  letter-spacing: 0.08em;
+  color: var(--dimmer);
+}
+
+.upc-dep {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font: 400 9.5px var(--font-mono);
+  color: var(--dimmer);
+}
+
 /* The add field: web parity for `/overseer track @handle [note]`. */
 .upc-form {
   display: flex;

@@ -153,6 +153,9 @@ function payload(over: Partial<ProjectsResponse> = {}): ProjectsResponse {
     // about the difference between the two.
     slotsUsed: projects.filter((entry) => holdsSlot(entry.status)).length,
     slotsUsedByMe: projects.filter((entry) => holdsSlot(entry.status) && entry.addedByMe).length,
+    // Round 26's block rides on this payload; these tests are about the
+    // accounts, so it is empty unless a test says otherwise.
+    deployers: [],
     ...over,
     projects,
   };

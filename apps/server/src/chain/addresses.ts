@@ -84,6 +84,22 @@ export const TOPICS = {
    * coin's original launch block and its curve address (topics[2]).
    */
   tokenLaunched: '0x8d4aad4953d0ca700d468f3753aa14432d1b35b43ec6409f051fb6aa43a89607',
+  /**
+   * `TokenSet(address,address,uint64)` — the event a team's own pre-launch
+   * REGISTRY contract emits when it finally publishes the coin (round 26, the
+   * @clubytech case: registry 0xD0A3…37A, deployed 2026-09-05, `token()` and
+   * `pool()` still empty).
+   *
+   * PROVENANCE, and its one gap. The signature was brute-forced from a PUSH32
+   * constant in that registry's own bytecode, so the topic0 is the contract's,
+   * not a guess — but a topic0 is identical whichever of the three parameters
+   * are `indexed`, and no source says which are. So nothing decodes this by
+   * position: deployerWatch.ts reads whichever of the topics and the data words
+   * is address-shaped and non-zero, and an event it cannot read at all is still
+   * reported ("fired, tx 0x…") rather than dropped. An unreadable publication is
+   * still a publication.
+   */
+  tokenSet: '0xdde7882be5929d751fc12bf73b38134ac7ae823859c41ae8b7f26fc15c3b5abc',
 } as const;
 
 /**

@@ -66,6 +66,7 @@ export const METHOD_CU: Readonly<Record<string, number>> = {
   eth_getBlockByNumber: 16,
   eth_getTransactionByHash: 17,
   eth_getTransactionReceipt: 15,
+  eth_getTransactionCount: 26,
   eth_blockNumber: 10,
 };
 const DEFAULT_CU = 16;
@@ -141,6 +142,28 @@ export interface ChainClient {
    * (docs/research-onchain.md). Null when the transaction cannot be read.
    */
   getTransactionValue(txHash: string): Promise<bigint | null>;
+  /**
+   * WHO SENT a transaction — its `from`, lowercased — or null when it cannot be
+   * read. The deployer watch's road to a launch the sweep cannot attribute: a
+   * new Uniswap pool names no deployer anywhere in its logs, and the sender of
+   * the transaction that created it is the only place that fact is written.
+   *
+   * OPTIONAL on the interface exactly like `getCode`, so every client and test
+   * double built for the log listener alone stays valid — and an absent method
+   * reads as UNKNOWN, which is silence, never "this is not the watched wallet".
+   */
+  getTransactionSender?(txHash: string): Promise<string | null>;
+  /**
+   * How many transactions an address has SENT (its next nonce), or null when it
+   * cannot be read.
+   *
+   * This is what makes a raw contract deployment detectable with no indexer and
+   * no vendor: CREATE derives the new contract's address from (sender, nonce)
+   * alone, so a nonce plus `getCode` on the predicted address answers "did this
+   * wallet just deploy something" for 26 CU a probe. Optional, and unknown for
+   * the same reason as above: without it the CREATE road simply does not run.
+   */
+  getTransactionCount?(address: string): Promise<number | null>;
   /**
    * Every log ONE transaction emitted, from its receipt. Null when the receipt
    * cannot be read — which is unknown, never "the transaction emitted nothing".
@@ -650,6 +673,35 @@ export function createChainClient(rpcUrl: string | null): ChainClient | null {
       } catch {
         // A transaction the node cannot serve is unknown, never zero: a zero
         // would read as "this pool opened with no ETH at all", which is a claim.
+        return null;
+      }
+    },
+    async getTransactionSender(txHash) {
+      try {
+        const tx = (await client.request({
+          method: 'eth_getTransactionByHash',
+          params: [txHash as never],
+        } as never)) as { from?: unknown } | null;
+        const from = tx?.from;
+        return typeof from === 'string' && from.startsWith('0x') ? from.toLowerCase() : null;
+      } catch {
+        // Unknown, and the caller treats unknown as "no match" — never as a
+        // match, because the next step is telling a chat room whose coin it is.
+        return null;
+      }
+    },
+    async getTransactionCount(address) {
+      try {
+        const raw = await client.request({
+          method: 'eth_getTransactionCount',
+          params: [address as never, 'latest' as never],
+        } as never);
+        if (typeof raw !== 'string' && typeof raw !== 'number') return null;
+        const count = Number(BigInt(raw));
+        // A nonce that will not survive the trip through Number is not a nonce
+        // any CREATE prediction should be built on.
+        return Number.isSafeInteger(count) && count >= 0 ? count : null;
+      } catch {
         return null;
       }
     },

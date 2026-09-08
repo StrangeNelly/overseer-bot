@@ -329,3 +329,145 @@ Running record of decisions made with the owner. Newest at the bottom.
   hold (`XWATCH.hijackHoldMinutes` = 10) still holds a ping board-only when the token predates the
   post. Tier B is still board-only and can never produce a chat message, from any of its three
   passes.
+
+## Round 26 — deployer watch: tell me the moment that address launches (2026-09-08)
+
+- **Ask (owner, verbatim):** "i want to add command to overseer bot like `/overseer deployer <address>`
+  and it will do everything it can to notify me in the telegram group as soon as its launched on pons
+  or anywhere else." The motivating case is @clubytech: the team deployed a REGISTRY contract
+  `0xD0A3…B337A` from EOA `0x9c5c…d074a` at that wallet's nonce 163 on 2026-09-05, its `token()` and
+  `pool()` are still empty, and four impostor "Cluby" tokens already trade on this chain. The group
+  wants the REAL launch, at the moment it happens, not a search result afterwards.
+
+- **FOUR ROADS, because a team can put a coin on chain four ways and only one of them is free.**
+  1. **PONS (`pons`).** The v2 factory's `TokenLaunched` carries the deployer as its THIRD INDEXED
+     TOPIC (verified on chain 2026-09-08: topics[1]=token, topics[2]=curve, topics[3]=deployer), and
+     `discovery/scan.ts` already asks for one `eth_getLogs` per tick over `RANGE_ADDRESSES` — the PONS
+     factory among them. Adding the `TokenLaunched` topic0 to that same query costs **zero additional
+     RPC calls**; the match is a string comparison in memory over ~7 extra logs per 20s tick. This is
+     the road the ask is really about, and it is the cheapest thing in the feature.
+  2. **First pool anywhere (`pool`).** A Uniswap pool names no deployer in any of its logs, so the
+     road is the SENDER of the transaction that created it (`eth_getTransactionByHash`, 17 CU),
+     bounded per tick. It is what makes "or anywhere else" true.
+  3. **Raw deployment (`create`).** CREATE derives a contract's address from (sender, nonce) alone, so
+     a nonce read plus `eth_getCode` on the predicted address detects a deployment with NO indexer and
+     NO vendor — verified by reproducing the Cluby registry's address exactly at nonce 163. It is the
+     only road that catches the pre-launch scaffolding the motivating case is made of.
+  4. **Registry publication (`registry`).** A watched CONTRACT emitting its own `TokenSet`
+     (topic0 `0xdde7882b…c3b5abc`, brute-forced from a PUSH32 constant in the registry's bytecode).
+     Which of its three parameters are indexed is UNKNOWN and the topic0 is identical either way, so
+     it is decoded DEFENSIVELY — address-shaped words from the topics first, then the data — and an
+     event we cannot decode still fires with its transaction hash rather than being dropped.
+
+- **A PONS launch does NOT update a registry, so both are watched.** `setToken` on the Cluby registry
+  is owner-gated (`OwnableUnauthorizedAccount` is in its bytecode) and `owner()` is
+  `0x90a8…4d8a85` — a DIFFERENT wallet, nonce 1, zero balance. Publication is therefore a separate
+  manual act that LAGS the launch by however long it takes a human to send it. Road 1 is the fast one
+  and road 4 is the confirmation; neither is a substitute for the other.
+
+- **The nonce high-water mark is stamped at ADD time.** `/overseer deployer` reads the wallet's
+  current nonce once and stores it, and the CREATE scan only ever probes ABOVE it — the reply says so
+  ("from nonce 163 — earlier contracts are ignored"). Without this the first scan of the motivating
+  wallet would "find" 163 historical contracts and announce every one of them as a launch. A nonce
+  that cannot be read is stored as NULL, never as zero: the first scan takes the mark instead, and the
+  reply says the mark has not been taken yet.
+
+- **One message per WATCH, ever — not per coin.** The alert row is written FIRST and the chat is told
+  only when that insert actually happened — round 23's rule, with the same partial unique index behind
+  it (`alerts_deployer_uq` on (group_id, type, details->>'watched', details->>'address',
+  details->>'via') where type = 'deployer_launch'). The watch row itself flips to 'fired' under a
+  `status='active'` guard in the detection pass, so two ticks, or two roads to the same launch,
+  cannot both claim it. Two watches
+  on ONE team (the wallet and its registry) each speak, deliberately: the launch and the later
+  publication are different events, and the index is keyed on the WATCHED address for that reason.
+  The SIGNAL is in the key too, and it has to be: a 'create' hit's `details.address` is the PREDICTED
+  contract, so keying on (watched, address) alone made the wallet's own later launch of that very
+  contract read as a duplicate — the group would have been told about the scaffolding and then
+  silently NOT told about the launch, on exactly the "or anywhere else" road this round exists for.
+  NULLs are distinct in a unique index, so the one road with no contract address — an undecodable
+  `TokenSet` — is bounded by the status flip instead, plus the recovery sweep's grace window
+  (`DEPLOYER_WATCH.recoveryGraceSeconds`, 60s), which keeps the sweep off rows that are still being
+  delivered rather than lost.
+
+- **The flip and the telling are two writes, so the gap between them is reconciled.** A hit is claimed
+  inside the block range that found it and the chat is told in the same range (not at the end of the
+  tick: a 429 on the next range or a failed cursor write used to discard the message, and the
+  `status='active'` guard means no later pass can re-win the evidence). `deployer_watches.notified_at`
+  records that the chat was DEALT WITH — sent, muted, already told, or nowhere to post — and a sweep
+  on the enrichment loop re-delivers fired rows that have none, within
+  `DEPLOYER_WATCH.recoveryWindowMinutes` (2h: a late ping is still news, a day-old one is not) and no
+  younger than `recoveryGraceSeconds` (60s), because a row being delivered right now looks exactly
+  like a lost one. Safe to re-run because the alerts index turns the second attempt into "already
+  told" — and, on the one road with no address for that index to key on, because the grace window
+  means the sweep never sees a delivery in progress. A 'create' that threw is NOT recovered: it claims
+  no row for the sweep to read, and its dedupe is the nonce mark, which has already moved past it.
+
+- **The four verbs are not interchangeable, and the message says which one fired:** "launched on
+  PONS" / "opened a pool" / "deployed a contract" / "published its official token". The 'create' road
+  is the weak one — bytecode at a predicted address is a contract, and the motivating case is
+  precisely a deploy that is NOT a token — so its message carries "Not tradeable — a contract
+  deployment, which may not be a token at all", it creates no `tokens` row (nothing for the poller to
+  chase for a day), it spends no watch slot, and it prints no trading links, because a predicted
+  address has no pool for them to point at. The other three upsert the token, stamp it on the watch so
+  the board can name the coin, and AUTO-WATCH it under the adder's slot; a full slot list is never a
+  reason to withhold the news.
+
+- **A 'create' NEVER RETIRES THE WATCH.** Only the three launch roads flip the row to 'fired'. The
+  motivating wallet deployed its registry at nonce 163 and will launch later, so letting the weakest
+  signal consume the one-shot watch would mean the group hears about the scaffolding and is then
+  silent through the launch — the exact miss this round exists to prevent. A create is announced (with
+  "Still watching this address for the launch itself.") and roads 1, 2 and 4 keep running. It cannot
+  repeat: the CREATE scan's nonce mark only ever moves forward past nonces that were answered.
+
+- **A watch on a CONTRACT is watched two ways, and the reply says only those two.** A transaction's
+  `from` is an externally owned account by construction, so a contract can never be the sender of the
+  transaction that opened a pool, and nobody but the contract itself can be nonce-predicted forward.
+  Its coverage is the PONS road (whose deployer topic is a wallet or a contract alike) and its own
+  `TokenSet`. Promising "opens a pool anywhere" to a contract watch would be cover the group has not
+  got.
+
+- **Product surface.** `/overseer deployer <address> [note]` (validates the address, refuses the zero
+  address and round 23's KNOWN_CONTRACTS — WETH, USDG, the factories, the hook, burn — because every
+  launch on this chain touches those and a watch on one would fire on somebody else's coin), one
+  `eth_getCode` to decide 'eoa' vs 'contract', caps 12 per group and 3 per member under the same
+  advisory lock the watchlist and the X monitor use, idempotent on a re-add (a live one says "already
+  watching", a removed or FIRED row is reused with the launch history cleared — re-adding a fired
+  watch is how a member says "that wallet will do it again"). `/overseer deployers` lists them,
+  `/overseer undeployer <address>` removes one (any member, the group-wide rule). With no chain client
+  the commands REFUSE — "deployer watch needs the chain listener, which is off" — rather than storing
+  an address nothing can ever fire on, the honesty rule `/overseer track` follows without an X key.
+
+- **ON BY DEFAULT, alone among the alert families.** `groups.settings.deployer.ping` defaults true
+  because the owner asked to be notified; `/overseer set deployerping off` keeps the board row and
+  drops the message. It stays inside the near-silent-bot rule because it is one message per watch,
+  about an address a member typed in themselves.
+
+- **The board is a receipt.** `ProjectsResponse.deployers` rides on the UPCOMING payload (the same
+  question from the other end: an X account is a team SAYING something, a deployer is the same team
+  DOING it) and renders as a compact block beneath the tracked accounts — address, kind, who added it,
+  their note, and what it fired on with links to that coin only. There is no add or remove on the web:
+  this is a chat-first feature.
+
+- **Cost.** Road 1 is FREE (a topic added to a query the tick already makes). Road 2 is one
+  transaction lookup per unattributed new pool, bounded by `DEPLOYER_WATCH.poolAttributionPerTick` as a
+  budget carried across the tick's block RANGES (the pass runs once per range, so a 40-chunk catch-up
+  tick would otherwise spend forty times the ceiling). Road 3 is about two calls per EOA watch per
+  tick (one nonce, then `eth_getCode` on each unused nonce, `createScanPerTick` bounded). Road 4 is
+  NOT free: it is one extra `eth_getLogs` per block range — over every contract watch at once — and
+  only while a group watches at least one contract. **A group with no watches spends no chain
+  read and no write at all** — every pass stops at the watchlist SELECT, the codebase's "absence is
+  the feature flag".
+
+- **The pool road reads the RAW candidates, not the discovery board's kept rows.** The board drops a
+  launch that is thin (under `boardMinEth`), stale, a second pool or a tokenized stock because those
+  do not deserve a DISCOVERY card. None of that is a reason to withhold "the wallet you asked about
+  just opened a pool", so the deployer road sees every new pool the range decoded and the board keeps
+  its own list.
+
+- **An outage wider than the backfill bound is CHASED on the cheap road and otherwise admitted.**
+  `planRange` steps over blocks after `DISCOVERY.backfillMaxHours`, which is right for the feed and
+  wrong for a one-shot subscription. When it does, one watchlist-filtered `eth_getLogs` reads the gap
+  for PONS launches — the watched addresses go in the indexed topic position as an OR-filter (verified
+  on this RPC 2026-09-08: an array in a topic narrowed 49 launches to 3), so the response is bounded
+  by the watchlist — capped at `DEPLOYER_WATCH.backfillMaxChunks` and reading the most recent part of
+  the gap first. Past that cap the uncovered block range is logged by name rather than covered up.

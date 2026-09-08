@@ -313,6 +313,75 @@ export interface ProjectEntry {
   candidates: ProjectCandidate[];
 }
 
+/* ------------------------------------------- deployer watch (round 26) */
+
+/**
+ * What was watched. 'eoa' is a wallet — a deployment from it is a CREATE at its
+ * next nonce, which is predictable without an indexer; 'contract' is a deployed
+ * contract, which cannot deploy by nonce prediction and is instead watched for
+ * the PONS/pool signals and for a registry publication.
+ */
+export type DeployerWatchKind = 'eoa' | 'contract';
+
+/** A watch is live, has fired its one message, or was taken off the list. */
+export type DeployerWatchStatus = 'active' | 'fired' | 'removed';
+
+/**
+ * WHICH SIGNAL FIRED (docs/decisions.md round 26), in the order of how much it
+ * proves:
+ * - 'pons'     the watched address launched a token on the PONS v2 factory
+ *              (TokenLaunched's third indexed topic is the deployer);
+ * - 'pool'     it opened the first pool for a coin somewhere else on chain;
+ * - 'create'   it deployed a RAW CONTRACT (predicted from its next nonce and
+ *              confirmed with eth_getCode) — not tradeable, maybe not a token,
+ *              and the ONLY signal that does not retire the watch, so it is
+ *              announced in the chat and never recorded on the row;
+ * - 'registry' a watched CONTRACT published its official token (TokenSet).
+ */
+export type DeployerFiredVia = 'pons' | 'pool' | 'create' | 'registry';
+
+/** One watched deployer address, and what it has fired (if anything). */
+export interface DeployerWatchEntry {
+  id: number;
+  /** Lowercase 0x-prefixed 40-hex — the wallet or contract being watched. */
+  address: string;
+  kind: DeployerWatchKind;
+  /** Free text the adder attached (`/overseer deployer <address> <note>`). */
+  note: string | null;
+  addedBy: number;
+  addedByName: string | null;
+  addedByMe: boolean;
+  addedAt: string;
+  status: DeployerWatchStatus;
+  /**
+   * Set once one of the three RETIRING signals fired ('pons', 'pool',
+   * 'registry'). `address` here is the CONTRACT that appeared, never the
+   * watched address. A 'create' never appears here: it does not claim the row,
+   * so the watch stays live and the board keeps saying "watching", which is
+   * what it is doing.
+   *
+   * `symbol` is the coin's ticker once the poller has enriched its `tokens`
+   * row — null for the first minutes of a brand-new launch, and null forever on
+   * a hit whose address we could not read.
+   *
+   * `address` ITSELF can be null: a registry event whose parameter layout we
+   * cannot decode still fired, and the row says so with its transaction rather
+   * than being hidden or filled in with a plausible-looking address. `links` is
+   * null with it — there is nothing to link to.
+   */
+  fired: {
+    address: string | null;
+    symbol: string | null;
+    tokenId: number | null;
+    via: DeployerFiredVia;
+    /** ISO instant we recorded the hit. */
+    at: string;
+    /** The transaction that carried it, when the signal named one. */
+    txHash: string | null;
+    links: TradingLinkRow | null;
+  } | null;
+}
+
 /**
  * GET /api/g/:slug/upcoming
  * `enabled` false = no X provider key in this deployment (the zone says so).
@@ -321,6 +390,11 @@ export interface ProjectEntry {
  *   409 when capped (caps echoed here) or already tracked, 404 when the handle
  *   does not resolve on X. DELETE /api/g/:slug/upcoming/:id -> 204 (any member).
  * Bot parity: `/overseer track @handle [note]`, `untrack @handle`, `tracking`.
+ *
+ * `deployers` rides on the SAME payload because it answers the same question
+ * from the other end — "what is about to launch, and how would we know?" — and
+ * it is chat-first: there is no web add/remove for it (round 26), so the board
+ * is a compact read-only block under the tracked accounts.
  */
 export interface ProjectsResponse {
   enabled: boolean;
@@ -333,11 +407,31 @@ export interface ProjectsResponse {
   /** ...of which the requesting member holds. */
   slotsUsedByMe: number;
   projects: ProjectEntry[];
+  /**
+   * The group's watched deployer addresses (round 26), newest activity first.
+   * Served whether or not the chain listener runs here — a member's watch is a
+   * real record either way — and always an array, never absent, so a reader
+   * cannot mistake "nothing tracked" for "this build has no deployer watch".
+   */
+  deployers: DeployerWatchEntry[];
 }
 
 export interface TrackProjectRequest {
   handle: string;
   note?: string;
+}
+
+/**
+ * groups.settings.deployer (round 26). `/overseer set deployerping on|off`.
+ *
+ * ON unless the group says otherwise — the one alert family that defaults to
+ * speaking, because the owner asked for this feature as "notify me in the
+ * telegram group as soon as its launched". One message per watch for the launch
+ * itself, plus at most one per contract the watched wallet deploys on the way
+ * there (that road cannot repeat: the nonce mark only moves forward).
+ */
+export interface DeployerSettings {
+  ping: boolean;
 }
 
 /** groups.settings.xwatch, merged over XWATCH_DEFAULTS. `/overseer set launchping on|off`. */

@@ -1,0 +1,2 @@
+ALTER TABLE "deployer_watches" ADD COLUMN "notified_at" timestamp with time zone;--> statement-breakpoint
+CREATE UNIQUE INDEX "alerts_deployer_uq" ON "alerts" USING btree ("group_id","type",("details" ->> 'watched'),("details" ->> 'address'),("details" ->> 'via')) WHERE "alerts"."type" = 'deployer_launch';

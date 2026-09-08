@@ -62,6 +62,7 @@ function payload(entry: ProjectEntry): ProjectsResponse {
     slotsUsed: 1,
     slotsUsedByMe: 0,
     projects: [entry],
+    deployers: [],
   };
 }
 

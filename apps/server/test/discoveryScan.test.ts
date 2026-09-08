@@ -1,8 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
-import { chainCursor, discoveryEvents, groups, tokens, type Db } from '@groupie/db';
-import { DISCOVERY } from '@groupie/shared';
+import {
+  chainCursor,
+  deployerWatches,
+  discoveryEvents,
+  groups,
+  tokens,
+  type Db,
+} from '@groupie/db';
+import { DEPLOYER_WATCH, DISCOVERY } from '@groupie/shared';
 import {
   PONS_GRADUATION_HOOK,
   PONS_V2_FACTORY,
@@ -166,6 +173,8 @@ interface FakeChain extends ChainClient {
   txValue: bigint | null;
   /** null = the receipt could not be read at all. */
   receipts: 'ok' | null;
+  /** Sender per transaction hash; absent = the node would not say. */
+  senders: Map<string, string>;
   /** Throw this instead of answering a query the predicate matches. */
   failLogs: ((query: LogQuery) => unknown) | null;
   /** Blocks per second this fake chain's timestamps run at. */
@@ -204,6 +213,7 @@ function fakeChain(logs: ChainLog[]): FakeChain {
   const chain: FakeChain = {
     queries,
     calls,
+    senders: new Map(),
     txValue: null,
     receipts: 'ok',
     failLogs: null,
@@ -226,6 +236,8 @@ function fakeChain(logs: ChainLog[]): FakeChain {
       return `0x${word(10n ** 27n)}`;
     },
     getTransactionValue: async () => chain.txValue,
+    // Round 26's pool road: who SENT the transaction that opened the pool.
+    getTransactionSender: async (txHash) => chain.senders.get(txHash.toLowerCase()) ?? null,
     getTransactionLogs: async (txHash) =>
       chain.receipts === null
         ? null
@@ -260,6 +272,7 @@ function makeDb(script: Script = {}): { db: Db; calls: DbCall[] } {
   const nameOf = (table: unknown): string => {
     if (table === discoveryEvents) return 'discoveryEvents';
     if (table === chainCursor) return 'chainCursor';
+    if (table === deployerWatches) return 'deployerWatches';
     if (table === tokens) return 'tokens';
     if (table === groups) return 'groups';
     return 'unknown';
@@ -425,6 +438,87 @@ describe('runDiscoveryTick', () => {
     expect(find(calls, 'insert:chainCursor')).toHaveLength(0);
   });
 
+  it('gives the deployer watch a launch the BOARD dropped as too thin', async () => {
+    // 0.1 WETH: under DISCOVERY.boardMinEth, so no DISCOVERY card. That floor is
+    // about what deserves a card, and a member who asked to be told the moment
+    // THIS wallet launches is owed the news either way.
+    const thin = log({
+      address: NEW_PAIR,
+      topics: [TOPICS.v2Mint, pad(WALLET)],
+      data: `0x${word(10n ** 17n)}${word(10n ** 27n)}`,
+    });
+    const chain = fakeChain([pairCreated, thin, tokenTransfer]);
+    chain.senders.set('0xtx1', WALLET);
+    const { db, calls } = makeDb({
+      'select:chainCursor': CURSOR_ROW,
+      'select:deployerWatches': [
+        [
+          {
+            id: 5,
+            groupId: 2,
+            address: WALLET,
+            kind: 'eoa',
+            addedBy: 4242,
+            status: 'active',
+            lastNonce: 1,
+            nonceCheckedAt: new Date(),
+            note: null,
+          },
+        ],
+      ],
+      'update:deployerWatches': [[{ id: 5 }]],
+    });
+
+    const result = await runDiscoveryTick(db, chain);
+
+    // Nothing on the board...
+    expect(find(calls, 'insert:discoveryEvents')).toHaveLength(0);
+    // ...and the watch fired anyway, on the pool road.
+    expect(result.deployerHits.map((h) => h.via)).toEqual(['pool']);
+    expect(find(calls, 'update:deployerWatches')[0]?.set?.status).toBe('fired');
+  });
+
+  it('chases the deployer watch across blocks the backfill bound stepped over', async () => {
+    const chain = fakeChain([]);
+    // Down for longer than DISCOVERY.backfillMaxHours: the feed gives those
+    // blocks up, which is right for a feed and wrong for a one-shot watch.
+    const behind = DISCOVERY.backfillMaxHours * 3600 * DISCOVERY.blocksPerSecond + 10_000;
+    const { db } = makeDb({
+      'select:chainCursor': [[{ lastBlock: HEAD - behind }]],
+      'select:deployerWatches': [
+        [
+          {
+            id: 5,
+            groupId: 2,
+            address: WALLET,
+            kind: 'eoa',
+            addedBy: 4242,
+            status: 'active',
+            lastNonce: 1,
+            nonceCheckedAt: new Date(),
+            note: null,
+          },
+        ],
+      ],
+    });
+
+    await runDiscoveryTick(db, chain);
+
+    // One watchlist-filtered query over the skipped blocks: the PONS factory,
+    // TokenLaunched, and the watched address in the deployer topic position.
+    const gap = chain.queries.filter(
+      (q) => Array.isArray(q.address) && q.address.length === 1 && q.address[0] === PONS_V2_FACTORY,
+    );
+    expect(gap).toHaveLength(1);
+    expect(gap[0]?.topics?.[0]).toBe(TOPICS.tokenLaunched);
+    expect(gap[0]?.topics?.[3]).toEqual([pad(WALLET)]);
+    // ...and it is bounded: the gap is read from the most recent end.
+    const span = (gap[0]?.toBlock as number) - (gap[0]?.fromBlock as number) + 1;
+    expect(span).toBeLessThanOrEqual(
+      DISCOVERY.maxBlocksPerRequest * DEPLOYER_WATCH.backfillMaxChunks,
+    );
+  });
+
   it('records a launch with its DEPOSIT and its bundle facts', async () => {
     const chain = fakeChain([pairCreated, deposit, tokenTransfer]);
     const { db, calls } = makeDb({
@@ -553,7 +647,7 @@ describe('runDiscoveryTick', () => {
     expect(chain.queries.some((q) => q.address === NEW_PAIR)).toBe(false);
   });
 
-  it('asks for all four event streams in ONE query over the range', async () => {
+  it('asks for every event stream in ONE query over the range', async () => {
     const chain = fakeChain([]);
     const { db } = makeDb({ 'select:chainCursor': CURSOR_ROW });
     await runDiscoveryTick(db, chain);
@@ -565,11 +659,14 @@ describe('runDiscoveryTick', () => {
       PONS_V2_FACTORY,
       PONS_GRADUATION_HOOK,
     ]);
+    // Round 26 added a fifth topic0 to the SAME query: the deployer watch reads
+    // PONS launches out of this sweep, which is why it costs no extra request.
     expect(query?.topics?.[0]).toEqual([
       TOPICS.pairCreated,
       TOPICS.initialize,
       TOPICS.poolGraduated,
       TOPICS.poolRegistered,
+      TOPICS.tokenLaunched,
     ]);
     expect(query?.fromBlock).toBe(HEAD - 99);
     expect(query?.toBlock).toBe(SAFE_HEAD);

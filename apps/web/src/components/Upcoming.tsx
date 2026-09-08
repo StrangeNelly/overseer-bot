@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import type {
+  DeployerFiredVia,
+  DeployerWatchEntry,
   ProjectCandidate,
   ProjectEntry,
   ProjectsResponse,
@@ -131,6 +133,108 @@ export function postViaNote(via: ProjectEntry['lastPostVia']): string | null {
   // 'search' is the normal channel and null is "no post seen yet" — neither is
   // news, and a note on every row would make the one that matters invisible.
   return via === 'replies' || via === 'top' ? UPCOMING_VIA_NOTES[via] : null;
+}
+
+/* -------------------------------------------- deployer watch (round 26) */
+
+/**
+ * The same four verbs the chat message uses (discovery/deployerMessage.ts), so
+ * a member who read "opened a pool" in the group finds the identical phrase on
+ * the row that said it. They are deliberately unequal in strength: 'create' is a
+ * contract deployment and nothing more, and the board must not flatten it into
+ * a launch any more than the message does.
+ */
+export const DEPLOYER_VIA_TEXT: Record<DeployerFiredVia, string> = {
+  pons: 'launched on PONS',
+  pool: 'opened a pool',
+  create: 'deployed a contract',
+  registry: 'published its official token',
+};
+
+/** `wallet` / `contract` — what a member sees, not the column's enum. */
+export function deployerKindText(kind: DeployerWatchEntry['kind']): string {
+  return kind === 'eoa' ? 'wallet' : 'contract';
+}
+
+/**
+ * One line per watch: what it is, what it has done, whose slot it is, and the
+ * note they left. This block is a RECEIPT for a chat-first feature — there is no
+ * add or remove here (round 26: `/overseer deployer` is the whole interface) —
+ * so it says everything in one dim line rather than growing controls.
+ */
+export function deployerLine(entry: DeployerWatchEntry, now: number): string {
+  const parts: string[] = [deployerKindText(entry.kind)];
+  const fired = entry.fired;
+  if (fired) {
+    // The symbol only when the chain has one: a coin minutes old has no symbol
+    // until the poller enriches it, and printing the address twice says nothing.
+    // ('create' never reaches this branch — that road announces in the chat
+    // without claiming the row, so the watch keeps reading "watching".)
+    const named = fired.symbol ? ` ${fired.symbol}` : '';
+    parts.push(`${DEPLOYER_VIA_TEXT[fired.via]}${named} ${fmtAge(fired.at, now)} ago`);
+    // The event fired and we could not read the address out of it. Said here
+    // rather than left blank, because a fired row with no coin beside it reads
+    // as a bug otherwise.
+    if (fired.address === null) parts.push('address unreadable');
+  } else if (entry.status === 'fired') {
+    // The row fired and the signal itself was never recorded — the same rule the
+    // chat list follows: the one thing a fired watch must never print is
+    // "watching", because that is a promise it is no longer keeping.
+    parts.push('fired');
+  } else {
+    parts.push('watching');
+  }
+  const who = entry.addedByMe ? 'you' : (entry.addedByName ?? 'a member');
+  parts.push(`added by ${who} ${fmtAge(entry.addedAt, now)} ago`);
+  if (entry.note) parts.push(entry.note);
+  return parts.join(' · ');
+}
+
+/**
+ * The block itself. It sits UNDER the tracked accounts because it answers the
+ * same question from the other end — an X account is a team saying something,
+ * a deployer is the same team doing it — and it is smaller because the chat,
+ * not this surface, is where a deployer watch pays off.
+ */
+function DeployerWatches({
+  deployers,
+  now,
+}: {
+  deployers: readonly DeployerWatchEntry[];
+  now: number;
+}) {
+  if (deployers.length === 0) return null;
+  return (
+    <div className="upc-deps">
+      <p className="upc-deps-head">
+        DEPLOYERS · addresses this group is watching · /overseer deployer &lt;address&gt;
+      </p>
+      {deployers.map((entry) => (
+        <div className="upc-dep" key={entry.id}>
+          <span className="upc-cand-sym">{shortAddress(entry.address)}</span>
+          <span className="upc-cand-line">{deployerLine(entry, now)}</span>
+          {/* Only a FIRED watch links anywhere, and only to what it fired on —
+              the watched address itself is a wallet, which no trading app has
+              anything to say about, and an unreadable event has no address to
+              point three deep links at. */}
+          {entry.fired && entry.fired.address !== null && entry.fired.links !== null ? (
+            <span className="upc-links">
+              <LinkPills
+                target={{
+                  address: entry.fired.address,
+                  symbol: entry.fired.symbol,
+                  twitterUrl: null,
+                  websiteUrl: null,
+                  links: entry.fired.links,
+                }}
+                compact
+              />
+            </span>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 export function Upcoming({
@@ -371,6 +475,10 @@ function UpcomingBody({
           ))}
         </div>
       )}
+      {/* Beneath the accounts, and outside the "no monitors" branch above: a
+          group can watch a deployer without tracking a single X handle, and
+          hiding its watches behind an empty account list would lose them. */}
+      <DeployerWatches deployers={data.deployers} now={now} />
       <p className="footnote dsc-footnote">{UPCOMING_FOOTNOTE}</p>
     </div>
   );

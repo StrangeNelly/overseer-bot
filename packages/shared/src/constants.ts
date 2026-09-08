@@ -745,6 +745,105 @@ export const XWATCH_DEFAULTS = {
   launchPing: true,
 } as const;
 
+/**
+ * The DEPLOYER WATCH (docs/decisions.md round 26) — "tell me the moment this
+ * address launches something, on PONS or anywhere else".
+ *
+ * The DESIGN CONSTRAINT behind every number here: detection must not add RPC
+ * calls to the 20-second discovery tick. The PONS road is FREE — the tick
+ * already makes one `eth_getLogs` over an address list with a topic0 OR-list,
+ * so adding `TokenLaunched` to that list costs a slightly larger response
+ * (~22 PONS launches/min chain-wide, ~7 logs per tick) and no extra request.
+ * A board with no watches costs one SELECT per pass and nothing else — no chain
+ * read and no write, the codebase's "absence is the feature flag".
+ *
+ * Only the three roads the sweep cannot see spend anything: a pool's sender and
+ * a raw CREATE are bounded by the numbers below, and a registry's own event is
+ * ONE `eth_getLogs` per block range — over every contract watch at once, and
+ * only while a group watches at least one contract, which is why it needs no
+ * number of its own.
+ */
+export const DEPLOYER_WATCH = {
+  /**
+   * Addresses one group may watch, and how many of those one member may hold —
+   * the same shape as the X monitor's caps, for the same reason: a watch costs
+   * chain reads every tick, so the ceiling is per group and the fairness rule
+   * is per member.
+   */
+  capPerGroup: 12,
+  capPerMember: 3,
+  /**
+   * Unused nonces probed per EOA watch per tick. Each probe is one
+   * `eth_getCode` (26 CU) against an address computed locally from
+   * (wallet, nonce) — no indexer, no vendor. Ten nonces every
+   * `nonceCheckSeconds` (20s) is one deployment every two seconds of catch-up,
+   * which no deploying wallet outruns, and the remainder is simply picked up on
+   * the next tick because the high-water mark only ever advances past nonces
+   * that were actually answered.
+   */
+  createScanPerTick: 10,
+  /**
+   * How often a watched wallet's nonce is re-read. Matched to the discovery
+   * tick (DISCOVERY.pollIntervalMs 20s) so the scan runs about once per tick —
+   * a catch-up tick reads several block ranges, and without this clock each of
+   * them would re-ask every wallet for a nonce that cannot have moved.
+   */
+  nonceCheckSeconds: 20,
+  /**
+   * Pool-creation transactions whose SENDER is resolved PER TICK. This is the
+   * one road with a per-launch cost (`eth_getTransactionByHash`, 17 CU each),
+   * and a busy range can carry dozens of new pools — so it is bounded, and the
+   * rows past the bound are simply not attributed rather than delaying the tick.
+   *
+   * The budget is carried across the tick's block RANGES, not reset for each of
+   * them: the pass runs once per range, so a 40-chunk catch-up tick would
+   * otherwise spend forty times this ceiling on one wake-up.
+   */
+  poolAttributionPerTick: 20,
+  /**
+   * `eth_getLogs` chunks the one-off backfill catch-up may spend when the tick
+   * has just stepped over blocks it will never read again (DISCOVERY's
+   * backfillMaxHours bound, after an outage). The query is
+   * `TokenLaunched` on the PONS factory with the WATCHED ADDRESSES as an
+   * indexed-topic OR-filter — verified on this RPC 2026-09-08: an array in a
+   * topic position narrowed 49 launches to 3 — so the RESPONSE is bounded by
+   * the watchlist, but the REQUEST COUNT is bounded by how long we were down.
+   * Past this many chunks the gap is reported rather than read: a launch nobody
+   * can afford to look for is said out loud, never covered up.
+   */
+  backfillMaxChunks: 8,
+  /**
+   * How long a fired watch whose message was lost is still worth telling the
+   * chat about. The flip to 'fired' and the send are separate writes, so a
+   * throw or a redeploy between them leaves a row claimed and a chat untold;
+   * the recovery sweep re-delivers those. Two hours because the promise is "as
+   * soon as it launched" — a late ping is still news, a day-old one is not.
+   */
+  recoveryWindowMinutes: 120,
+  /** Lost messages one recovery sweep will re-attempt. */
+  recoveryPerPass: 10,
+  /**
+   * How long a fired row is left ALONE before the sweep treats it as lost. The
+   * flip to 'fired' and the stamp that says the chat was dealt with are two
+   * writes with a delivery in between, so a row being delivered right now is
+   * indistinguishable from one whose message died — and the alerts unique index
+   * cannot separate them on the one road with no contract address (an
+   * undecodable registry event; nulls are distinct in a unique index). A minute
+   * is far longer than a delivery takes and far shorter than the 2h window, so
+   * it costs a genuinely lost message one extra sweep and buys "one message per
+   * watch, ever" outright.
+   */
+  recoveryGraceSeconds: 60,
+  /**
+   * Active watches one pass will look at, across all groups. A ceiling on the
+   * whole feature's cost that does not depend on how many groups exist: at
+   * capPerGroup 12 this is four full boards, and it is here so a future
+   * multi-group deployment degrades by scanning fewer watches rather than by
+   * quietly tripling the chain bill.
+   */
+  maxWatchesScanned: 50,
+} as const;
+
 /** Snapshot age tiers (docs/plan.md: snapshots are pruned by age tiers). */
 export const SNAPSHOT_RETENTION = {
   /** Older than this: thinned to one row per bucket per token. */

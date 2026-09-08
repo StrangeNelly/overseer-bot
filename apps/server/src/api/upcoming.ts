@@ -5,6 +5,10 @@ import { discoveryEvents, tokens, type Db } from '@groupie/db';
 import {
   XWATCH,
   tradingLinks,
+  type DeployerFiredVia,
+  type DeployerWatchEntry,
+  type DeployerWatchKind,
+  type DeployerWatchStatus,
   type ProjectCandidate,
   type ProjectEntry,
   type ProjectStatus,
@@ -12,6 +16,8 @@ import {
 } from '@groupie/shared';
 import { loadSlotHolderNames, parsePathId } from './board.js';
 import type { ApiEnv } from './membership.js';
+import { listDeployerWatches } from '../discovery/alerts.js';
+import type { DeployerWatchRow } from '../discovery/deployerWatch.js';
 import type { TweetWatcher } from '../xwatch/client.js';
 import {
   countSlots,
@@ -122,6 +128,83 @@ export function toProjectEntry(
   };
 }
 
+/**
+ * A deployer watch as the board reads it (docs/decisions.md round 26).
+ *
+ * `fired.address` is the CONTRACT that appeared, never the watched address, and
+ * only the three RETIRING roads ever set it: a 'create' is announced in the chat
+ * without claiming the row, so a wallet that deploys scaffolding still reads as
+ * "watching" here — because it is. `symbol` comes from the `tokens` row the
+ * delivery stamped on the watch, so it fills in as the poller enriches a
+ * brand-new coin.
+ */
+export function toDeployerEntry(
+  row: DeployerWatchRow,
+  userId: number,
+  names: ReadonlyMap<number, string>,
+  firedSymbol: string | null,
+): DeployerWatchEntry {
+  const addedBy = Number(row.addedBy);
+  // THE SIGNAL, not the address, is what says this watch fired: an unreadable
+  // registry event has a `via` and a transaction and no address at all, and
+  // keying off the address would hide that hit from the board entirely.
+  const fired = row.firedAddress === null ? null : row.firedAddress.toLowerCase();
+  return {
+    id: row.id,
+    address: row.address.toLowerCase(),
+    kind: row.kind as DeployerWatchKind,
+    note: row.note,
+    addedBy,
+    addedByName: names.get(addedBy) ?? null,
+    addedByMe: addedBy === userId,
+    addedAt: row.addedAt.toISOString(),
+    status: row.status as DeployerWatchStatus,
+    fired:
+      row.firedVia === null
+        ? null
+        : {
+            address: fired,
+            symbol: firedSymbol,
+            tokenId: row.firedTokenId,
+            via: row.firedVia as DeployerFiredVia,
+            // The instant WE recorded it. The block's own clock is not on this
+            // row, and dating a hit from a timestamp we do not have would be a
+            // precision this surface has not earned.
+            at: (row.firedAt ?? row.addedAt).toISOString(),
+            txHash: row.firedTxHash,
+            links: fired === null ? null : tradingLinks(fired),
+          },
+  };
+}
+
+/** The group's deployer watches, with their adders' names and fired symbols. */
+async function loadDeployers(db: Db, groupId: number, userId: number): Promise<DeployerWatchEntry[]> {
+  const rows = await listDeployerWatches(db, groupId);
+  if (rows.length === 0) return [];
+  const names = await loadSlotHolderNames(
+    db,
+    groupId,
+    rows.map((r) => Number(r.addedBy)),
+  );
+  const tokenIds = rows.map((r) => r.firedTokenId).filter((id): id is number => id !== null);
+  const symbols = new Map<number, string | null>();
+  if (tokenIds.length > 0) {
+    const tokenRows = await db
+      .select({ id: tokens.id, symbol: tokens.symbol })
+      .from(tokens)
+      .where(inArray(tokens.id, tokenIds));
+    for (const token of tokenRows) symbols.set(token.id, token.symbol);
+  }
+  return rows.map((row) =>
+    toDeployerEntry(
+      row,
+      userId,
+      names,
+      row.firedTokenId === null ? null : (symbols.get(row.firedTokenId) ?? null),
+    ),
+  );
+}
+
 export function createUpcomingRoutes(db: Db, xwatch: XWatchApi): Hono<ApiEnv> {
   const app = new Hono<ApiEnv>();
 
@@ -136,6 +219,10 @@ export function createUpcomingRoutes(db: Db, xwatch: XWatchApi): Hono<ApiEnv> {
       slotsUsed: 0,
       slotsUsedByMe: 0,
       projects: [],
+      // Round 26's block rides on the same payload, and is loaded on every
+      // path through this route — including the early return below, where a
+      // group tracking no X accounts may still be watching a deployer.
+      deployers: await loadDeployers(db, group.id, userId),
     };
 
     // The LIST is served whether or not the watcher runs here: a group's
