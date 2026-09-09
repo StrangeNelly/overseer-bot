@@ -244,26 +244,34 @@ describe('deployerHitMessage', () => {
   });
 
   it('prints the watched address short and the new one in full, with the facts and the links', () => {
+    // Round 27: Telegram HTML — the verb carries the emphasis, the pasteable
+    // address is <code> (tap to copy), and the links are words not URLs.
     const message = deployerHitMessage({ ...base, via: 'pons', name: 'Cluby Tech' });
     const lines = message.split('\n');
-    expect(lines[0]).toBe('0x9c5c…074a launched on PONS.');
+    expect(lines[0]).toBe('0x9c5c…074a <b>launched on PONS</b>.');
     // The address a reader pastes is never abbreviated.
-    expect(lines[1]).toBe(`CLUBY · Cluby Tech · ${TOKEN}`);
+    expect(lines[1]).toBe(`<b>CLUBY</b> · Cluby Tech · <code>${TOKEN}</code>`);
     expect(lines[2]).toBe('mcap $412K · LP $31K · launched 4m ago · PONS');
-    expect(message).toContain(`tx ${TX}`);
-    expect(message).toContain(`dexscreener.com`);
+    expect(message).toContain(`tx <code>${TX}</code>`);
+    expect(message).toContain('>DEXS</a>');
   });
 
   it('drops a name that only repeats the symbol', () => {
     // 'Cluby' next to 'CLUBY' is a second copy of the same word, not a fact.
     expect(deployerHitMessage({ ...base, via: 'pons' }).split('\n')[1]).toBe(
-      `CLUBY · ${TOKEN}`,
+      `<b>CLUBY</b> · <code>${TOKEN}</code>`,
     );
+  });
+
+  it('escapes a hostile symbol rather than letting it inject formatting', () => {
+    const message = deployerHitMessage({ ...base, via: 'pons', symbol: '<i>X</i>&Y', name: null });
+    expect(message).toContain('&lt;i&gt;X&lt;/i&gt;&amp;Y');
+    expect(message).not.toContain('<i>X</i>');
   });
 
   it('carries the adder\'s own note, so a member knows WHICH watch fired', () => {
     const message = deployerHitMessage({ ...base, via: 'pons', note: 'cluby team' });
-    expect(message.split('\n')[0]).toBe('0x9c5c…074a (cluby team) launched on PONS.');
+    expect(message.split('\n')[0]).toBe('0x9c5c…074a (cluby team) <b>launched on PONS</b>.');
   });
 
   it('says plainly that a raw deployment is not tradeable, and links nowhere', () => {
@@ -296,8 +304,8 @@ describe('deployerHitMessage', () => {
       txHash: null,
     });
     const lines = message.split('\n');
-    expect(lines[0]).toBe('0x9c5c…074a deployed a contract.');
-    expect(lines[1]).toBe(TOKEN);
+    expect(lines[0]).toBe('0x9c5c…074a <b>deployed a contract</b>.');
+    expect(lines[1]).toBe(`<code>${TOKEN}</code>`);
     expect(message).not.toContain('mcap');
     expect(message).not.toContain('tx ');
   });
@@ -315,7 +323,7 @@ describe('deployerHitMessage', () => {
       launchpad: null,
     });
     expect(message).toContain('could not be read');
-    expect(message).toContain(`tx ${TX}`);
+    expect(message).toContain(`tx <code>${TX}</code>`);
     expect(message).not.toContain('dexscreener.com');
   });
 });
@@ -878,7 +886,7 @@ describe('deliverDeployerHits', () => {
     expect(find(calls, 'insert:tokens')).toHaveLength(0);
     const alert = find(calls, 'insert:alerts')[0]?.values as Record<string, unknown>;
     expect((alert.details as Record<string, unknown>).address).toBeNull();
-    expect((alert.details as { message: string }).message).toContain(`tx ${TX}`);
+    expect((alert.details as { message: string }).message).toContain(`tx <code>${TX}</code>`);
   });
 
   it('stamps the fired token on the watch, so the board can NAME the coin', async () => {

@@ -169,6 +169,9 @@ export async function fireLaunch(db: Db, params: FireParams): Promise<FireOutcom
     tokenId: upserted.id,
     alertType: 'x_launch',
     message,
+    // Round 27: launchPingMessage emits Telegram HTML and escapes everything it
+    // interpolates, so the delivery path is asked to parse it.
+    parseMode: 'HTML',
     // The reply lands on the message that ASKED for this monitor. Null (a
     // monitor added from the board) degrades to a fresh message.
     replyToMessageId: monitor.addedMessageId === null ? null : Number(monitor.addedMessageId),

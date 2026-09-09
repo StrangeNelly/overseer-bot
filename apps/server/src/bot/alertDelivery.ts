@@ -2,6 +2,7 @@ import { and, eq } from 'drizzle-orm';
 import type { Api } from 'grammy';
 import { calls, groups, type Db } from '@groupie/db';
 import { subscribe } from '../events.js';
+import { stripHtml } from './telegramHtml.js';
 
 /**
  * The one place the bot speaks unprompted (docs/decisions.md round 4): watchlist
@@ -46,7 +47,7 @@ export function startAlertDelivery(db: Db, api: Api): () => void {
                   .where(and(eq(calls.groupId, event.groupId), eq(calls.tokenId, event.tokenId)))
               )[0];
         const replyTo = named ?? call?.messageId ?? null;
-        await api.sendMessage(group.chatId, event.message, {
+        const options = {
           link_preview_options: { is_disabled: true },
           ...(replyTo !== null
             ? {
@@ -56,7 +57,30 @@ export function startAlertDelivery(db: Db, api: Api): () => void {
                 },
               }
             : {}),
-        });
+        };
+        // Only a builder that escaped its own interpolations asks for HTML
+        // (round 27); everything else is still sent as plain text.
+        if (event.parseMode !== 'HTML') {
+          await api.sendMessage(group.chatId, event.message, options);
+          return;
+        }
+        try {
+          await api.sendMessage(group.chatId, event.message, {
+            ...options,
+            parse_mode: 'HTML',
+          });
+        } catch (err) {
+          // THE ALERT ROW ALREADY SAYS THE CHAT WAS TOLD, so nothing retries
+          // this and a rejected formatted send would lose the message outright.
+          // The words matter more than the styling: strip the markup and send
+          // it as the plain text this used to be. Only the retry's own failure
+          // reaches the outer catch.
+          console.error(
+            `alert delivery: HTML send rejected for group ${event.groupId}, retrying as plain text:`,
+            err,
+          );
+          await api.sendMessage(group.chatId, stripHtml(event.message), options);
+        }
       })
       .catch((err) => {
         console.error(`alert delivery failed for group ${event.groupId}:`, err);

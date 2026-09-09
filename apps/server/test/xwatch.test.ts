@@ -994,7 +994,12 @@ describe('fireLaunch', () => {
       // The reply lands on the message that added the monitor.
       replyToMessageId: MESSAGE_ID,
     });
-    expect(fired && 'message' in fired ? fired.message : '').toContain('@legsdotfun posted a contract address.');
+    expect(fired && 'message' in fired ? fired.message : '').toContain(
+      '<b>@legsdotfun</b> posted a contract address.',
+    );
+    // Round 27: the builder emits HTML, so the event must ask for it to be
+    // parsed — an unparsed message would show the raw tags to the group.
+    expect(fired && 'parseMode' in fired ? fired.parseMode : undefined).toBe('HTML');
   });
 
   it('holds the ping when the token predates the post (the hijack case)', async () => {

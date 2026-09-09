@@ -451,15 +451,50 @@ describe('launchPingMessage', () => {
     nowMs: NOW,
   };
 
-  it('says who posted, what the coin is, the numbers, the receipt and the links', () => {
+  it('says who posted, what the coin is, the numbers, the launch block and the links', () => {
+    // Round 27: Telegram HTML. The address is FULL and tap-to-copy, the launch
+    // block is its own sentence, and the links are words rather than URLs.
     const lines = launchPingMessage(base).split('\n');
-    expect(lines[0]).toBe('@legsdotfun posted a contract address.');
-    expect(lines[1]).toBe('LEGS · 0xb279…260c');
-    expect(lines[2]).toBe('mcap $31K · LP $31K · launched 4m ago · PONS · launch block 18% · 2 wallets');
-    expect(lines[3]).toBe(base.tweetUrl);
+    expect(lines[0]).toBe('<b>@legsdotfun</b> posted a contract address.');
+    expect(lines[1]).toBe(`<b>LEGS</b> · <code>${CA}</code>`);
+    expect(lines[2]).toBe('mcap $31K · LP $31K · launched 4m ago · PONS');
+    // 18% is under DISCOVERY.bundleMaxPct (25), so it is stated, not emphasised.
+    expect(lines[3]).toBe('launch block: 18% of supply to 2 wallets');
     expect(lines[4]).toBe(
-      [tradingLinks(CA).axiom, tradingLinks(CA).gmgn, tradingLinks(CA).dexscreener].join(' · '),
+      [
+        `<a href="${base.tweetUrl}">post</a>`,
+        `<a href="${tradingLinks(CA).axiom}">AXIOM</a>`,
+        `<a href="${tradingLinks(CA).gmgn}">GMGN</a>`,
+        `<a href="${tradingLinks(CA).dexscreener}">DEXS</a>`,
+      ].join(' · '),
     );
+  });
+
+  it('bolds the launch block only at or above the bundle filter the owner set', () => {
+    // 25 is DISCOVERY.bundleMaxPct — the share this product already hides a
+    // Discovery row for. Emphasis, never an adjective: the message still says
+    // nothing about whether that is good or bad.
+    expect(launchPingMessage({ ...base, launchBlockPct: 24 })).toContain(
+      'launch block: 24% of supply to 2 wallets',
+    );
+    expect(launchPingMessage({ ...base, launchBlockPct: 24 })).not.toContain(
+      '<b>launch block',
+    );
+    expect(launchPingMessage({ ...base, launchBlockPct: 25 })).toContain(
+      '<b>launch block: 25% of supply to 2 wallets</b>',
+    );
+    // The owner's live case, at this fixture's wallet count.
+    expect(launchPingMessage({ ...base, launchBlockPct: 71 })).toContain(
+      '<b>launch block: 71% of supply to 2 wallets</b>',
+    );
+  });
+
+  it('escapes a hostile symbol rather than letting it inject formatting', () => {
+    // Anyone can deploy a coin called `<b>`; unescaped it would either break the
+    // send with a 400 or style the rest of our message.
+    const message = launchPingMessage({ ...base, symbol: '<b>PUMP</b> & GO' });
+    expect(message).toContain('&lt;b&gt;PUMP&lt;/b&gt; &amp; GO');
+    expect(message).not.toContain('<b>PUMP</b>');
   });
 
   it('drops every unknown clause rather than printing a zero', () => {
@@ -475,8 +510,11 @@ describe('launchPingMessage', () => {
     expect(message).not.toContain('$0');
     expect(message).not.toContain('launch block');
     expect(message).not.toContain('mcap');
-    expect(message.split('\n')[1]).toBe('0xb279…260c');
+    expect(message.split('\n')[1]).toBe(`<code>${CA}</code>`);
     expect(message).toContain('launched 4m ago · PONS');
+    // No post link when there is no post — but the trading links still stand.
+    expect(message).not.toContain('>post<');
+    expect(message).toContain('>AXIOM<');
   });
 
   it('prints one wallet in the singular', () => {

@@ -865,6 +865,9 @@ async function deliverDeployerHit(
     tokenId: token?.id ?? null,
     alertType: 'deployer_launch',
     message,
+    // Round 27: deployerHitMessage emits Telegram HTML and escapes everything it
+    // interpolates, so the delivery path is asked to parse it.
+    parseMode: 'HTML',
   });
 
   // Auto-watch under the ADDER's slot, on the roads that produced a coin. A full

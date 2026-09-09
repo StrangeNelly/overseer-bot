@@ -1,5 +1,6 @@
 import { tradingLinks, type DeployerFiredVia } from '@groupie/shared';
 import { dexLabel } from './message.js';
+import { bold, code, esc, link } from '../bot/telegramHtml.js';
 import { fmtElapsed, fmtUsd, shortAddress } from '../poller/alertLogic.js';
 
 /**
@@ -14,12 +15,18 @@ import { fmtElapsed, fmtUsd, shortAddress } from '../poller/alertLogic.js';
  * a message that flattened them into "launched!" would promise a tradeable coin
  * on a path ('create') that proves only that bytecode exists somewhere.
  *
- * Plain text, no markdown — a symbol carrying `*` or `_` must not break the
- * send — and the same register as the launch ping (xwatch/message.ts): facts and
- * links, no adjectives, no advice. EVERY CLAUSE IS DROPPED WHEN ITS FIGURE IS
- * UNKNOWN, and on the 'create' path essentially all of them are: a raw
- * deployment has no symbol, no pool and no market, so the message has to read
- * correctly with nothing but the two addresses.
+ * TELEGRAM HTML (round 27), in the same register as the launch ping
+ * (xwatch/message.ts): facts and links, no adjectives, no advice. The addresses
+ * and the transaction hash are `<code>` so they can be tapped to copy — the
+ * whole point of the message is the string a reader pastes into a trading app —
+ * and the deep links are short words rather than three 90-character URLs.
+ * Everything interpolated goes through bot/telegramHtml.ts's escaping, which is
+ * what makes HTML safe where round 23 judged Markdown was not.
+ *
+ * EVERY CLAUSE IS DROPPED WHEN ITS FIGURE IS UNKNOWN, and on the 'create' path
+ * essentially all of them are: a raw deployment has no symbol, no pool and no
+ * market, so the message has to read correctly with nothing but the two
+ * addresses.
  */
 
 export interface DeployerHitMessageArgs {
@@ -97,7 +104,8 @@ function headline(args: DeployerHitMessageArgs): string {
   // WHICH of their watches just fired without going to look it up.
   const note = args.note?.trim();
   const named = note ? `${who} (${note})` : who;
-  return `${named} ${VIA_VERB[args.via]}.`;
+  // The VERB is what the reader must not misread, so it carries the emphasis.
+  return `${esc(named)} ${bold(VIA_VERB[args.via])}.`;
 }
 
 /**
@@ -110,14 +118,15 @@ export const UNREADABLE_ADDRESS_LINE =
 
 /** Symbol, name and the FULL address — the address is the point of the message. */
 function identityLine(args: DeployerHitMessageArgs): string {
-  if (args.address === null) return UNREADABLE_ADDRESS_LINE;
+  if (args.address === null) return esc(UNREADABLE_ADDRESS_LINE);
   const parts: string[] = [];
   const symbol = args.symbol?.trim();
   const name = args.name?.trim();
-  if (symbol) parts.push(symbol);
+  if (symbol) parts.push(bold(symbol));
   // The name only earns its place when it says something the symbol did not.
-  if (name && name.toLowerCase() !== symbol?.toLowerCase()) parts.push(name);
-  parts.push(args.address);
+  if (name && name.toLowerCase() !== symbol?.toLowerCase()) parts.push(esc(name));
+  // `<code>`: tap to copy, which is what a reader actually does with this line.
+  parts.push(code(args.address));
   return parts.join(' · ');
 }
 
@@ -135,15 +144,20 @@ function factsLine(args: DeployerHitMessageArgs): string | null {
   if (args.launchpad !== null && args.launchpad.trim() !== '') {
     parts.push(dexLabel(args.launchpad));
   }
-  return parts.length === 0 ? null : parts.join(' · ');
+  return parts.length === 0 ? null : esc(parts.join(' · '));
 }
 
-/** The three deep links, as URLs — plain text cannot make a word tappable. */
+/** `AXIOM · GMGN · DEXS` — three tappable words instead of three long URLs. */
 function linksLine(address: string): string {
   const links = tradingLinks(address);
-  return [links.axiom, links.gmgn, links.dexscreener].join(' · ');
+  return [
+    link('AXIOM', links.axiom),
+    link('GMGN', links.gmgn),
+    link('DEXS', links.dexscreener),
+  ].join(' · ');
 }
 
+/** Telegram HTML. The caller MUST send it with parse_mode 'HTML'. */
 export function deployerHitMessage(args: DeployerHitMessageArgs): string {
   const lines: string[] = [headline(args), identityLine(args)];
   const facts = factsLine(args);
@@ -152,13 +166,13 @@ export function deployerHitMessage(args: DeployerHitMessageArgs): string {
   // must already know this one is not a coin yet — and that the watch it came
   // from is still running, because the create road never retires one.
   if (args.via === 'create') {
-    lines.push(CREATE_CAVEAT);
-    lines.push(STILL_WATCHING);
+    lines.push(bold(CREATE_CAVEAT));
+    lines.push(esc(STILL_WATCHING));
   }
-  // The receipt. Printed whole, because half a transaction hash is worth
-  // nothing in an explorer.
+  // The receipt. Printed whole and tappable-to-copy, because half a transaction
+  // hash is worth nothing in an explorer.
   const tx = args.txHash?.trim();
-  if (tx) lines.push(`tx ${tx}`);
+  if (tx) lines.push(`tx ${code(tx)}`);
   // No address, no links — and no links on a CREATE either. Three trading deep
   // links under "not tradeable" is the one part of this message that would look
   // like it knows more than it does: a predicted CREATE address has no pool, so

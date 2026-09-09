@@ -60,6 +60,16 @@ export type GroupieEvent =
        * means a fresh message.
        */
       replyToMessageId?: number | null;
+      /**
+       * Round 27: send this message as Telegram HTML rather than plain text.
+       *
+       * OPT-IN PER ALERT, deliberately. The nuke/buy-opp/discovery messages are
+       * still built as plain text and carry unescaped coin symbols; switching
+       * the shared delivery path to HTML wholesale would break the first coin
+       * called `A&B`. An alert sets this only when its builder escaped
+       * everything it interpolated (see bot/telegramHtml.ts).
+       */
+      parseMode?: 'HTML';
     };
 
 const emitter = new EventEmitter();
